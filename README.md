@@ -69,7 +69,7 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
 2. **Clone and build**:
 
    ```sh
-   git clone https://github.com/azw413/glass.git
+   git clone https://github.com/azw413/Glass.git
    cd glass
    cargo build --release -p glass-cli
    cp target/release/glass <to somewhere on your PATH>
