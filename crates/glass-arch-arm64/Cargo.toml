@@ -1,0 +1,17 @@
+[package]
+name = "glass-arch-arm64"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+armv8-encode.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+gimli = { version = "0.31", default-features = false, features = ["read", "std"] }
+bitflags = "2"
+# Demangle C++ (Itanium), Rust, Swift and ObjC symbols.
+symbolic-demangle = { version = "12", default-features = false, features = ["cpp", "rust", "swift"] }
+symbolic-common = "12"

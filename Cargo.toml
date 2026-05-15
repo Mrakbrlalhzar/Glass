@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/glass-core",
+    "crates/glass-arch-arm64",
+    "crates/glass-arch-dex",
+    "crates/glass-mobile",
+    "crates/glass-db",
+    "crates/glass-ui",
+    "crates/glass-script",
+    "crates/glass-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+authors = ["Andrew Whaley <azwhaley@gmail.com>"]
+repository = "https://github.com/azw413/glass"
+
+[workspace.dependencies]
+# Disassembly + binary loading (handles ELF + Mach-O internally via `object`)
+armv8-encode = { git = "https://github.com/azw413/armv8-encode" }
+# Android: APK / DEX / smali. GPL-3.0-only — propagates to the whole workspace.
+smali = { git = "https://github.com/azw413/smali" }
+# UI framework. gpui is publish=false so git-dep only. Pinned to a Zed
+# commit known to compile cleanly — bump deliberately, not on a whim.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f", features = ["font-kit"] }
+
+# Errors / logging / serde used across crates
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrency
+parking_lot = "0.12"
+rayon = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Persistence (chosen later in M2; pinning crate now to lock the choice)
+redb = "2"
+
+# Scripting (M3)
+rquickjs = { version = "0.11", features = ["loader", "futures"] }
+
+# Internal
+glass-core = { path = "crates/glass-core" }
+glass-arch-arm64 = { path = "crates/glass-arch-arm64" }
+glass-arch-dex = { path = "crates/glass-arch-dex" }
+glass-mobile = { path = "crates/glass-mobile" }
+glass-ui = { path = "crates/glass-ui" }
+glass-db = { path = "crates/glass-db" }
+glass-script = { path = "crates/glass-script" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

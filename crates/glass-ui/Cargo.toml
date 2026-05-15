@@ -1,0 +1,23 @@
+[package]
+name = "glass-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+glass-core.workspace = true
+glass-db.workspace = true
+glass-arch-arm64.workspace = true
+glass-arch-dex.workspace = true
+glass-mobile.workspace = true
+armv8-encode.workspace = true
+smali.workspace = true
+blake3 = { version = "1", features = ["rayon"] }
+gpui.workspace = true
+gpui_platform.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"

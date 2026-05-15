@@ -1,0 +1,22 @@
+[package]
+name = "glass-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "glass"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+glass-arch-arm64.workspace = true
+armv8-encode.workspace = true
+glass-arch-dex.workspace = true
+glass-mobile.workspace = true
+glass-db.workspace = true
+glass-ui.workspace = true
