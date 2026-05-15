@@ -329,6 +329,26 @@ pub fn is_call(m: Aarch64Mnemonic) -> bool {
     matches!(m, Aarch64Mnemonic::Bl | Aarch64Mnemonic::Blr)
 }
 
+/// True for conditional direct branches (`B.cond`, `CBZ`, `CBNZ`,
+/// `TBZ`, `TBNZ`). Used by the listing's control-flow arrow renderer
+/// to pick between dotted (conditional) and solid (unconditional)
+/// lines.
+pub fn is_conditional_branch(m: Aarch64Mnemonic) -> bool {
+    use Aarch64Mnemonic::*;
+    matches!(
+        m,
+        Beq | Bne | Bcs | Bcc | Bmi | Bpl | Bvs | Bvc | Bhi | Bls
+        | Bge | Blt | Bgt | Ble
+        | Cbz | Cbnz | Tbz | Tbnz
+    )
+}
+
+/// True for unconditional direct branches (`B <imm>`). Excludes `Bl`
+/// (call) and indirect/register-based branches.
+pub fn is_unconditional_direct_branch(m: Aarch64Mnemonic) -> bool {
+    matches!(m, Aarch64Mnemonic::B)
+}
+
 /// Pull the absolute branch / ADRP target out of an instruction, if any.
 pub fn primary_address_operand(insn: &DecodedInstruction) -> Option<u64> {
     for op in &insn.operands {

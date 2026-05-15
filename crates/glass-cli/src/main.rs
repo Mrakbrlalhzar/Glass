@@ -186,17 +186,36 @@ fn dump_string_comments(
 
     let rows = glass_ui::build_listing_rows(&text, &symbols, &data, None);
     let mut found = 0usize;
+    let mut rows_with_arrows = 0usize;
+    let mut total_segments = 0usize;
+    let mut max_lane = 0u8;
+    let mut solid = 0usize;
+    let mut dotted = 0usize;
     for r in &rows {
-        if let glass_ui::ListingRow::Instruction { address, comment, mnemonic, .. } = r {
+        if let glass_ui::ListingRow::Instruction { address, comment, mnemonic, arrows, .. } = r {
             if comment.contains('"') {
                 found += 1;
                 if found <= limit {
                     println!("0x{:016x}  {}  {}", address, mnemonic, comment);
                 }
             }
+            if !arrows.is_empty() {
+                rows_with_arrows += 1;
+                total_segments += arrows.len();
+                for s in arrows.iter() {
+                    if s.lane > max_lane { max_lane = s.lane; }
+                    match s.style {
+                        glass_ui::ArrowStyle::Solid => solid += 1,
+                        glass_ui::ArrowStyle::Dotted => dotted += 1,
+                    }
+                }
+            }
         }
     }
     println!("# Total string comments: {found}");
+    println!(
+        "# Arrow rows: {rows_with_arrows}  segments: {total_segments}  max_lane: {max_lane}  solid_segs: {solid}  dotted_segs: {dotted}"
+    );
     Ok(())
 }
 

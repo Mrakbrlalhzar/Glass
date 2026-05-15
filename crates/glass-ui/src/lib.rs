@@ -612,9 +612,55 @@ pub enum ListingRow {
         operands: Arc<Vec<glass_arch_arm64::Chunk>>,
         /// Trailing `; ...` comment chunks. Empty if no annotation.
         comment: SharedString,
+        /// Control-flow arrow segments this row contributes to the
+        /// listing gutter. Empty for rows not touched by any in-
+        /// function branch arrow.
+        arrows: Arc<Vec<ArrowSegment>>,
     },
-    /// Horizontal rule drawn after a basic-block terminator.
-    BasicBlockSeparator,
+    /// Horizontal rule drawn after a basic-block terminator. Carries
+    /// any arrow segments that pass over it so the control-flow lines
+    /// remain continuous across BB boundaries.
+    BasicBlockSeparator {
+        arrows: Arc<Vec<ArrowSegment>>,
+    },
+}
+
+/// One arrow segment in a listing row's gutter. Each direct branch
+/// (B, B.cond, Cbz/Cbnz, Tbz/Tbnz) inside the current function gets
+/// assigned a lane; every row between source and target gets the
+/// segments needed to draw a continuous line from source → target →
+/// arrowhead in that lane.
+#[derive(Clone, Debug)]
+pub struct ArrowSegment {
+    /// 0 = column closest to the address text; larger = further left.
+    pub lane: u8,
+    /// Solid for unconditional `B`, dotted for conditionals.
+    pub style: ArrowStyle,
+    /// Where in this row's gutter cell the segment lives.
+    pub role: ArrowRole,
+    /// Down for forward branches (target is below source in row order);
+    /// Up for backward branches. Affects which side of the row the
+    /// horizontal stub points and which way the arrowhead faces.
+    pub direction: ArrowDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrowStyle { Solid, Dotted }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrowDirection { Down, Up }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrowRole {
+    /// Source row: horizontal stub from the address column to the lane,
+    /// plus a half-height vertical segment heading toward the target.
+    Source,
+    /// Target row: half-height vertical segment ending at the row
+    /// middle, plus a horizontal stub with an arrowhead pointing into
+    /// the address column.
+    Target,
+    /// Row strictly between source and target — full-height vertical.
+    Pass,
 }
 
 /// One precomputed row in a Hex tab's row list.
@@ -1036,6 +1082,7 @@ pub fn build_listing_rows(
             mnemonic: SharedString::from(mnemonic),
             operands: Arc::new(operands),
             comment,
+            arrows: Arc::new(Vec::new()),
         });
 
         // Update per-register page-base state.
@@ -1056,9 +1103,13 @@ pub fn build_listing_rows(
         }
 
         if terminates {
-            rows.push(ListingRow::BasicBlockSeparator);
+            rows.push(ListingRow::BasicBlockSeparator {
+                arrows: Arc::new(Vec::new()),
+            });
         }
     }
+
+    assign_arrows(&mut rows);
 
     if let Some(p) = progress {
         if let Ok(mut p) = p.lock() {
@@ -1067,6 +1118,167 @@ pub fn build_listing_rows(
         }
     }
     rows
+}
+
+/// After rows are built, scan every Instruction for a direct branch
+/// whose target lies inside the same function and attach `ArrowSegment`s
+/// to source / target / passing rows. Functions are delimited by
+/// `SymbolHeader` rows (between any two consecutive headers).
+///
+/// Arrows are assigned lanes by a tiny sweepline so simultaneously-
+/// active arrows don't visually merge. Lane 0 is closest to the
+/// address column; higher lanes sit further left.
+fn assign_arrows(rows: &mut [ListingRow]) {
+    use glass_arch_arm64::format as fmt;
+    // Build address → row-index lookup, and segment the rows into
+    // [start, end) function ranges using SymbolHeader positions.
+    let mut addr_to_row: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut header_rows: Vec<usize> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        match r {
+            ListingRow::SymbolHeader { .. } => header_rows.push(i),
+            ListingRow::Instruction { address, .. } => {
+                addr_to_row.insert(*address, i);
+            }
+            _ => {}
+        }
+    }
+    // Function ranges: [headers[k], headers[k+1]), and the prefix
+    // before the first header (if any) and the suffix after the last.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut prev = 0usize;
+    for &h in &header_rows {
+        if h > prev {
+            ranges.push((prev, h));
+        }
+        prev = h;
+    }
+    if prev < rows.len() {
+        ranges.push((prev, rows.len()));
+    }
+
+    // Collect candidate arrows per function.
+    #[derive(Clone)]
+    struct PendingArrow {
+        src_row: usize,
+        tgt_row: usize,
+        style: ArrowStyle,
+    }
+    let mut pending: Vec<PendingArrow> = Vec::new();
+    for (lo, hi) in &ranges {
+        for src_row in *lo..*hi {
+            let ListingRow::Instruction { address: _, bytes, .. } = &rows[src_row] else {
+                continue;
+            };
+            let word = u32::from_le_bytes(*bytes);
+            // Re-decode to avoid storing the mnemonic on every row.
+            // Branches are sparse — cost is negligible.
+            let addr_of_row = if let ListingRow::Instruction { address, .. } = &rows[src_row] {
+                *address
+            } else {
+                continue;
+            };
+            let Ok(insn) = armv8_encode::isa::aarch64::decode_instruction(addr_of_row, word)
+            else {
+                continue;
+            };
+            let style = if fmt::is_unconditional_direct_branch(insn.mnemonic) {
+                ArrowStyle::Solid
+            } else if fmt::is_conditional_branch(insn.mnemonic) {
+                ArrowStyle::Dotted
+            } else {
+                continue;
+            };
+            let Some(target) = fmt::primary_address_operand(&insn) else { continue };
+            let Some(&tgt_row) = addr_to_row.get(&target) else { continue };
+            // "Within the function" — both endpoints inside the same
+            // [lo, hi) range. Target row must be an Instruction (not a
+            // separator) in that span. Since we only inserted
+            // Instruction rows into addr_to_row, the second condition
+            // is automatic; we just check the range.
+            if tgt_row < *lo || tgt_row >= *hi {
+                continue;
+            }
+            if tgt_row == src_row {
+                continue;
+            }
+            pending.push(PendingArrow { src_row, tgt_row, style });
+        }
+    }
+
+    // Lane assignment: sweepline. Sort by source row, then assign each
+    // arrow the lowest lane whose previous occupant has already ended.
+    pending.sort_by_key(|a| a.src_row);
+    let mut lane_free_at: Vec<usize> = Vec::new(); // lane_free_at[lane] = first row index that lane is free
+    for a in &pending {
+        let (lo, hi) = if a.src_row <= a.tgt_row {
+            (a.src_row, a.tgt_row)
+        } else {
+            (a.tgt_row, a.src_row)
+        };
+        // Find a free lane.
+        let mut lane = None;
+        for (idx, free_at) in lane_free_at.iter_mut().enumerate() {
+            if *free_at <= lo {
+                lane = Some(idx);
+                *free_at = hi + 1;
+                break;
+            }
+        }
+        let lane = match lane {
+            Some(l) => l,
+            None => {
+                lane_free_at.push(hi + 1);
+                lane_free_at.len() - 1
+            }
+        };
+        // Drop arrows that would overflow the visible gutter rather
+        // than draw them clipped or off-screen.
+        if (lane as u8) >= ARROW_MAX_LANES {
+            continue;
+        }
+        let dir = if a.src_row < a.tgt_row {
+            ArrowDirection::Down
+        } else {
+            ArrowDirection::Up
+        };
+        // Emit segments. We mutate `rows[row]` directly — `arrows` is
+        // Arc<Vec<_>> so make_mut to clone-on-write into our owned copy.
+        let push_seg = |rows: &mut [ListingRow], row: usize, role: ArrowRole| {
+            let seg = ArrowSegment {
+                lane: lane as u8,
+                style: a.style,
+                role,
+                direction: dir,
+            };
+            match &mut rows[row] {
+                ListingRow::Instruction { arrows, .. } => {
+                    Arc::make_mut(arrows).push(seg);
+                }
+                ListingRow::BasicBlockSeparator { arrows } => {
+                    // BB separators only ever host pass-through
+                    // segments (the line continues over them). Force
+                    // the role so a row that happens to coincide with
+                    // a separator still draws a clean vertical.
+                    let mut pass = seg;
+                    pass.role = ArrowRole::Pass;
+                    Arc::make_mut(arrows).push(pass);
+                }
+                _ => {}
+            }
+        };
+        push_seg(rows, a.src_row, ArrowRole::Source);
+        push_seg(rows, a.tgt_row, ArrowRole::Target);
+        let (mid_lo, mid_hi) = if a.src_row < a.tgt_row {
+            (a.src_row + 1, a.tgt_row)
+        } else {
+            (a.tgt_row + 1, a.src_row)
+        };
+        for r in mid_lo..mid_hi {
+            push_seg(rows, r, ArrowRole::Pass);
+        }
+    }
 }
 
 /// Scroll a list so `target_row` sits roughly 10% down the viewport.
@@ -1571,7 +1783,8 @@ impl NativeSectionKind {
 // ---- Listing row palette + renderer ----------------------------------------
 
 const LISTING_ROW_HEIGHT: f32 = 22.;
-const LISTING_GUTTER_WIDTH: f32 = 32.;
+const BB_SEPARATOR_HEIGHT: f32 = 8.;
+const LISTING_GUTTER_WIDTH: f32 = 56.;
 // 16 hex chars + a couple of px of slack. Dropped the `0x` prefix —
 // the column is exclusively addresses, so the marker is redundant and
 // the saved width keeps the address from wrapping inside Courier.
@@ -2081,6 +2294,124 @@ struct RowCtx {
     selected_row: Option<usize>,
 }
 
+const ARROW_LANE_SPACING: f32 = 8.;
+/// Distance from the gutter's right edge (= address column) to lane 0.
+/// Needs to accommodate the arrowhead plus a visible horizontal turn,
+/// otherwise source stubs vanish and target heads kiss the address.
+const ARROW_LANE_RIGHT_MARGIN: f32 = 12.;
+const ARROW_THICKNESS: f32 = 2.;
+/// Arrowhead is a right-pointing wedge `ARROW_HEAD_LEN` long and
+/// `ARROW_HEAD_HALF * 2 + 1` tall, built from a stack of 1 px bars.
+const ARROW_HEAD_LEN: f32 = 6.;
+const ARROW_HEAD_HALF: f32 = 4.;
+/// Visible-lane cap. Gutter (56) minus right margin (12) divided by
+/// lane spacing (8) ≈ 5.5 — round down to 5 to leave a thin breathing
+/// margin on the left edge.
+const ARROW_MAX_LANES: u8 = 5;
+
+fn lane_x(lane: u8) -> f32 {
+    // lane 0 sits just inside the gutter's right edge; higher lanes
+    // step left in `ARROW_LANE_SPACING` increments.
+    LISTING_GUTTER_WIDTH - ARROW_LANE_RIGHT_MARGIN - (lane as f32) * ARROW_LANE_SPACING
+}
+
+/// Build the gutter cell for a listing row — a fixed-width container
+/// hosting absolute-positioned arrow segments. `row_h` lets BB
+/// separators (which are only ~8 px tall) draw a continuous vertical
+/// span instead of leaving a gap.
+fn render_arrow_gutter(arrows: &Arc<Vec<ArrowSegment>>, row_h: f32) -> gpui::Div {
+    let mut gutter = div()
+        .w(px(LISTING_GUTTER_WIDTH))
+        .h_full()
+        .flex_shrink_0()
+        .relative();
+    if arrows.is_empty() {
+        return gutter;
+    }
+    let mid = (row_h / 2.).floor();
+    // Match the encoded-bytes column colour so arrows stay low-key.
+    // Conditionals are rendered at reduced opacity since gpui doesn't
+    // expose stroke dashes for divs.
+    let colour_solid = gpui::rgba(0x676770ee);
+    let colour_dotted = gpui::rgba(0x67677088);
+    for seg in arrows.iter() {
+        let col = match seg.style {
+            ArrowStyle::Solid => colour_solid,
+            ArrowStyle::Dotted => colour_dotted,
+        };
+        let x = lane_x(seg.lane);
+        // Vertical segment for this row.
+        let (v_top, v_height) = match seg.role {
+            ArrowRole::Pass => (0., row_h),
+            ArrowRole::Source => match seg.direction {
+                ArrowDirection::Down => (mid, row_h - mid),
+                ArrowDirection::Up => (0., mid),
+            },
+            ArrowRole::Target => match seg.direction {
+                ArrowDirection::Down => (0., mid),
+                ArrowDirection::Up => (mid, row_h - mid),
+            },
+        };
+        gutter = gutter.child(
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(v_top))
+                .w(px(ARROW_THICKNESS))
+                .h(px(v_height))
+                .bg(col),
+        );
+        // Source / target rows also get a horizontal stub at the row
+        // middle, running from the lane right to the gutter's right
+        // edge. Targets stop short to leave room for an arrowhead.
+        if matches!(seg.role, ArrowRole::Source | ArrowRole::Target) {
+            let stub_end = match seg.role {
+                ArrowRole::Target => LISTING_GUTTER_WIDTH - ARROW_HEAD_LEN,
+                _ => LISTING_GUTTER_WIDTH,
+            };
+            gutter = gutter.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(mid - ARROW_THICKNESS / 2.))
+                    .w(px(stub_end - x))
+                    .h(px(ARROW_THICKNESS))
+                    .bg(col),
+            );
+            // Filled right-pointing triangle for the target arrowhead.
+            // gpui has no transforms, so the wedge is composed of
+            // stacked 1 px tall horizontal bars all sharing the same
+            // left edge (the base). Each bar's width shrinks linearly
+            // with |dy| so the right edge forms the diagonal faces
+            // converging at the tip. Tip lands at the gutter's right
+            // edge to visually touch the address column.
+            if matches!(seg.role, ArrowRole::Target) {
+                let base_x = LISTING_GUTTER_WIDTH - ARROW_HEAD_LEN;
+                let half = ARROW_HEAD_HALF as i32;
+                for dy in -half..=half {
+                    let abs_dy = dy.unsigned_abs() as f32;
+                    let bar_w =
+                        ARROW_HEAD_LEN * (1.0 - abs_dy / (half as f32));
+                    if bar_w <= 0. {
+                        continue;
+                    }
+                    let bar_top = mid + dy as f32 - 0.5;
+                    gutter = gutter.child(
+                        div()
+                            .absolute()
+                            .left(px(base_x))
+                            .top(px(bar_top))
+                            .w(px(bar_w))
+                            .h(px(1.))
+                            .bg(col),
+                    );
+                }
+            }
+        }
+    }
+    gutter
+}
+
 // ---- Hex row palette + renderer --------------------------------------------
 
 const HEX_ROW_HEIGHT: f32 = 22.;
@@ -2254,14 +2585,12 @@ fn render_listing_row_with(
             row_index,
             ctx,
         ),
-        ListingRow::BasicBlockSeparator => h_shift(
+        ListingRow::BasicBlockSeparator { arrows } => h_shift(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(
-                    div().w(px(LISTING_GUTTER_WIDTH)).h_full().flex_shrink_0(),
-                )
+                .child(render_arrow_gutter(arrows, BB_SEPARATOR_HEIGHT))
                 .child(
                     div()
                         .flex_1()
@@ -2269,7 +2598,7 @@ fn render_listing_row_with(
                         .bg(rgb(COLOUR_BB_SEPARATOR)),
                 ),
             h_offset,
-            8.,
+            BB_SEPARATOR_HEIGHT,
             row_index,
             ctx,
         ),
@@ -2279,6 +2608,7 @@ fn render_listing_row_with(
             mnemonic,
             operands,
             comment,
+            arrows,
         } => {
             let mut row_div = div()
                 .flex()
@@ -2286,8 +2616,8 @@ fn render_listing_row_with(
                 .items_center()
                 .text_base()
                 .font_family("Courier New")
-                // CF arrow gutter — reserved space, empty for now.
-                .child(div().w(px(LISTING_GUTTER_WIDTH)).h_full().flex_shrink_0())
+                // CF arrow gutter — vertical/horizontal lane segments.
+                .child(render_arrow_gutter(arrows, LISTING_ROW_HEIGHT))
                 // Address column. No `0x` prefix — the column is
                 // unambiguous and the saved width keeps Courier from
                 // wrapping the 16-hex string.
