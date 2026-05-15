@@ -474,6 +474,9 @@ fn load_inner(path: &std::path::Path, progress: &Arc<Mutex<Progress>>) -> Result
             .to_string();
         snapshot_ipa_with_progress(ipa, progress.clone(), display_label)
     } else {
+        // Standalone binary: ELF (`.so`, no-ext executables) or Mach-O
+        // (`.dylib`, no-ext executables — possibly fat). Arm64Binary
+        // transparently slices fat Mach-Os down to arm64/arm64e.
         let bin = Arm64Binary::open(path)?;
         snapshot_arm64(bin)
     }

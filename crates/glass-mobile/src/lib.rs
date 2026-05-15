@@ -150,21 +150,16 @@ fn open_ipa(path: &Path) -> Result<IpaBundle> {
     let info = InfoPlist::from_bytes(&info_bytes)
         .with_context(|| format!("parsing {info_path}"))?;
 
-    // Main executable. CFBundleExecutable names it; sits alongside Info.plist.
+    // Main executable. CFBundleExecutable names it; sits alongside
+    // Info.plist. Arm64Binary slices fat Mach-Os transparently.
     let main_executable = match info.executable.as_deref() {
         Some(exec_name) => {
             let exec_path = format!("{app_dir}/{exec_name}");
             match read_entry(&mut zip, &exec_path) {
-                Ok(bytes) => match thin_slice_macho(&bytes) {
-                    Ok(thin) => match Arm64Binary::from_bytes(PathBuf::from(&exec_path), thin) {
-                        Ok(bin) => Some(bin),
-                        Err(e) => {
-                            tracing::warn!("main executable parse failed: {e}");
-                            None
-                        }
-                    },
+                Ok(bytes) => match Arm64Binary::from_bytes(PathBuf::from(&exec_path), bytes) {
+                    Ok(bin) => Some(bin),
                     Err(e) => {
-                        tracing::warn!("main executable thin-slice failed: {e}");
+                        tracing::warn!("main executable parse failed: {e}");
                         None
                     }
                 },
@@ -213,11 +208,13 @@ fn open_ipa(path: &Path) -> Result<IpaBundle> {
         };
         match read_entry(&mut zip, &name) {
             Ok(bytes) => {
-                let thinned = thin_slice_macho(&bytes).unwrap_or(bytes);
+                // Keep the raw bytes — Arm64Binary slices fat headers
+                // on parse, and we want the original bytes for hashing
+                // / persistence stability.
                 frameworks.push(EmbeddedFramework {
                     name: display_name,
                     archive_path: name,
-                    bytes: thinned,
+                    bytes,
                 });
             }
             Err(e) => {

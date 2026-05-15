@@ -21,14 +21,16 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 
 ### What works
 
-**Bundle loading**
-- Open `.apk` and `.ipa` files; loader pipeline reports progress (Reading archive → Parsing DEX / Disassembling native → Building symbols).
+**File loading**
+- Open Android bundles (`.apk`, `.aab`), iOS bundles (`.ipa`), or any standalone ELF / Mach-O binary (`.so`, `.dylib`, raw executables) directly — Glass auto-detects the format.
+- Fat / universal Mach-O is handled transparently: `arm64e` is preferred, plain `arm64` is the fallback. Works on bundles and on standalone files alike (e.g. `glass gui /usr/lib/dyld`).
+- Loader pipeline reports progress (Reading archive → Parsing DEX / Disassembling native → Building symbols).
 - Per-artifact content-addressed IDs (blake3, rayon-parallel for large libs). Annotations follow the artifact, not the container — the same `libfoo.so` shipped in two APKs (or the same `libswiftCore.dylib` across two IPAs) shares analysis state.
 - AndroidManifest viewer (binary XML decoded via `smali`).
 - Info.plist viewer for iOS bundles — bundle id, executable name, version, min OS, and the rest of the plist rendered as colour-coded XML.
 
 **iOS — IPA / Mach-O**
-- Unzip the IPA, locate `Payload/*.app/`, parse `Info.plist`, and slice fat Mach-O down to the arm64 / arm64e slice automatically.
+- Unzip the IPA, locate `Payload/*.app/`, parse `Info.plist`, and pick the arm64 / arm64e slice from any fat binary inside.
 - Main executable and every `Frameworks/*.framework` + `*.dylib` is loaded as its own native artifact, with the same Overview + per-section disassembly views used for Android `.so` files.
 
 **Android — APK / DEX / native**
@@ -92,8 +94,11 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
    ./target/release/glass gui ~/path/to/app.apk
    ./target/release/glass gui ~/path/to/app.ipa
 
-   # Or on a single native binary (ELF .so or thin Mach-O)
+   # Or on a standalone binary — ELF .so, Mach-O .dylib, or raw
+   # executable. Fat / universal Mach-O is sliced automatically.
    ./target/release/glass gui ~/path/to/libfoo.so
+   ./target/release/glass gui ~/path/to/libBar.dylib
+   ./target/release/glass gui /usr/lib/dyld
 
    # Headless bundle inspect
    ./target/release/glass bundle ~/path/to/app.apk
