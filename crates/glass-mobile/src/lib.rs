@@ -1,18 +1,20 @@
 //! Mobile bundle loading: APK (Android) and IPA (iOS).
 //!
-//! Auto-detects by magic / extension and yields a `Bundle` with the
+//! Auto-detects by extension and yields a `Bundle` with the
 //! interesting pieces already extracted:
 //!   - APK -> classes*.dex (parsed) + native libs by ABI
-//!   - IPA -> main Mach-O executable + embedded frameworks
-//!
-//! M1 focus is APK. IPA is stubbed.
+//!   - IPA -> main Mach-O executable + Info.plist + embedded frameworks
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use glass_arch_arm64::Arm64Binary;
 use glass_arch_dex::DexBinary;
 use smali::android::zip::ApkFile;
+
+pub mod ipa;
+pub use ipa::{thin_slice_macho, InfoPlist};
 
 pub enum Bundle {
     Apk(ApkBundle),
@@ -33,8 +35,32 @@ pub struct ApkBundle {
 
 pub struct IpaBundle {
     pub path: PathBuf,
+    /// Path within the zip to the `.app` folder, e.g.
+    /// `Payload/MyApp.app`. Used as a prefix when looking up siblings.
+    pub app_dir: String,
+    /// Parsed `Info.plist` — bundle id, executable name, version, …
+    pub info: InfoPlist,
+    /// Main executable, sliced to arm64/arm64e if the file was fat.
+    /// `None` if the executable is missing or armv8-encode couldn't
+    /// parse it (e.g. the arm64 slice was absent on an older binary).
     pub main_executable: Option<Arm64Binary>,
-    // TODO: embedded Frameworks/*.framework, Info.plist, entitlements.
+    /// Embedded `Frameworks/*.framework` / `*.dylib` metadata.
+    /// We list them eagerly but don't disassemble them until the UI
+    /// asks — keeps initial open fast.
+    pub frameworks: Vec<EmbeddedFramework>,
+}
+
+/// Lightweight record for a framework or dylib bundled under
+/// `Payload/*.app/Frameworks/`. The binary bytes are kept on the
+/// IpaBundle's parent zip; we only carry the in-archive path here.
+pub struct EmbeddedFramework {
+    /// Display name, e.g. `Foo.framework` or `libBar.dylib`.
+    pub name: String,
+    /// Full path within the zip to the binary itself.
+    pub archive_path: String,
+    /// Raw bytes of the binary (already fat-sliced to arm64 if it was
+    /// a fat Mach-O). Empty if we couldn't read it.
+    pub bytes: Vec<u8>,
 }
 
 pub struct NativeLib {
@@ -105,10 +131,137 @@ fn open_apk(path: &Path) -> Result<ApkBundle> {
 }
 
 fn open_ipa(path: &Path) -> Result<IpaBundle> {
-    // TODO M3: unzip, find Payload/*.app/<exec>, thin-slice if fat, parse
-    // Info.plist for executable name + bundle id.
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("opening IPA {}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .with_context(|| format!("reading IPA zip {}", path.display()))?;
+
+    // Locate the .app folder under Payload/. There's always exactly one
+    // for App Store builds; enterprise/ad-hoc IPAs follow the same
+    // convention.
+    let app_dir = find_app_dir(&zip)
+        .ok_or_else(|| anyhow!("no Payload/<name>.app/ folder found in IPA"))?;
+    tracing::debug!("IPA app dir: {app_dir}");
+
+    // Read Info.plist.
+    let info_path = format!("{app_dir}/Info.plist");
+    let info_bytes = read_entry(&mut zip, &info_path)
+        .with_context(|| format!("reading {info_path}"))?;
+    let info = InfoPlist::from_bytes(&info_bytes)
+        .with_context(|| format!("parsing {info_path}"))?;
+
+    // Main executable. CFBundleExecutable names it; sits alongside Info.plist.
+    let main_executable = match info.executable.as_deref() {
+        Some(exec_name) => {
+            let exec_path = format!("{app_dir}/{exec_name}");
+            match read_entry(&mut zip, &exec_path) {
+                Ok(bytes) => match thin_slice_macho(&bytes) {
+                    Ok(thin) => match Arm64Binary::from_bytes(PathBuf::from(&exec_path), thin) {
+                        Ok(bin) => Some(bin),
+                        Err(e) => {
+                            tracing::warn!("main executable parse failed: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("main executable thin-slice failed: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("main executable missing ({exec_path}): {e}");
+                    None
+                }
+            }
+        }
+        None => {
+            tracing::warn!("Info.plist has no CFBundleExecutable");
+            None
+        }
+    };
+
+    // Embedded frameworks / dylibs. We read the bytes (and thin-slice)
+    // eagerly so the UI can list and later disassemble them, but we
+    // don't run armv8-encode on them yet.
+    let mut frameworks = Vec::new();
+    let names: Vec<String> = zip.file_names().map(|s| s.to_string()).collect();
+    let frameworks_prefix = format!("{app_dir}/Frameworks/");
+    for name in names {
+        if !name.starts_with(&frameworks_prefix) {
+            continue;
+        }
+        // .framework/<name> — pick the binary that matches the
+        // framework folder name. .dylib — pick the file itself.
+        let is_dylib = name.ends_with(".dylib");
+        let is_framework_bin = {
+            // e.g. "Frameworks/Foo.framework/Foo"
+            let rest = &name[frameworks_prefix.len()..];
+            match rest.split_once('/') {
+                Some((folder, file)) if folder.ends_with(".framework") => {
+                    let stem = folder.trim_end_matches(".framework");
+                    file == stem
+                }
+                _ => false,
+            }
+        };
+        if !is_dylib && !is_framework_bin {
+            continue;
+        }
+        let display_name = match name[frameworks_prefix.len()..].split_once('/') {
+            Some((folder, _)) => folder.to_string(),
+            None => name[frameworks_prefix.len()..].to_string(),
+        };
+        match read_entry(&mut zip, &name) {
+            Ok(bytes) => {
+                let thinned = thin_slice_macho(&bytes).unwrap_or(bytes);
+                frameworks.push(EmbeddedFramework {
+                    name: display_name,
+                    archive_path: name,
+                    bytes: thinned,
+                });
+            }
+            Err(e) => {
+                tracing::debug!("skipping {name}: {e}");
+            }
+        }
+    }
+
     Ok(IpaBundle {
         path: path.to_path_buf(),
-        main_executable: None,
+        app_dir,
+        info,
+        main_executable,
+        frameworks,
     })
+}
+
+fn find_app_dir<R: std::io::Read + std::io::Seek>(
+    zip: &zip::ZipArchive<R>,
+) -> Option<String> {
+    for name in zip.file_names() {
+        // Looking for `Payload/Foo.app/` — strip trailing slash if it's
+        // a directory entry, else find the prefix from a deeper file.
+        if let Some(rest) = name.strip_prefix("Payload/") {
+            if let Some(idx) = rest.find(".app/") {
+                let app_name = &rest[..idx + ".app".len()];
+                return Some(format!("Payload/{app_name}"));
+            }
+            if let Some(stripped) = rest.strip_suffix(".app/") {
+                return Some(format!("Payload/{stripped}.app"));
+            }
+        }
+    }
+    None
+}
+
+fn read_entry<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let mut file = zip.by_name(name)
+        .with_context(|| format!("zip entry {name} not found"))?;
+    let mut buf = Vec::with_capacity(file.size() as usize);
+    file.read_to_end(&mut buf)
+        .with_context(|| format!("reading zip entry {name}"))?;
+    Ok(buf)
 }

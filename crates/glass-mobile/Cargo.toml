@@ -9,6 +9,9 @@ license.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+serde = { workspace = true }
 smali.workspace = true
+zip.workspace = true
+plist.workspace = true
 glass-arch-arm64.workspace = true
 glass-arch-dex.workspace = true

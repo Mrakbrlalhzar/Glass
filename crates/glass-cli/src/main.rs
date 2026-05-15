@@ -309,7 +309,30 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
         }
         Bundle::Ipa(ipa) => {
             println!("IPA: {}", ipa.path.display());
-            println!("  main executable: {}", if ipa.main_executable.is_some() { "loaded" } else { "(stub)" });
+            println!("  app dir       : {}", ipa.app_dir);
+            println!("  bundle id     : {:?}", ipa.info.bundle_id);
+            println!("  display name  : {:?}", ipa.info.display_name);
+            println!("  executable    : {:?}", ipa.info.executable);
+            println!("  version       : {:?} (build {:?})", ipa.info.short_version, ipa.info.build_version);
+            println!("  min iOS       : {:?}", ipa.info.min_os);
+            println!("  platform      : {:?}", ipa.info.platform);
+            match &ipa.main_executable {
+                Some(bin) => {
+                    let sm = glass_arch_arm64::SymbolMap::build(&bin.container);
+                    println!("  main exec     : loaded ({} bytes, {} symbols)", bin.bytes.len(), sm.len());
+                    for sym in sm.iter().take(5) {
+                        println!("      {:016x}  {}", sym.address, sym.display_name);
+                    }
+                    if sm.len() > 5 {
+                        println!("      … ({} more)", sm.len() - 5);
+                    }
+                }
+                None => println!("  main exec     : (not loaded)"),
+            }
+            println!("  frameworks    : {}", ipa.frameworks.len());
+            for fw in &ipa.frameworks {
+                println!("      {}  ({} bytes)  {}", fw.name, fw.bytes.len(), fw.archive_path);
+            }
         }
     }
     Ok(())

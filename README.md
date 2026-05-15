@@ -17,25 +17,31 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 
 ## Status
 
-Glass is usable today as an Android reversing tool for AArch64 native libraries and DEX bytecode. iOS (IPA / Mach-O) and 32-bit ARM are on the roadmap.
+Glass is usable today for reversing both Android (APK / DEX / native `.so`) and iOS (IPA / Mach-O) apps targeting AArch64. 32-bit ARM is on the roadmap.
 
 ### What works
 
 **Bundle loading**
-- Open `.apk` files; loader pipeline reports progress (Reading archive → Parsing DEX → Building symbols).
-- Per-artifact content-addressed IDs (blake3, rayon-parallel for large libs). Annotations follow the artifact, not the container — the same `libfoo.so` shipped in two APKs shares analysis state.
+- Open `.apk` and `.ipa` files; loader pipeline reports progress (Reading archive → Parsing DEX / Disassembling native → Building symbols).
+- Per-artifact content-addressed IDs (blake3, rayon-parallel for large libs). Annotations follow the artifact, not the container — the same `libfoo.so` shipped in two APKs (or the same `libswiftCore.dylib` across two IPAs) shares analysis state.
 - AndroidManifest viewer (binary XML decoded via `smali`).
+- Info.plist viewer for iOS bundles — bundle id, executable name, version, min OS, and the rest of the plist rendered as colour-coded XML.
+
+**iOS — IPA / Mach-O**
+- Unzip the IPA, locate `Payload/*.app/`, parse `Info.plist`, and slice fat Mach-O down to the arm64 / arm64e slice automatically.
+- Main executable and every `Frameworks/*.framework` + `*.dylib` is loaded as its own native artifact, with the same Overview + per-section disassembly views used for Android `.so` files.
+
+**Android — APK / DEX / native**
+- Class tree across all DEX files in the APK.
+- Smali listing per class with syntax-aware tokenization (directives, types, method names, string literals, etc.).
+- Method cross-references resolve to the right class + line.
+- Native `.so` files under `lib/<abi>/` loaded per ABI; AArch64 gets disassembly, other ABIs route to the hex view.
 
 **AArch64 native (ELF + thin Mach-O)**
 - Linear-sweep disassembly with virtualized rendering — large libraries open in seconds, not minutes.
 - Symbol map merged from ELF symtab, dynsym, DWARF, `.eh_frame` FDEs, and synthesized `<name>@plt` entries. C++/Rust/Swift demangling via `symbolic-demangle`.
 - Branch operands rendered as clickable symbol references; `adrp` + `add`/`ldr` pairs resolved to data targets, including string literals shown inline as comments.
 - Per-section views (code sections get disassembly; data sections get a hex view).
-
-**DEX / smali**
-- Class tree across all DEX files in the APK.
-- Smali listing per class with syntax-aware tokenization (directives, types, method names, string literals, etc.).
-- Method cross-references resolve to the right class + line.
 
 **UI**
 - Tabbed right pane with overflow-safe dropdown, close buttons, click-to-activate.
@@ -46,8 +52,10 @@ Glass is usable today as an Android reversing tool for AArch64 native libraries 
 
 ### What's missing
 
-- iOS / IPA loading (loader is stubbed).
 - armv7 / x86 disassembly (non-AArch64 code sections currently route to the hex view).
+- iOS entitlements and `embedded.mobileprovision` parsing.
+- Swift metadata pass — Swift Mach-O symbol stubs are sparse without it.
+- ObjC `__objc_classlist` extraction.
 - Renaming, commenting, persistent annotations on instructions.
 - Cross-references DEX ↔ native via JNI signatures.
 - QuickJS scripting host.
@@ -80,15 +88,16 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
 3. **Run it**:
 
    ```sh
-   # Open the GUI on an APK
+   # Open the GUI on an Android APK or iOS IPA
    ./target/release/glass gui ~/path/to/app.apk
-   
-   # Or on a single native binary
+   ./target/release/glass gui ~/path/to/app.ipa
+
+   # Or on a single native binary (ELF .so or thin Mach-O)
    ./target/release/glass gui ~/path/to/libfoo.so
-   
+
    # Headless bundle inspect
    ./target/release/glass bundle ~/path/to/app.apk
-   
+
    # Inspect persisted state for a bundle
    ./target/release/glass db-dump ~/path/to/app.apk
    ```
@@ -111,7 +120,7 @@ Always use the release build — debug builds disassemble orders of magnitude sl
 ## Roadmap
 
 - **Next** — Persistent comments and renames on instructions; cross-references between DEX call sites and JNI-bound native symbols.
-- **iOS** — Thin-slice Mach-O for arm64e, Info.plist, embedded frameworks, ObjC `__objc_classlist`.
+- **iOS deeper** — Entitlements, `embedded.mobileprovision`, ObjC `__objc_classlist`, Swift metadata pass.
 - **armv7** — 32-bit ARM disassembly for older `.so` variants.
 - **Scripting** — QuickJS plugin host with a stable API for analysis passes.
-- **Advanced** — Swift metadata, signed APK rebuilding, control-flow graph view.
+- **Advanced** — Signed APK rebuilding, control-flow graph view.

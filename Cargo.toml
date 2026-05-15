@@ -47,6 +47,10 @@ clap = { version = "4", features = ["derive"] }
 # Persistence (chosen later in M2; pinning crate now to lock the choice)
 redb = "2"
 
+# IPA pipeline: unzip + binary plist parsing.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+plist = "1"
+
 # Scripting (M3)
 rquickjs = { version = "0.11", features = ["loader", "futures"] }
 

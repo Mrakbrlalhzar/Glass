@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use glass_arch_arm64::Arm64Binary;
-use glass_mobile::{ApkBundle, Bundle};
+use glass_mobile::{ApkBundle, Bundle, IpaBundle};
 use gpui::{
     App, Bounds, Context, FocusHandle, KeyBinding, ListAlignment, ListOffset, ListState, Pixels,
     Render, SharedString, Window, WindowBounds, WindowOptions, actions, div, list, prelude::*,
@@ -460,7 +460,19 @@ fn load_inner(path: &std::path::Path, progress: &Arc<Mutex<Progress>>) -> Result
             .to_string();
         snapshot_apk_with_progress(apk, progress.clone(), display_label)
     } else if matches!(ext, "ipa") {
-        anyhow::bail!("IPA bundles are not yet supported")
+        if let Ok(mut p) = progress.lock() {
+            p.phase = SharedString::from("Reading archive…");
+        }
+        let ipa = match glass_mobile::Bundle::open(path)? {
+            Bundle::Ipa(i) => i,
+            _ => anyhow::bail!("expected IPA"),
+        };
+        let display_label = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("bundle")
+            .to_string();
+        snapshot_ipa_with_progress(ipa, progress.clone(), display_label)
     } else {
         let bin = Arm64Binary::open(path)?;
         snapshot_arm64(bin)
@@ -2820,6 +2832,401 @@ fn snapshot_apk_with_progress(
     })
 }
 
+/// Render an `Info.plist` into the same depth-indented `ManifestRow`
+/// stream that the XML viewer consumes. We render in plist-XML style
+/// (`<key>`/`<string>` etc.) so it reads naturally to anyone used to
+/// staring at Info.plist files.
+pub fn flatten_info_plist(info: &glass_mobile::InfoPlist) -> Vec<ManifestRow> {
+    use glass_arch_arm64::{Chunk, ChunkKind};
+    let mk = |text: String, kind: ChunkKind| Chunk {
+        text,
+        kind,
+        target: None,
+        target_text: None,
+    };
+    let mut rows = Vec::new();
+    rows.push(ManifestRow {
+        depth: 0,
+        chunks: Arc::new(vec![
+            mk("<".into(), ChunkKind::Punct),
+            mk("plist".into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+        ]),
+    });
+    rows.push(ManifestRow {
+        depth: 1,
+        chunks: Arc::new(vec![
+            mk("<".into(), ChunkKind::Punct),
+            mk("dict".into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+        ]),
+    });
+    if let Some(v) = info.extras.as_ref() {
+        flatten_plist_value(v, 2, &mut rows);
+    }
+    rows.push(ManifestRow {
+        depth: 1,
+        chunks: Arc::new(vec![
+            mk("</".into(), ChunkKind::Punct),
+            mk("dict".into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+        ]),
+    });
+    rows.push(ManifestRow {
+        depth: 0,
+        chunks: Arc::new(vec![
+            mk("</".into(), ChunkKind::Punct),
+            mk("plist".into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+        ]),
+    });
+    rows
+}
+
+fn flatten_plist_value(
+    value: &plist::Value,
+    depth: usize,
+    rows: &mut Vec<ManifestRow>,
+) {
+    use glass_arch_arm64::{Chunk, ChunkKind};
+    let mk = |text: String, kind: ChunkKind| Chunk {
+        text,
+        kind,
+        target: None,
+        target_text: None,
+    };
+    let scalar = |tag: &str, raw: String, kind: ChunkKind| {
+        vec![
+            mk("<".into(), ChunkKind::Punct),
+            mk(tag.into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+            mk(raw, kind),
+            mk("</".into(), ChunkKind::Punct),
+            mk(tag.into(), ChunkKind::Directive),
+            mk(">".into(), ChunkKind::Punct),
+        ]
+    };
+
+    match value {
+        plist::Value::Dictionary(dict) => {
+            for (key, child) in dict.iter() {
+                rows.push(ManifestRow {
+                    depth,
+                    chunks: Arc::new(vec![
+                        mk("<".into(), ChunkKind::Punct),
+                        mk("key".into(), ChunkKind::Directive),
+                        mk(">".into(), ChunkKind::Punct),
+                        mk(key.to_string(), ChunkKind::String),
+                        mk("</".into(), ChunkKind::Punct),
+                        mk("key".into(), ChunkKind::Directive),
+                        mk(">".into(), ChunkKind::Punct),
+                    ]),
+                });
+                flatten_plist_value(child, depth, rows);
+            }
+        }
+        plist::Value::Array(arr) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(vec![
+                    mk("<".into(), ChunkKind::Punct),
+                    mk("array".into(), ChunkKind::Directive),
+                    mk(">".into(), ChunkKind::Punct),
+                ]),
+            });
+            for item in arr {
+                flatten_plist_value(item, depth + 1, rows);
+            }
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(vec![
+                    mk("</".into(), ChunkKind::Punct),
+                    mk("array".into(), ChunkKind::Directive),
+                    mk(">".into(), ChunkKind::Punct),
+                ]),
+            });
+        }
+        plist::Value::String(s) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar("string", s.clone(), ChunkKind::String)),
+            });
+        }
+        plist::Value::Integer(n) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar("integer", n.to_string(), ChunkKind::Modifier)),
+            });
+        }
+        plist::Value::Real(r) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar("real", r.to_string(), ChunkKind::Modifier)),
+            });
+        }
+        plist::Value::Boolean(b) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(vec![
+                    mk("<".into(), ChunkKind::Punct),
+                    mk(if *b { "true" } else { "false" }.into(), ChunkKind::Directive),
+                    mk("/>".into(), ChunkKind::Punct),
+                ]),
+            });
+        }
+        plist::Value::Date(d) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar("date", format!("{d:?}"), ChunkKind::String)),
+            });
+        }
+        plist::Value::Data(bytes) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar(
+                    "data",
+                    format!("[{} bytes]", bytes.len()),
+                    ChunkKind::Comment,
+                )),
+            });
+        }
+        plist::Value::Uid(uid) => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(scalar("uid", format!("{uid:?}"), ChunkKind::Modifier)),
+            });
+        }
+        _ => {
+            rows.push(ManifestRow {
+                depth,
+                chunks: Arc::new(vec![mk("<unknown/>".into(), ChunkKind::Comment)]),
+            });
+        }
+    }
+}
+
+/// IPA snapshot. Mirrors `snapshot_apk_with_progress` but for iOS:
+/// Info.plist + main executable + frameworks/dylibs.
+fn snapshot_ipa_with_progress(
+    ipa: IpaBundle,
+    progress: Arc<Mutex<Progress>>,
+    display_label: String,
+) -> Result<LoadedBundle> {
+    let mut artifact_ids: Vec<glass_db::ArtifactId> = Vec::new();
+    let mut native_sections: std::collections::HashMap<
+        glass_db::ArtifactId,
+        Vec<SectionInfo>,
+    > = std::collections::HashMap::new();
+    let mut symbol_maps: std::collections::HashMap<
+        glass_db::ArtifactId,
+        glass_arch_arm64::SymbolMap,
+    > = std::collections::HashMap::new();
+    let mut text_sections: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        TextSectionBytes,
+    > = std::collections::HashMap::new();
+    let mut data_sections: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        DataSectionBytes,
+    > = std::collections::HashMap::new();
+
+    let mut bodies: Vec<SharedString> = Vec::new();
+    let mut origins: Vec<SharedString> = Vec::new();
+    let mut labels: Vec<SharedString> = Vec::new();
+    let mut kinds: Vec<LeafKind> = Vec::new();
+    let mut roots: Vec<Node> = Vec::new();
+
+    // Info.plist leaf at the top — first thing a reverser checks for
+    // the bundle id, executable name, and entitlements clues.
+    let info_rows = flatten_info_plist(&ipa.info);
+    {
+        let leaf_id = LeafId(bodies.len());
+        bodies.push(SharedString::from(""));
+        origins.push(SharedString::from("plist"));
+        labels.push(SharedString::from("Info.plist"));
+        kinds.push(LeafKind::Manifest);
+        roots.push(Node::Leaf {
+            label: SharedString::from("Info.plist"),
+            leaf_id,
+        });
+    }
+
+    // Helper to register one native artifact (main exec or framework
+    // binary). Returns its ArtifactId and a Group node summarising it.
+    let mut register_artifact = |bytes: &[u8],
+                                 container: &armv8_encode::container::Container,
+                                 display_name: String,
+                                 origin: String|
+     -> (glass_db::ArtifactId, Node) {
+        let aid = glass_db::ArtifactId::from_bytes(bytes);
+        native_sections.insert(aid.clone(), build_section_info(container));
+        symbol_maps.insert(aid.clone(), glass_arch_arm64::SymbolMap::build(container));
+
+        let arch = container.architecture;
+        let aarch64 =
+            matches!(arch, armv8_encode::container::Architecture::Aarch64);
+        for sec in &container.sections {
+            let kind = NativeSectionKind::from_armv8(sec.kind);
+            let is_text =
+                matches!(sec.kind, armv8_encode::container::SectionKind::Text);
+            if aarch64 && is_text {
+                text_sections.insert(
+                    (aid.clone(), sec.name.clone()),
+                    TextSectionBytes {
+                        base: sec.address,
+                        bytes: Arc::new(sec.bytes.clone()),
+                    },
+                );
+            } else if !sec.bytes.is_empty() {
+                data_sections.insert(
+                    (aid.clone(), sec.name.clone()),
+                    DataSectionBytes {
+                        base: sec.address,
+                        bytes: Arc::new(sec.bytes.clone()),
+                        kind,
+                    },
+                );
+            }
+        }
+
+        let overview_id = LeafId(bodies.len());
+        bodies.push(SharedString::from(""));
+        origins.push(SharedString::from(origin.clone()));
+        labels.push(SharedString::from(format!("{display_name} (overview)")));
+        kinds.push(LeafKind::SectionMap { artifact: aid.clone() });
+
+        let mut children: Vec<Node> = vec![Node::Leaf {
+            label: SharedString::from("Overview"),
+            leaf_id: overview_id,
+        }];
+        for sec in &container.sections {
+            if !matches!(sec.kind, armv8_encode::container::SectionKind::Text) {
+                continue;
+            }
+            let leaf_id = LeafId(bodies.len());
+            bodies.push(SharedString::from(""));
+            origins.push(SharedString::from(origin.clone()));
+            labels.push(SharedString::from(sec.name.clone()));
+            if aarch64 {
+                kinds.push(LeafKind::Listing {
+                    artifact: aid.clone(),
+                    section: sec.name.clone(),
+                });
+            } else {
+                kinds.push(LeafKind::Hex {
+                    artifact: aid.clone(),
+                    section: sec.name.clone(),
+                });
+            }
+            children.push(Node::Leaf {
+                label: SharedString::from(sec.name.clone()),
+                leaf_id,
+            });
+        }
+        let group_label = if aarch64 {
+            display_name
+        } else {
+            format!("{display_name} ({})", arch_label(arch))
+        };
+        let node = Node::Group {
+            label: SharedString::from(group_label),
+            children,
+        };
+        (aid, node)
+    };
+
+    if let Ok(mut p) = progress.lock() {
+        p.phase = SharedString::from("Disassembling native…");
+        p.current = 0;
+        p.total = 1 + ipa.frameworks.len();
+    }
+    let mut progressed = 0usize;
+    let bump = |progress: &Arc<Mutex<Progress>>, progressed: &mut usize| {
+        *progressed += 1;
+        if let Ok(mut p) = progress.lock() {
+            p.current = *progressed;
+        }
+    };
+
+    // Main executable.
+    if let Some(bin) = &ipa.main_executable {
+        let display_name = ipa
+            .info
+            .executable
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+        let (aid, node) = register_artifact(
+            &bin.bytes,
+            &bin.container,
+            display_name,
+            "main".to_string(),
+        );
+        artifact_ids.push(aid);
+        roots.push(node);
+    }
+    bump(&progress, &mut progressed);
+
+    // Frameworks / dylibs. Each ships its own arm64-sliced bytes; parse
+    // and register them just like the main exec.
+    if !ipa.frameworks.is_empty() {
+        let mut fw_children: Vec<Node> = Vec::new();
+        for fw in &ipa.frameworks {
+            let bin = match Arm64Binary::from_bytes(
+                PathBuf::from(&fw.archive_path),
+                fw.bytes.clone(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!("skipping {}: {e}", fw.name);
+                    bump(&progress, &mut progressed);
+                    continue;
+                }
+            };
+            let (aid, node) = register_artifact(
+                &bin.bytes,
+                &bin.container,
+                fw.name.clone(),
+                "Frameworks".to_string(),
+            );
+            artifact_ids.push(aid);
+            fw_children.push(node);
+            bump(&progress, &mut progressed);
+        }
+        if !fw_children.is_empty() {
+            roots.push(Node::Group {
+                label: SharedString::from("Frameworks"),
+                children: fw_children,
+            });
+        }
+    }
+
+    let method_lines = build_method_line_index(&kinds, &bodies);
+
+    let mut bundle_hasher = blake3::Hasher::new();
+    for aid in &artifact_ids {
+        bundle_hasher.update(aid.as_bytes());
+    }
+    let bundle_id = glass_db::BundleId::from_raw(*bundle_hasher.finalize().as_bytes());
+
+    Ok(LoadedBundle {
+        title: format!("Glass — {}", ipa.path.display()),
+        tree: Arc::new(Tree { roots }),
+        bodies: Arc::new(bodies),
+        origins: Arc::new(origins),
+        labels: Arc::new(labels),
+        kinds: Arc::new(kinds),
+        bundle_id: Some(bundle_id),
+        artifact_ids: Arc::new(artifact_ids),
+        display_label,
+        native_sections: Arc::new(native_sections),
+        symbol_maps: Arc::new(symbol_maps),
+        text_sections: Arc::new(text_sections),
+        data_sections: Arc::new(data_sections),
+        method_lines: Arc::new(method_lines),
+        manifest_rows: Arc::new(info_rows),
+    })
+}
+
 /// Walk every SmaliClass leaf in the bundle, scan its body, record the
 /// line index of each `.method` declaration, and key it by the same
 /// `Class;->name(sig)ret` form a smali method-ref takes. Single linear
@@ -3640,7 +4047,10 @@ impl Shell {
                 .tab_leaf(index)
                 .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                 .unwrap_or_else(|| SharedString::from(class_jni.clone())),
-            TabKind::Manifest => SharedString::from("AndroidManifest.xml"),
+            TabKind::Manifest => self
+                .tab_leaf(index)
+                .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
+                .unwrap_or_else(|| SharedString::from("manifest")),
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -5670,19 +6080,20 @@ impl Shell {
 
         // ---- table -----------------------------------------------------
         let header = div()
-            .h(px(24.))
+            .h(px(28.))
+            .w_full()
             .flex_shrink_0()
             .flex()
             .flex_row()
             .items_center()
             .border_b_1()
             .border_color(border)
-            .text_xs()
+            .text_sm()
             .text_color(dim)
-            .child(div().w(px(180.)).pl_3().child("name"))
-            .child(div().w(px(140.)).child("address"))
-            .child(div().w(px(120.)).child("size"))
-            .child(div().child("kind"));
+            .child(div().w(px(220.)).pl_3().child("name"))
+            .child(div().w(px(160.)).child("address"))
+            .child(div().w(px(140.)).child("size"))
+            .child(div().flex_1().child("kind"));
 
         // Virtualized table body via `list()`. The hovered row gets an
         // accent background and the same row is scrolled into view
@@ -5713,7 +6124,8 @@ impl Shell {
                     !is_text && !matches!(sec.kind, NativeSectionKind::Bss);
                 let is_clickable = is_text || is_hex_eligible;
                 div()
-                    .h(px(22.))
+                    .h(px(26.))
+                    .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -5755,7 +6167,7 @@ impl Shell {
                     })
                     .child(
                         div()
-                            .w(px(180.))
+                            .w(px(220.))
                             .pl_3()
                             .whitespace_nowrap()
                             .overflow_hidden()
@@ -5763,18 +6175,19 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .w(px(140.))
+                            .w(px(160.))
                             .text_color(rgb(0xb0b0b0))
                             .child(format!("0x{:x}", sec.address)),
                     )
                     .child(
                         div()
-                            .w(px(120.))
+                            .w(px(140.))
                             .text_color(rgb(0xb0b0b0))
                             .child(format!("0x{:x}", sec.size)),
                     )
                     .child(
                         div()
+                            .flex_1()
                             .flex()
                             .flex_row()
                             .items_center()
@@ -5793,7 +6206,7 @@ impl Shell {
             .min_h_0()
             .flex()
             .flex_col()
-            .text_xs()
+            .text_sm()
             .text_color(fg)
             .font_family("Courier New")
             .child(header)
