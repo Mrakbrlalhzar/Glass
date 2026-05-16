@@ -1335,6 +1335,11 @@ struct CfgBlockSummary {
     /// Demangled symbol name when this address starts a named
     /// symbol — typically only the function-entry block.
     symbol: Option<SharedString>,
+    /// Map from call-site instruction address to the resolved
+    /// `(callee_entry_addr, display_name)`. Used by the renderer to
+    /// turn `bl 0x100005814` into `bl GameMain::init` with the name
+    /// clickable.
+    calls: std::collections::HashMap<u64, (u64, SharedString)>,
 }
 
 /// What a CFG block should render given the current pixel budget.
@@ -1381,10 +1386,21 @@ fn render_cfg_block_pill(
 /// Mid + high LOD share the same content: optional symbol header
 /// (yellow, wraps if long), address, first three full instructions
 /// (mnemonic + operands), and a "more instructions" footer.
+/// Render context for CFG block content. Carries the bits the
+/// renderer needs to wire call-target clicks back to the shell.
+struct CfgBlockRenderCtx {
+    shell: gpui::WeakEntity<Shell>,
+    artifact: glass_db::ArtifactId,
+    /// Block index — used by gpui's id() to keep stateful elements
+    /// (per-row click handlers) distinct across blocks.
+    block_idx: usize,
+}
+
 fn render_cfg_block_content(
     block: &glass_arch_arm64::BasicBlock,
     summary: &CfgBlockSummary,
     plan: CfgLayoutPlan,
+    ctx: Option<&CfgBlockRenderCtx>,
 ) -> gpui::AnyElement {
     let mut body = div()
         .flex()
@@ -1403,7 +1419,9 @@ fn render_cfg_block_content(
         );
     }
     let total = block.instructions.len();
-    let render_insn = |insn: &glass_arch_arm64::InstructionEntry| -> gpui::Div {
+    let render_insn = |insn: &glass_arch_arm64::InstructionEntry,
+                       insn_idx: usize|
+     -> gpui::AnyElement {
         let mut row = div().flex().flex_row().gap_2().whitespace_nowrap();
         row = row.child(
             div()
@@ -1415,17 +1433,64 @@ fn render_cfg_block_content(
                 .text_color(rgb(COLOUR_MNEMONIC))
                 .child(SharedString::from(insn.mnemonic.clone())),
         );
-        if !insn.operands.is_empty() {
+        // If this is a call whose target resolved to a known
+        // symbol, render the symbol name (highlighted) in place of
+        // the raw operand text and make it clickable to open the
+        // callee's CFG.
+        let call = summary.calls.get(&insn.address);
+        if let Some((entry_addr, name)) = call {
+            let entry_addr = *entry_addr;
+            let name = name.clone();
+            let label = SharedString::from(name);
+            let elem: gpui::AnyElement = match ctx {
+                Some(c) => {
+                    let weak = c.shell.clone();
+                    let artifact = c.artifact.clone();
+                    div()
+                        .id((
+                            "cfg-call",
+                            c.block_idx * 1024 + insn_idx,
+                        ))
+                        .text_color(rgb(COLOUR_ADDRESS_OP))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgba(0xffffff20)))
+                        .child(label)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            move |_ev, _w, cx: &mut App| {
+                                cx.stop_propagation();
+                                if let Some(entity) = weak.upgrade() {
+                                    let artifact = artifact.clone();
+                                    cx.update_entity(&entity, |shell, cx| {
+                                        shell.show_cfg(
+                                            artifact,
+                                            entry_addr,
+                                            SharedString::from(""),
+                                            cx,
+                                        );
+                                    });
+                                }
+                            },
+                        )
+                        .into_any_element()
+                }
+                None => div()
+                    .text_color(rgb(COLOUR_ADDRESS_OP))
+                    .child(label)
+                    .into_any_element(),
+            };
+            row = row.child(elem);
+        } else if !insn.operands.is_empty() {
             row = row.child(
                 div()
                     .text_color(rgb(COLOUR_REGISTER))
                     .child(SharedString::from(insn.operands.clone())),
             );
         }
-        row
+        row.into_any_element()
     };
-    for insn in block.instructions.iter().take(plan.preview) {
-        body = body.child(render_insn(insn));
+    for (i, insn) in block.instructions.iter().take(plan.preview).enumerate() {
+        body = body.child(render_insn(insn, i));
     }
     if plan.show_ellipsis {
         let skipped = total
@@ -1451,7 +1516,10 @@ fn render_cfg_block_content(
     }
     if plan.show_last {
         if let Some(last) = block.instructions.last() {
-            body = body.child(render_insn(last));
+            // Use a stable per-block "last" insn slot so the gpui
+            // id for the click handler stays unique. preview can be
+            // 0..total-1; use total as the slot for "last".
+            body = body.child(render_insn(last, total.saturating_sub(1)));
         }
     }
     if total == 0 {
@@ -7473,6 +7541,13 @@ impl Shell {
         let centre_x = bounds_origin_x + bounds_width / 2.;
         let centre_y = bounds_origin_y + bounds_height / 2.;
         let unit = CFG_WORLD_UNIT * zoom;
+        // First-paint guard: the canvas measure hook fires during
+        // this same paint, so the *current* viewport_bounds is
+        // still its default (0×0) on frame 1. Disable culling in
+        // that case so all blocks render — they may overflow off
+        // the canvas, but the next paint (triggered by the canvas
+        // hook's notify) has the real bounds and re-culls.
+        let bounds_unknown = bounds_width <= 0. || bounds_height <= 0.;
 
         let weak = cx.entity().downgrade();
 
@@ -7623,12 +7698,31 @@ impl Shell {
                 .and_then(|sm| sm.at(b.start_addr))
                 .map(|s| SharedString::from(s.display_name.clone()))
         };
-
+        // Resolve every call's target address to a function entry +
+        // display name via the artifact's symbol map. Direct calls
+        // (`bl <imm>`) get a resolved name; indirect calls (`blr`)
+        // have target_addr = None and are skipped.
+        let resolve_call =
+            |addr: u64| -> Option<(u64, SharedString)> {
+                let sym = symbols.and_then(|sm| sm.covering(addr))?;
+                Some((sym.address, SharedString::from(sym.display_name.clone())))
+            };
         let summaries: Vec<CfgBlockSummary> = cfg
             .blocks
             .iter()
-            .map(|b| CfgBlockSummary {
-                symbol: symbol_for_block(b),
+            .map(|b| {
+                let mut calls = std::collections::HashMap::new();
+                for c in &b.calls {
+                    if let Some(tgt) = c.target_addr {
+                        if let Some(resolved) = resolve_call(tgt) {
+                            calls.insert(c.site_addr, resolved);
+                        }
+                    }
+                }
+                CfgBlockSummary {
+                    symbol: symbol_for_block(b),
+                    calls,
+                }
             })
             .collect();
 
@@ -7649,13 +7743,17 @@ impl Shell {
                 longest = longest.max(name.len() + 1); // ":" suffix
             }
             let insn_line_len = |insn: &glass_arch_arm64::InstructionEntry| -> usize {
+                // When the operand is a call whose target resolved
+                // to a symbol, we render the symbol name in place of
+                // the raw operand text — size for that length so
+                // long callee names don't get truncated.
+                let operand_len = match summary.calls.get(&insn.address) {
+                    Some((_, name)) => name.len(),
+                    None => insn.operands.len(),
+                };
                 ADDR_COL
                     + insn.mnemonic.len()
-                    + if insn.operands.is_empty() {
-                        0
-                    } else {
-                        1 + insn.operands.len()
-                    }
+                    + if operand_len == 0 { 0 } else { 1 + operand_len }
             };
             let has_sym = summary.symbol.is_some();
             let n = block.instructions.len();
@@ -8053,10 +8151,11 @@ impl Shell {
             let tx = dst.x + dst.w * in_frac;
             let ty = dst.y;
 
-            let both_off = (sx < 0. && tx < 0.)
-                || (sx > bounds_w && tx > bounds_w)
-                || (sy < 0. && ty < 0.)
-                || (sy > bounds_h && ty > bounds_h);
+            let both_off = !bounds_unknown
+                && ((sx < 0. && tx < 0.)
+                    || (sx > bounds_w && tx > bounds_w)
+                    || (sy < 0. && ty < 0.)
+                    || (sy > bounds_h && ty > bounds_h));
             if both_off {
                 continue;
             }
@@ -8318,11 +8417,15 @@ impl Shell {
         // ---- Blocks ------------------------------------------------
         for (i, block) in cfg.blocks.iter().enumerate() {
             let rect = &rects[i];
-            // Cull off-viewport blocks.
-            let off_screen = rect.x + rect.w < 0.
-                || rect.x > bounds_width
-                || rect.y + rect.h < 0.
-                || rect.y > bounds_height;
+            // Cull off-viewport blocks. Skip culling on the first
+            // paint when the viewport bounds aren't known yet —
+            // otherwise only the block at the origin would render
+            // and the user would have to pan to trigger a refresh.
+            let off_screen = !bounds_unknown
+                && (rect.x + rect.w < 0.
+                    || rect.x > bounds_width
+                    || rect.y + rect.h < 0.
+                    || rect.y > bounds_height);
             if off_screen {
                 continue;
             }
@@ -8331,7 +8434,12 @@ impl Shell {
             let block_el = if rect.w < LOD_PILL_MAX {
                 render_cfg_block_pill(block, summary, dim)
             } else {
-                render_cfg_block_content(block, summary, plans[i])
+                let block_ctx = CfgBlockRenderCtx {
+                    shell: weak.clone(),
+                    artifact: artifact.clone(),
+                    block_idx: i,
+                };
+                render_cfg_block_content(block, summary, plans[i], Some(&block_ctx))
             };
             let click_weak = weak.clone();
             let click_artifact = artifact.clone();
@@ -8507,14 +8615,6 @@ impl Shell {
             ShellState::Ready(b) => b,
             _ => return,
         };
-        // We need both the artifact's container and its SymbolMap.
-        // We have the SymbolMap on the bundle, but the container
-        // isn't kept around — we only kept the per-section bytes.
-        // For v1 we cheat and rebuild a transient container view
-        // from the existing pieces: we use the `text_sections` and
-        // SymbolMap directly via a small standalone CFG builder.
-        // (Refactor target — for now, fall back to None if we
-        // don't have enough info.)
         let Some(symbols) = bundle.symbol_maps.get(artifact) else { return };
         let cfg = build_cfg_from_text_sections(
             &bundle.text_sections,
