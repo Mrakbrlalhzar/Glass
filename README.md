@@ -1,4 +1,5 @@
 # Glass
+*as in transparent and smooth*
 
 A fast, native, **mobile-app first** interactive disassembler. Spiritual successor to IDA Pro for the Android / iOS reverse engineering workflow, built around:
 

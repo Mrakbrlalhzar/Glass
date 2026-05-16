@@ -345,6 +345,24 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
                     if sm.len() > 5 {
                         println!("      … ({} more)", sm.len() - 5);
                     }
+                    let stub_examples: Vec<&glass_arch_arm64::Symbol> = sm
+                        .iter()
+                        .filter(|s| s.display_name.ends_with("@stubs"))
+                        .take(5)
+                        .collect();
+                    let total_stubs = sm
+                        .iter()
+                        .filter(|s| s.display_name.ends_with("@stubs"))
+                        .count();
+                    if !stub_examples.is_empty() {
+                        println!("      sample @stubs ({} total):", total_stubs);
+                        for sym in &stub_examples {
+                            println!(
+                                "        {:016x}  size={:#x}  {}",
+                                sym.address, sym.size, sym.display_name,
+                            );
+                        }
+                    }
                 }
                 None => println!("  main exec     : (not loaded)"),
             }

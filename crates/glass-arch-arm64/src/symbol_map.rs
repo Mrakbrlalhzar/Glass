@@ -166,6 +166,38 @@ impl SymbolMap {
             }
         }
 
+        // (5) Synthetic `<name>@stubs` entries for every Mach-O
+        // `__stubs` slot — the Mach-O equivalent of ELF's PLT.
+        // armv8-encode pairs each entry with the symbol-table entry
+        // it binds to via the indirect symbol table.
+        if let Some(image) = container.macho_image.as_ref() {
+            // arm64 stub entries are 12 bytes (`adrp`/`ldr`/`br`).
+            // The actual stride lives on the section's `reserved2`
+            // field, but armv8-encode has already used that to
+            // compute the per-entry address; here we just want a
+            // sensible synthetic size for `covering` lookups.
+            const AARCH64_STUB_SLOT: u64 = 12;
+            for (sym_id, stub_addr) in &image.stubs {
+                let Some(dyn_sym) = container.symbols.get(sym_id.0) else {
+                    continue;
+                };
+                let imported = &dyn_sym.name;
+                let raw = format!("{imported}@stubs");
+                let display_name = format!("{}@stubs", demangle(imported));
+                insert_or_merge(
+                    &mut by_address,
+                    Symbol {
+                        name: raw,
+                        display_name,
+                        address: *stub_addr,
+                        size: AARCH64_STUB_SLOT,
+                        kind: SymbolKind::Function,
+                        sources: SymbolSources::SYMTAB,
+                    },
+                );
+            }
+        }
+
         SymbolMap { by_address }
     }
 

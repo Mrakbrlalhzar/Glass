@@ -6348,7 +6348,14 @@ impl Shell {
                     move |this, _ev: &gpui::MouseDownEvent, _window, cx| {
                         let Some(idx) = this.hovered_section else { return };
                         let Some(sec) = sections.get(idx) else { return };
-                        let addr = this.bar_cursor_addr.unwrap_or(sec.address);
+                        // Open at the section start, not at the per-pixel
+                        // cursor address. The strip is too compressed for
+                        // sub-section addressing to be meaningful — a
+                        // 1 px hover on a 5 KiB section spans hundreds
+                        // of bytes — and opening at the end of a section
+                        // looks like the listing is "stuck at the end"
+                        // of the disassembly.
+                        let addr = sec.address;
                         match sec.kind {
                             NativeSectionKind::Text => {
                                 this.open_listing_in_new_tab(
