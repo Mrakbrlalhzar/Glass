@@ -55,6 +55,13 @@ enum Cmd {
     PltProbe { path: PathBuf },
     /// Benchmark how long ArtifactId hashing of a file takes.
     HashBench { path: PathBuf },
+    /// Build a CFG for the function at `entry_hex` (e.g. 0x100051e8)
+    /// and print block / edge counts plus the layout summary.
+    Cfg {
+        path: PathBuf,
+        /// Function entry address in hex (with or without 0x prefix).
+        entry_hex: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -75,6 +82,47 @@ fn main() -> Result<()> {
             dump_string_comments(path, section, limit)
         }
         Cmd::PltProbe { path } => plt_probe(path),
+        Cmd::Cfg { path, entry_hex } => {
+            let entry = u64::from_str_radix(entry_hex.trim_start_matches("0x"), 16)?;
+            let bin = glass_arch_arm64::Arm64Binary::open(&path)?;
+            let symbols = glass_arch_arm64::SymbolMap::build(&bin.container);
+            let Some(cfg) =
+                glass_arch_arm64::build_function_cfg(&bin.container, &symbols, entry)
+            else {
+                anyhow::bail!("no function at 0x{entry:x}");
+            };
+            println!(
+                "function @ 0x{:x}-0x{:x}  ({} blocks, {} edges)",
+                cfg.entry_addr,
+                cfg.end_addr,
+                cfg.blocks.len(),
+                cfg.edges.len(),
+            );
+            let max_rank = cfg.layout.iter().map(|l| l.rank).max().unwrap_or(0);
+            let total_calls: usize = cfg.blocks.iter().map(|b| b.calls.len()).sum();
+            let exits = cfg.blocks.iter().filter(|b| b.exits_function).count();
+            println!(
+                "max_rank={max_rank}  total_calls={total_calls}  exit_blocks={exits}",
+            );
+            for (block, layout) in cfg.blocks.iter().zip(cfg.layout.iter()).take(10) {
+                println!(
+                    "  block {:>2} rank={} pos=({:.1},{:.1}) addr=0x{:x}..0x{:x} ({} insns, {} calls){}",
+                    block.id.0,
+                    layout.rank,
+                    layout.x,
+                    layout.y,
+                    block.start_addr,
+                    block.end_addr,
+                    block.instructions.len(),
+                    block.calls.len(),
+                    if block.exits_function { " EXIT" } else { "" },
+                );
+            }
+            if cfg.blocks.len() > 10 {
+                println!("  … ({} more)", cfg.blocks.len() - 10);
+            }
+            Ok(())
+        }
         Cmd::HashBench { path } => {
             use std::time::Instant;
             let t = Instant::now();

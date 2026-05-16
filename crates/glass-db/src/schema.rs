@@ -91,6 +91,19 @@ pub enum TabState {
     },
     /// Android manifest viewer (the host APK's, not an artifact).
     Manifest,
+    /// Control-flow graph for a function. `entry_addr` is the
+    /// function's entry-point virtual address; the runtime resolves
+    /// it against the artifact's symbol map.
+    Cfg {
+        artifact: ArtifactId,
+        entry_addr: u64,
+        /// World-space pan (in CFG units). Persisted so reopening a
+        /// tab restores the viewport.
+        pan_x: f32,
+        pan_y: f32,
+        /// Camera zoom (1.0 = native pixel scale).
+        zoom: f32,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

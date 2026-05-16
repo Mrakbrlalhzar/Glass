@@ -8,9 +8,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use armv8_encode::container::Container;
 
+pub mod cfg;
 pub mod format;
 pub mod macho_fat;
 pub mod symbol_map;
+pub use cfg::{
+    build_function_cfg, build_function_cfg_from_bytes, BasicBlock, BlockEdge, BlockEdgeKind,
+    BlockId, BlockLayout, CallSite, FunctionCfg, InstructionEntry,
+};
 pub use format::{Chunk, ChunkKind};
 pub use macho_fat::thin_slice_macho;
 pub use symbol_map::{Symbol, SymbolKind, SymbolMap, SymbolSources};
