@@ -524,21 +524,42 @@ fn compute_layered_layout(
     // successor in discovery order. Each block can therefore be a
     // primary-child of at most one parent.
     let mut primary_child: Vec<Option<BlockId>> = vec![None; blocks.len()];
+    // Same-rank edges aren't used for primary-child / rank-ordering
+    // — but we still want them to *attract* their endpoints in the
+    // relaxation phase, so jump-table-style functions (where all
+    // cases sit at the same rank) get some structure rather than
+    // being spread out as a uniform row.
+    let mut same_rank_neighbours: Vec<Vec<BlockId>> = vec![Vec::new(); blocks.len()];
     for e in edges {
         let r_from = rank[e.from.0].unwrap_or(0);
         let r_to = rank[e.to.0].unwrap_or(0);
         if r_to > r_from {
             preds[e.to.0].push(e.from);
             succs[e.from.0].push(e.to);
+            // Primary child = the linearly-sequential continuation
+            // of this block. For a conditional branch (`B.cond`,
+            // `CBZ`, etc.) that's the *not-taken* edge — control
+            // falls through to the next address. For unconditional
+            // branches and plain fall-throughs the only edge IS the
+            // primary one. The taken side of a conditional is the
+            // off-spine branch and gets the elbow.
             let is_primary = matches!(
                 e.kind,
-                BlockEdgeKind::Unconditional | BlockEdgeKind::Fallthrough
+                BlockEdgeKind::Unconditional
+                    | BlockEdgeKind::Fallthrough
+                    | BlockEdgeKind::NotTakenConditional
             );
-            if primary_child[e.from.0].is_none() || is_primary {
-                if is_primary || matches!(primary_child[e.from.0], None) {
-                    primary_child[e.from.0] = Some(e.to);
-                }
+            if is_primary {
+                // A primary edge always wins, even if we previously
+                // marked a non-primary edge as the placeholder.
+                primary_child[e.from.0] = Some(e.to);
+            } else if primary_child[e.from.0].is_none() {
+                primary_child[e.from.0] = Some(e.to);
             }
+        } else if r_to == r_from && e.to.0 != e.from.0 {
+            // Same-rank attraction goes both ways.
+            same_rank_neighbours[e.to.0].push(e.from);
+            same_rank_neighbours[e.from.0].push(e.to);
         }
     }
     // A block is a "primary child" of its parent when it's the
@@ -729,6 +750,103 @@ fn compute_layered_layout(
             for (x, BlockId(id)) in prefs {
                 block_x[id] = x + shift;
             }
+        }
+    }
+
+    // ---- Gauss-Seidel relaxation -----------------------------------
+    //
+    // The top-down / bottom-up passes give each block a sensible x
+    // *given its current parent's / child's x*, but neither pass
+    // sees the whole graph at once. Relaxation drives toward a
+    // global minimum of `Σ (a.x - b.x)²` over every cross-rank edge
+    // — the natural energy function for elbow length. Each iteration
+    // sets every block's x to the weighted mean of its neighbours,
+    // then enforces non-overlap per rank.
+    //
+    // Primary edges (the chosen straight-line flow from each fork)
+    // get a higher weight so they don't get pulled away by ordinary
+    // edges. Convergence is fast in practice — small functions
+    // settle in 4-5 passes, large ones in 10-15.
+    const PRIMARY_WEIGHT: f32 = 4.0;
+    const NORMAL_WEIGHT: f32 = 1.0;
+    for _iter in 0..16 {
+        let mut max_move = 0.0_f32;
+        // Compute new x's into a buffer then commit — so within a
+        // single iteration each block sees the previous iteration's
+        // positions for all neighbours (the standard Jacobi step;
+        // Gauss-Seidel would use the freshest in-iteration values,
+        // but Jacobi is more stable for this).
+        let mut new_x = block_x.clone();
+        for (b_idx, _block) in blocks.iter().enumerate() {
+            let bid = BlockId(b_idx);
+            let mut sum = 0.0_f32;
+            let mut weight = 0.0_f32;
+            // Predecessors.
+            for &p in &preds[b_idx] {
+                let w = if is_primary_of[b_idx] == Some(p) {
+                    PRIMARY_WEIGHT
+                } else {
+                    NORMAL_WEIGHT
+                };
+                sum += w * block_x[p.0];
+                weight += w;
+            }
+            // Successors.
+            for &s in &succs[b_idx] {
+                let w = if primary_child[b_idx] == Some(s) {
+                    PRIMARY_WEIGHT
+                } else {
+                    NORMAL_WEIGHT
+                };
+                sum += w * block_x[s.0];
+                weight += w;
+            }
+            // Same-rank neighbours pull this block toward the
+            // x of its peer (one block apart in the same rank
+            // ideally sits next to the other along the natural
+            // flow). Light weight so it can't override real
+            // parent/child alignment.
+            const SAME_RANK_WEIGHT: f32 = 0.5;
+            for &n in &same_rank_neighbours[b_idx] {
+                sum += SAME_RANK_WEIGHT * block_x[n.0];
+                weight += SAME_RANK_WEIGHT;
+            }
+            if weight > 0. {
+                new_x[b_idx] = sum / weight;
+            }
+            let _ = bid;
+        }
+        // Enforce non-overlap per rank *preserving the existing
+        // left-to-right ordering*. We do NOT sort by `new_x` here:
+        // doing that would let the relaxation re-order blocks
+        // within a rank, which causes edges that used to be parallel
+        // to cross. The barycenter sweeps already chose the
+        // crossing-minimising order; the relaxation only refines
+        // positions, never permutes them.
+        for ids in by_rank.values() {
+            let mut ordered: Vec<(f32, BlockId)> =
+                ids.iter().map(|&b| (new_x[b.0], b)).collect();
+            // `ids` is already in the barycenter-chosen left-to-
+            // right order, so iterate it directly.
+            for i in 1..ordered.len() {
+                if ordered[i].0 < ordered[i - 1].0 + MIN_GAP {
+                    ordered[i].0 = ordered[i - 1].0 + MIN_GAP;
+                }
+            }
+            // Recentre the rank on x = 0.
+            let lo = ordered.first().map(|(x, _)| *x).unwrap_or(0.);
+            let hi = ordered.last().map(|(x, _)| *x).unwrap_or(0.);
+            let shift = -(lo + hi) / 2.;
+            for (x, BlockId(id)) in ordered {
+                let final_x = x + shift;
+                max_move = max_move.max((final_x - block_x[id]).abs());
+                new_x[id] = final_x;
+            }
+        }
+        block_x = new_x;
+        // Early exit when the iteration moved nothing meaningful.
+        if max_move < 0.01 {
+            break;
         }
     }
 

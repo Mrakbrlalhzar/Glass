@@ -1,6 +1,10 @@
 ## Glass Roadmap
 
-* Control flow graph view of disassembly
+* ~~Control flow graph view of disassembly~~
+* Control flow graph for DEX methods
+* CLI commands defaulting to GUI (no ‘gui’ command needed)
+* Closing the last window terminates the command line app
+* glass menu should be ‘Glass’
 * References search, right click ‘find references’
 * Goto address function - top bar (straight to section)
 * Overview bar cursor should go to nearest function
