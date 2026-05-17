@@ -9,7 +9,7 @@
 * ~~Open 2nd file, offset x,y position of 2nd window~~
 * ~~In disassembly view, don’t allow cursor to select basic block rule line~~
 * References search, right click in any view ‘find references’ i.e. calls to current method / function or reference to data location (hex view).
-* Goto address function - top bar (straight to section) - validates address as typing (red -> white) and then jump to appropriate view
+* ~~Goto address function - top bar (straight to section) - validates address as typing (red -> white) and then jump to appropriate view~~
 * ~~Overview bar cursor should go to nearest function start for disassembly views rather than actual address (might not be byte aligned otherwise)~~
 * Package as a MacOS app in a CI job (github action)
 * Extend search to search for instruction sequences with operands fuzzy e.g. adrp <reg>; add <reg>, <reg>, <anything>

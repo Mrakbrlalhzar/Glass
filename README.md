@@ -57,6 +57,7 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 - Tabbed right pane with overflow-safe dropdown, close buttons, click-to-activate.
 - Horizontal + vertical scrollbars on listing, hex, and manifest views.
 - Cmd-F symbol palette with fuzzy filter.
+- Top-bar **Goto address** field: type a hex address, Enter jumps to the listing (text section) or hex view (data section). Invalid addresses turn the input red.
 - Cmd-O open, Cmd-N new window. macOS app menu with **File → Open Recent** (last 10 bundles).
 - Window bounds + open tabs + tree expansion state persisted per-bundle in `redb`; relaunching reopens where you left off.
 

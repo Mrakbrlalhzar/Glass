@@ -895,6 +895,10 @@ pub(crate) struct Shell {
     palette_focused: bool,
     /// Right-click context menu state. `None` when no menu is open.
     context_menu: Option<ContextMenuState>,
+    /// Goto-address bar state. `goto_focused` swallows keystrokes
+    /// into `goto_query`; Enter parses + navigates, ESC closes.
+    pub(crate) goto_focused: bool,
+    pub(crate) goto_query: String,
 }
 
 
@@ -918,7 +922,57 @@ impl Render for Shell {
             ShellState::Empty => "Glass — no bundle loaded".to_string(),
         };
 
-        let header = div()
+        // Pre-build the goto-address widget (only when a bundle is
+        // loaded). Returns None otherwise so the header skips it.
+        let goto_widget = if matches!(self.state, ShellState::Ready(_)) {
+            let goto_focused = self.goto_focused;
+            let goto_query = self.goto_query.clone();
+            let parsed_ok =
+                self.goto_parse().is_some() || goto_query.trim().is_empty();
+            let border_col = if !parsed_ok {
+                rgb(0xff5050)
+            } else if goto_focused {
+                rgb(0x4f7cff)
+            } else {
+                border
+            };
+            let display = if goto_query.is_empty() {
+                SharedString::from("Goto 0x…")
+            } else if goto_focused {
+                SharedString::from(format!("{}|", goto_query))
+            } else {
+                SharedString::from(goto_query.clone())
+            };
+            let display_colour = if goto_query.is_empty() { dim } else { fg };
+            Some(
+                div()
+                    .id("goto-bar")
+                    .w(px(180.))
+                    .h(px(24.))
+                    .px_3()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(display_colour)
+                    .font_family("Courier New")
+                    .border_1()
+                    .border_color(border_col)
+                    .cursor_text()
+                    .child(display)
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.goto_open(cx);
+                        }),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let mut header = div()
             .h(px(28.))
             .flex_shrink_0()
             .px_3()
@@ -931,7 +985,11 @@ impl Render for Shell {
             .bg(panel)
             .text_sm()
             .text_color(dim)
-            .child(div().flex_1().child(header_text))
+            .child(div().flex_1().child(header_text));
+        if let Some(w) = goto_widget {
+            header = header.child(w);
+        }
+        let header = header
             // Search affordance — clicking is equivalent to ⌘F.
             .child(
                 div()
@@ -1041,13 +1099,37 @@ impl Render for Shell {
                 }
             }))
             // Capture printable keystrokes for the palette query when it's
-            // open. gpui doesn't have a turnkey text input for arbitrary
-            // unicode in this revision — this is enough for a search box.
+            // open, or for the goto-address bar when it's focused. gpui
+            // doesn't have a turnkey text input for arbitrary unicode in
+            // this revision — this is enough for our two text fields.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                let k = &ev.keystroke;
+                if this.goto_focused {
+                    if k.key == "escape" {
+                        this.goto_close(cx);
+                        return;
+                    }
+                    if k.key == "enter" {
+                        this.goto_activate(cx);
+                        return;
+                    }
+                    if k.key == "backspace" {
+                        this.goto_backspace(cx);
+                        return;
+                    }
+                    if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
+                        return;
+                    }
+                    let Some(s) = k.key_char.as_deref() else { return };
+                    if s.is_empty() {
+                        return;
+                    }
+                    this.goto_type(s, cx);
+                    return;
+                }
                 if !this.palette_open {
                     return;
                 }
-                let k = &ev.keystroke;
                 if k.key == "backspace" {
                     this.palette_backspace(cx);
                     return;

@@ -70,6 +70,8 @@ impl Shell {
             palette_list_len: 0,
             palette_focused: false,
             context_menu: None,
+            goto_focused: false,
+            goto_query: String::new(),
         }
     }
 
@@ -886,6 +888,81 @@ impl Shell {
             self.palette_list_state.scroll_to_reveal_item(next);
             cx.notify();
         }
+    }
+
+    pub(crate) fn goto_open(&mut self, cx: &mut Context<Self>) {
+        self.goto_focused = true;
+        cx.notify();
+    }
+
+    pub(crate) fn goto_close(&mut self, cx: &mut Context<Self>) {
+        if self.goto_focused {
+            self.goto_focused = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn goto_type(&mut self, s: &str, cx: &mut Context<Self>) {
+        // Accept only hex chars (and a single leading 0x/0X prefix).
+        // Anything else is silently dropped — keeps the input clean
+        // without needing per-keystroke validation feedback.
+        for ch in s.chars() {
+            if ch.is_ascii_hexdigit()
+                || ch == 'x'
+                || ch == 'X'
+            {
+                self.goto_query.push(ch);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn goto_backspace(&mut self, cx: &mut Context<Self>) {
+        self.goto_query.pop();
+        cx.notify();
+    }
+
+    /// Parse the current `goto_query` as a hex address. Returns
+    /// `None` for an empty / unparseable input. Used both at activate
+    /// time and by the renderer to colour the input border red on
+    /// invalid input.
+    pub(crate) fn goto_parse(&self) -> Option<u64> {
+        let s = self.goto_query.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+        u64::from_str_radix(s, 16).ok()
+    }
+
+    /// Resolve the typed address against every loaded artifact and
+    /// open the appropriate view: listing for code, hex for data.
+    /// No-op when the address isn't covered by any loaded section.
+    pub(crate) fn goto_activate(&mut self, cx: &mut Context<Self>) {
+        let Some(addr) = self.goto_parse() else { return };
+        let Some(bundle) = self.bundle().cloned() else { return };
+        // Walk artifacts in load order — for typical bundles this is
+        // a handful at most.
+        for aid in bundle.artifact_ids.iter() {
+            if let Some(section) = bundle.text_section_for_addr(aid, addr) {
+                let section = section.to_string();
+                let aid = aid.clone();
+                self.open_listing_at(aid, section, addr, cx);
+                self.goto_query.clear();
+                self.goto_focused = false;
+                return;
+            }
+            if let Some(section) = bundle.data_section_for_addr(aid, addr) {
+                let section = section.to_string();
+                let aid = aid.clone();
+                self.open_hex_in_new_tab(aid, section, addr, cx);
+                self.goto_query.clear();
+                self.goto_focused = false;
+                return;
+            }
+        }
+        // No match — leave the input open so the user can fix it.
+        cx.notify();
     }
 
     pub(crate) fn palette_activate(&mut self, cx: &mut Context<Self>) {
