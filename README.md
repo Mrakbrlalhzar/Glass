@@ -24,6 +24,45 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Native binary layout overview with section data
 * Xref search of callers, references to data
 
+## Screenshots
+
+A walk through the main views — click any thumbnail to see it full size.
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="screenshots/disassembly.png">
+        <img src="screenshots/disassembly.png" width="420" alt="AArch64 disassembly listing with arrow gutter, resolved string literals, clickable symbol references"/>
+      </a>
+      <br/>
+      <sub><b>Disassembly listing</b><br/>colour-coded operands, control-flow arrows, resolved string literals inline</sub>
+    </td>
+    <td align="center">
+      <a href="screenshots/cfg.png">
+        <img src="screenshots/cfg.png" width="420" alt="Control flow graph for a native function showing basic blocks, conditional and unconditional edges"/>
+      </a>
+      <br/>
+      <sub><b>Control flow graph</b><br/>per-function CFG with dotted conditional edges and routed multi-rank lanes</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="screenshots/dex.png">
+        <img src="screenshots/dex.png" width="420" alt="DEX method call graph rooted at a smali method; hover-expandable callee nodes"/>
+      </a>
+      <br/>
+      <sub><b>DEX call graph</b><br/>hover-to-expand callees, click to jump to the method's smali</sub>
+    </td>
+    <td align="center">
+      <a href="screenshots/overview.png">
+        <img src="screenshots/overview.png" width="420" alt="Section-map overview of a native binary with coloured proportional bar and per-section detail"/>
+      </a>
+      <br/>
+      <sub><b>Section-map overview</b><br/>proportional bar by section size, click to jump to listing / hex view</sub>
+    </td>
+  </tr>
+</table>
+
 ## Status
 
 Glass is usable today for reversing both Android (APK / DEX / native `.so`) and iOS (IPA / Mach-O) apps targeting AArch64. 32-bit ARM is on the roadmap.
