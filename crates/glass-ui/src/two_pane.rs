@@ -717,10 +717,17 @@ pub fn render_two_pane(
 
         let right = div()
             .flex_1()
+            // min_w(0) so this column shrinks below the tab bar's
+            // intrinsic content width when the user opens a project
+            // with many restored tabs — without it, the column
+            // would expand to fit every tab side-by-side and the
+            // overflow logic never triggers.
+            .min_w(px(0.))
             .h_full()
             .flex()
             .flex_col()
             .relative()
+            .overflow_hidden()
             .child(tab_bar)
             .child(body)
             .child(overflow_dropdown);
