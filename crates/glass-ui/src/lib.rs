@@ -604,7 +604,26 @@ impl Expanded {
 ///
 /// Per-tab scroll memory is automatic: each tab owns its own `ListState`,
 /// preserving position across tab switches.
+/// Process-unique identifier for a tab. Used by background workers
+/// (the listing-row builder, etc.) so they can install their results
+/// into the tab that requested them — even when two tabs share the
+/// same `TabKind` (e.g. two Listing tabs on the same section opened
+/// via "Follow in new tab").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TabId(u64);
+
+impl TabId {
+    pub(crate) fn next() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 pub(crate) struct Tab {
+    /// Unique id minted at construction. Stable across kind/state
+    /// mutations but **not** persisted — restored tabs get fresh ids.
+    pub(crate) id: TabId,
     /// What this tab represents. Stable across reloads.
     pub(crate) kind: TabKind,
     /// Scroll state for the right pane when this tab is active.
@@ -794,6 +813,7 @@ impl Tab {
         let dex_callgraph = matches!(kind, TabKind::DexCallGraph { .. })
             .then(|| DexCallGraphState::new(0., 0., 1.));
         Self {
+            id: TabId::next(),
             kind,
             pending_scroll_addr: None,
             pending_smali_scroll_line: None,

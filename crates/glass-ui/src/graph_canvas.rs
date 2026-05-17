@@ -49,9 +49,18 @@ pub struct CameraHooks {
 }
 
 /// Optional node-click callback (left mouse button). Receives the
-/// Shell entity context and the `NodeId` the user clicked on.
+/// Shell entity context, the `NodeId` the user clicked on, and the
+/// modifier state at click time (used to detect shift-click → new
+/// tab variants).
 pub type NodeClickFn =
-    Box<dyn Fn(&mut Shell, NodeId, &mut Context<Shell>)>;
+    Box<dyn Fn(&mut Shell, NodeId, gpui::Modifiers, &mut Context<Shell>)>;
+
+/// Optional node right-click callback. Same shape as `NodeClickFn`
+/// but receives the click position so the callback can pop a
+/// context menu at the cursor.
+pub type NodeRightClickFn = Box<
+    dyn Fn(&mut Shell, NodeId, gpui::Point<Pixels>, &mut Context<Shell>),
+>;
 
 /// Optional node-hover callback. Fires once when the cursor enters
 /// the node's rect. The caller decides whether to do anything on
@@ -81,6 +90,7 @@ pub fn render_graph_canvas(
     header_subtitle: Option<SharedString>,
     content: NodeContentFn,
     node_click: Option<NodeClickFn>,
+    node_right_click: Option<NodeRightClickFn>,
     node_hover: Option<NodeHoverFn>,
     hooks: CameraHooks,
     cx: &mut Context<Shell>,
@@ -117,6 +127,8 @@ pub fn render_graph_canvas(
     // Nodes — culled if entirely off-canvas (skipped on first paint
     // when bounds are unknown).
     let click_arc: Option<std::sync::Arc<NodeClickFn>> = node_click.map(std::sync::Arc::new);
+    let right_arc: Option<std::sync::Arc<NodeRightClickFn>> =
+        node_right_click.map(std::sync::Arc::new);
     let hover_arc: Option<std::sync::Arc<NodeHoverFn>> = node_hover.map(std::sync::Arc::new);
     for (i, _node) in scene.nodes.iter().enumerate() {
         let rect = rects[i];
@@ -143,11 +155,28 @@ pub fn render_graph_canvas(
             let nid = NodeId(i);
             wrapper = wrapper.on_mouse_down(
                 gpui::MouseButton::Left,
-                move |_ev, _w, cx: &mut App| {
+                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
                     if let Some(entity) = click_weak.upgrade() {
                         let click = click.clone();
+                        let mods = ev.modifiers;
                         cx.update_entity(&entity, |shell, cx| {
-                            click(shell, nid, cx);
+                            click(shell, nid, mods, cx);
+                        });
+                    }
+                },
+            );
+        }
+        if let Some(right) = right_arc.clone() {
+            let right_weak = weak.clone();
+            let nid = NodeId(i);
+            wrapper = wrapper.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                    if let Some(entity) = right_weak.upgrade() {
+                        let right = right.clone();
+                        let pos = ev.position;
+                        cx.update_entity(&entity, |shell, cx| {
+                            right(shell, nid, pos, cx);
                         });
                     }
                 },

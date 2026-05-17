@@ -21,6 +21,13 @@ pub struct ContextMenuState {
 
 #[derive(Clone, Debug)]
 pub enum ContextMenuItem {
+    /// Follow a link in-place — reuse the existing same-type tab
+    /// (scroll a Listing tab to the address, reuse a Hex tab, etc.).
+    /// Same effect as a plain left-click on the link.
+    Follow { target: FollowTarget, label: SharedString },
+    /// Follow a link in a brand-new tab. Same effect as shift+left-
+    /// click on the link.
+    FollowInNewTab { target: FollowTarget, label: SharedString },
     /// Open the CFG view for the function whose entry is `entry_addr`.
     /// `label` is the demangled function name shown in the menu item.
     ShowCfg {
@@ -33,6 +40,31 @@ pub enum ContextMenuItem {
         class_jni: String,
         method_decl: String,
         label: SharedString,
+    },
+}
+
+/// Where a Follow / FollowInNewTab action points. Carries the
+/// view-type-specific identifiers so the activator can pick the
+/// right `Shell::open_*` helper.
+#[derive(Clone, Debug)]
+pub enum FollowTarget {
+    /// Native AArch64 listing at `addr` in `(artifact, section)`.
+    Listing {
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+    },
+    /// Hex view at `addr` in `(artifact, section)`.
+    Hex {
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+    },
+    /// Smali method by JNI key, with the resolved leaf + line for
+    /// scroll-on-open.
+    SmaliMethod {
+        leaf: crate::LeafId,
+        line: usize,
     },
 }
 
@@ -71,6 +103,12 @@ pub fn render_context_menu(
 
     for (index, item) in menu.items.iter().enumerate() {
         let (label_text, hint) = match item {
+            ContextMenuItem::Follow { label, .. } => {
+                ("Follow (left-click)".to_string(), label.clone())
+            }
+            ContextMenuItem::FollowInNewTab { label, .. } => {
+                ("Follow in new tab (⇧+left-click)".to_string(), label.clone())
+            }
             ContextMenuItem::ShowCfg { label, .. } => {
                 ("Show CFG".to_string(), label.clone())
             }

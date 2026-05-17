@@ -148,19 +148,15 @@ pub fn render_section_map(
             cx.listener({
                 let sections = sections_for_move.clone();
                 let artifact = artifact.clone();
-                move |this, _ev: &gpui::MouseDownEvent, _window, cx| {
+                move |this, ev: &gpui::MouseDownEvent, _window, cx| {
                     let Some(idx) = this.hovered_section else { return };
                     let Some(sec) = sections.get(idx) else { return };
                     let cursor_addr = this.bar_cursor_addr;
+                    let new_tab = ev.modifiers.shift;
                     match sec.kind {
                         NativeSectionKind::Text => {
-                            // Snap to the covering function start so we
-                            // don't open mid-instruction (the bar's
-                            // per-pixel cursor addr isn't word-aligned
-                            // in general, and even when it is it can
-                            // land inside a function body — confusing
-                            // when the listing scrolls to a random
-                            // instruction).
+                            // Snap to the covering function start —
+                            // see the long comment in commit a2d0e41.
                             let snap_addr = cursor_addr
                                 .and_then(|c| {
                                     this.bundle()
@@ -169,23 +165,88 @@ pub fn render_section_map(
                                         .map(|s| s.address)
                                 })
                                 .unwrap_or(sec.address);
-                            this.open_listing_in_new_tab(
+                            if new_tab {
+                                this.open_listing_force_new_tab(
+                                    artifact.clone(),
+                                    sec.name.to_string(),
+                                    snap_addr,
+                                    cx,
+                                );
+                            } else {
+                                this.open_listing_at(
+                                    artifact.clone(),
+                                    sec.name.to_string(),
+                                    snap_addr,
+                                    cx,
+                                );
+                            }
+                        }
+                        NativeSectionKind::Bss => {}
+                        _ => {
+                            let addr = cursor_addr.unwrap_or(sec.address);
+                            if new_tab {
+                                this.open_hex_force_new_tab(
+                                    artifact.clone(),
+                                    sec.name.to_string(),
+                                    addr,
+                                    cx,
+                                );
+                            } else {
+                                this.open_hex_in_new_tab(
+                                    artifact.clone(),
+                                    sec.name.to_string(),
+                                    addr,
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        // Right-click on a section in the overview bar — Follow /
+        // Follow in new tab, matching the listing-link menu.
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener({
+                let sections = sections_for_move.clone();
+                let artifact = artifact.clone();
+                move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                    let Some(idx) = this.hovered_section else { return };
+                    let Some(sec) = sections.get(idx) else { return };
+                    let pos = ev.position;
+                    let display = sec.name.to_string();
+                    let cursor_addr = this.bar_cursor_addr;
+                    match sec.kind {
+                        NativeSectionKind::Text => {
+                            let snap_addr = cursor_addr
+                                .and_then(|c| {
+                                    this.bundle()
+                                        .and_then(|b| b.symbol_maps.get(&artifact))
+                                        .and_then(|sm| sm.covering(c))
+                                        .map(|s| s.address)
+                                })
+                                .unwrap_or(sec.address);
+                            this.open_link_context_menu(
                                 artifact.clone(),
                                 sec.name.to_string(),
                                 snap_addr,
+                                false,
+                                display,
+                                pos,
                                 cx,
                             );
                         }
                         NativeSectionKind::Bss => {}
                         _ => {
-                            // Non-text sections: keep the cursor's
-                            // actual byte address so the hex view
-                            // scrolls to the clicked byte.
                             let addr = cursor_addr.unwrap_or(sec.address);
-                            this.open_hex_in_new_tab(
+                            this.open_link_context_menu(
                                 artifact.clone(),
                                 sec.name.to_string(),
                                 addr,
+                                true,
+                                display,
+                                pos,
                                 cx,
                             );
                         }

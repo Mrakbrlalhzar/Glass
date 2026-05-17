@@ -437,9 +437,15 @@ impl Shell {
     /// there is no active tab or the bundle is gone.
     /// Spawn a worker thread that runs `build_listing_rows`, plus a
     /// foreground task that animates progress and installs the result.
+    ///
+    /// `tab_id` identifies which tab to install rows into. Using the
+    /// id (not the `TabKind`) means two tabs with the same kind —
+    /// e.g. "Follow in new tab" duplicates a section's Listing —
+    /// each get their own rows installed once their worker
+    /// completes.
     pub(crate) fn spawn_listing_build(
         &self,
-        kind: TabKind,
+        tab_id: crate::TabId,
         text: TextSectionBytes,
         symbols: Arc<glass_arch_arm64::SymbolMap>,
         data: Arc<DataPeek>,
@@ -487,7 +493,7 @@ impl Shell {
             );
             let rows = Arc::new(rows);
             let _ = this.update(cx, |shell, cx| {
-                let Some(idx) = shell.tabs.iter().position(|t| t.kind == kind) else {
+                let Some(idx) = shell.tabs.iter().position(|t| t.id == tab_id) else {
                     return;
                 };
                 if let Some(tab) = shell.tabs.get_mut(idx) {
@@ -603,8 +609,8 @@ impl Shell {
                         done: false,
                     }));
                     tab.listing_progress = Some(progress.clone());
-                    let kind = tab.kind.clone();
-                    start_build = Some((kind, symbols_arc, data_arc, progress));
+                    let tab_id = tab.id;
+                    start_build = Some((tab_id, symbols_arc, data_arc, progress));
                 }
                 if tab.listing_rows.is_some() {
                     if let Some(addr) = tab.pending_scroll_addr.take() {
@@ -617,9 +623,9 @@ impl Shell {
                     }
                 }
                 // `tab` borrow ends here; spawn the build outside.
-                if let Some((kind, symbols_arc, data_arc, progress)) = start_build {
+                if let Some((tab_id, symbols_arc, data_arc, progress)) = start_build {
                     self.spawn_listing_build(
-                        kind, text, symbols_arc, data_arc, progress, cx,
+                        tab_id, text, symbols_arc, data_arc, progress, cx,
                     );
                 }
             }
@@ -789,6 +795,83 @@ impl Shell {
         cx.notify();
     }
 
+    /// Right-click on an address link inside a Listing row. Offers
+    /// Follow / Follow in new tab (matching left-click + shift-click
+    /// behaviour), plus Show CFG when the target lands in a text
+    /// section with a known covering function.
+    pub(crate) fn open_link_context_menu(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+        is_data: bool,
+        display: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::context_menu::FollowTarget;
+        let label = SharedString::from(display);
+        let target = if is_data {
+            FollowTarget::Hex {
+                artifact: artifact.clone(),
+                section: section.clone(),
+                addr,
+            }
+        } else {
+            FollowTarget::Listing {
+                artifact: artifact.clone(),
+                section: section.clone(),
+                addr,
+            }
+        };
+        let mut items = vec![
+            ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
+            ContextMenuItem::FollowInNewTab { target, label: label.clone() },
+        ];
+        // Add Show CFG when the address has a covering function in
+        // a text section.
+        if !is_data {
+            if let Some(bundle) = self.bundle() {
+                if let Some(sym) = bundle
+                    .symbol_maps
+                    .get(&artifact)
+                    .and_then(|sm| sm.covering(addr))
+                {
+                    items.push(ContextMenuItem::ShowCfg {
+                        artifact: artifact.clone(),
+                        entry_addr: sym.address,
+                        label: SharedString::from(sym.display_name.clone()),
+                    });
+                }
+            }
+        }
+        self.context_menu = Some(ContextMenuState { position, items });
+        cx.notify();
+    }
+
+    /// Right-click on a DEX call-graph node. Shows Follow / Follow
+    /// in new tab; both navigate to the method's smali. (Smali tabs
+    /// dedupe by class so "new tab" reuses an existing class tab —
+    /// see the comment in `activate_follow`.)
+    pub(crate) fn open_smali_link_context_menu(
+        &mut self,
+        leaf: LeafId,
+        line: usize,
+        display: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::context_menu::FollowTarget;
+        let label = SharedString::from(display);
+        let target = FollowTarget::SmaliMethod { leaf, line };
+        let items = vec![
+            ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
+            ContextMenuItem::FollowInNewTab { target, label },
+        ];
+        self.context_menu = Some(ContextMenuState { position, items });
+        cx.notify();
+    }
+
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.is_some() {
             self.context_menu = None;
@@ -805,6 +888,12 @@ impl Shell {
         let Some(item) = menu.items.get(index).cloned() else { return };
         self.context_menu = None;
         match item {
+            ContextMenuItem::Follow { target, .. } => {
+                self.activate_follow(target, false, cx);
+            }
+            ContextMenuItem::FollowInNewTab { target, .. } => {
+                self.activate_follow(target, true, cx);
+            }
             ContextMenuItem::ShowCfg {
                 artifact,
                 entry_addr,
@@ -818,6 +907,42 @@ impl Shell {
                 label,
             } => {
                 self.show_dex_callgraph(class_jni, method_decl, label, cx);
+            }
+        }
+    }
+
+    /// Dispatch a Follow / FollowInNewTab action. Plain follow reuses
+    /// an existing same-type tab; `new_tab = true` always pushes a
+    /// fresh tab.
+    pub(crate) fn activate_follow(
+        &mut self,
+        target: crate::context_menu::FollowTarget,
+        new_tab: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::context_menu::FollowTarget;
+        match target {
+            FollowTarget::Listing { artifact, section, addr } => {
+                if new_tab {
+                    self.open_listing_force_new_tab(artifact, section, addr, cx);
+                } else {
+                    self.open_listing_at(artifact, section, addr, cx);
+                }
+            }
+            FollowTarget::Hex { artifact, section, addr } => {
+                if new_tab {
+                    self.open_hex_force_new_tab(artifact, section, addr, cx);
+                } else {
+                    self.open_hex_in_new_tab(artifact, section, addr, cx);
+                }
+            }
+            FollowTarget::SmaliMethod { leaf, line } => {
+                // Smali tabs always dedupe by class (one tab per
+                // class makes sense). new_tab is a no-op here — we
+                // honour the request to navigate but won't spawn a
+                // duplicate smali tab for the same class.
+                let _ = new_tab;
+                self.goto_smali_method(leaf, line, cx);
             }
         }
     }
@@ -1192,11 +1317,10 @@ impl Shell {
         self.save_state();
     }
 
-    /// Always open a new Listing tab for `(artifact, section)`, scroll
-    /// to `addr`. Used by tree clicks and SectionMap clicks where the
-    /// user explicitly wants another view.
-    /// Always open a new Hex tab for `(artifact, section)`, scroll to
-    /// `addr`. Same shape as `open_listing_in_new_tab` for symmetry.
+    /// Reuse an existing Hex tab for `(artifact, section)` if one is
+    /// open, else push a new one. Scrolls to `addr`. Use the
+    /// `open_hex_force_new_tab` variant for explicit "Follow in new
+    /// tab" gestures.
     pub(crate) fn open_hex_in_new_tab(
         &mut self,
         artifact: glass_db::ArtifactId,
@@ -1206,7 +1330,6 @@ impl Shell {
     ) {
         self.overflow_open = false;
         let kind = TabKind::Hex { artifact, section };
-        // Dedupe per-section, same reasoning as the Listing case.
         let idx = match self.tabs.iter().position(|t| t.kind == kind) {
             Some(i) => i,
             None => {
@@ -1214,6 +1337,25 @@ impl Shell {
                 self.tabs.len() - 1
             }
         };
+        self.tabs[idx].pending_scroll_addr = Some(addr);
+        self.active_tab = Some(idx);
+        cx.notify();
+        self.save_state();
+    }
+
+    /// Always open a fresh Hex tab — no dedupe. Used by the "Follow
+    /// in new tab" / shift-click flow.
+    pub(crate) fn open_hex_force_new_tab(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.overflow_open = false;
+        let kind = TabKind::Hex { artifact, section };
+        self.tabs.push(Tab::new(kind));
+        let idx = self.tabs.len() - 1;
         self.tabs[idx].pending_scroll_addr = Some(addr);
         self.active_tab = Some(idx);
         cx.notify();
@@ -1229,13 +1371,13 @@ impl Shell {
     ) {
         self.overflow_open = false;
         let kind = TabKind::Listing { artifact, section };
-        // Dedupe per-section. Two Listing tabs with the same kind
-        // confuse `spawn_listing_build`'s completion handler — it
-        // looks up the tab by kind to install rows, and `position()`
-        // returns the *first* match, so the 2nd duplicate would
-        // never receive its rows (the user sees the progress bar
-        // hang at the end). Treat repeat opens as "focus the
-        // existing tab" instead and scroll to the new address.
+        // Dedupe per-section. Listing tabs are now id-tracked rather
+        // than kind-tracked, so duplicates *are* safe — but the
+        // common "open another listing" gesture (tree clicks,
+        // overview clicks) means "show me that section", and
+        // reusing an existing tab is the right UX. Use
+        // `open_listing_force_new_tab` for explicit "new tab"
+        // gestures (shift-click, context menu).
         let idx = match self.tabs.iter().position(|t| t.kind == kind) {
             Some(i) => i,
             None => {
@@ -1243,6 +1385,25 @@ impl Shell {
                 self.tabs.len() - 1
             }
         };
+        self.tabs[idx].pending_scroll_addr = Some(addr);
+        self.active_tab = Some(idx);
+        cx.notify();
+        self.save_state();
+    }
+
+    /// Always open a fresh Listing tab — no dedupe. Used by the
+    /// "Follow in new tab" / shift-click flow.
+    pub(crate) fn open_listing_force_new_tab(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.overflow_open = false;
+        let kind = TabKind::Listing { artifact, section };
+        self.tabs.push(Tab::new(kind));
+        let idx = self.tabs.len() - 1;
         self.tabs[idx].pending_scroll_addr = Some(addr);
         self.active_tab = Some(idx);
         cx.notify();

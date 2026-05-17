@@ -19,6 +19,7 @@ use crate::dex_callgraph::DexNodeInfo;
 use crate::graph::NodeId;
 use crate::graph_canvas::{
     render_graph_canvas, CameraHooks, NodeClickFn, NodeContentFn, NodeHoverFn,
+    NodeRightClickFn,
 };
 use crate::palette::{COLOUR_BYTES, COLOUR_PLAIN, COLOUR_SYMBOL_HEADER};
 use crate::{LeafId, LoadedBundle, Shell};
@@ -125,15 +126,47 @@ pub fn render_dex_callgraph(
 
     // Left-click jumps to the method's definition in its smali tab.
     // Methods we don't have source for (framework / external) have no
-    // entry in `method_lines` and the click is a no-op.
+    // entry in `method_lines` and the click is a no-op. Shift-click
+    // is honoured for consistency but smali tabs dedupe by class so
+    // it ends up as a regular navigation.
     let node_click: Option<NodeClickFn> = Some({
         let keys = keys.clone();
         let method_lines = method_lines.clone();
-        Box::new(move |shell: &mut Shell, nid: NodeId, cx: &mut Context<Shell>| {
-            let Some(key) = keys.get(nid.0) else { return };
-            let Some(&(leaf, line)) = method_lines.get(key) else { return };
-            shell.goto_smali_method(leaf, line, cx);
-        })
+        Box::new(
+            move |shell: &mut Shell,
+                  nid: NodeId,
+                  _mods: gpui::Modifiers,
+                  cx: &mut Context<Shell>| {
+                let Some(key) = keys.get(nid.0) else { return };
+                let Some(&(leaf, line)) = method_lines.get(key) else { return };
+                shell.goto_smali_method(leaf, line, cx);
+            },
+        )
+    });
+
+    // Right-click on a node → context menu with Follow / Follow in
+    // new tab, matching the listing's link menu. Methods we don't
+    // have source for skip the menu.
+    let node_right_click: Option<NodeRightClickFn> = Some({
+        let keys = keys.clone();
+        let method_lines = method_lines.clone();
+        Box::new(
+            move |shell: &mut Shell,
+                  nid: NodeId,
+                  pos: gpui::Point<gpui::Pixels>,
+                  cx: &mut Context<Shell>| {
+                let Some(key) = keys.get(nid.0).cloned() else { return };
+                let Some(&(leaf, line)) = method_lines.get(&key) else { return };
+                // Human-readable label: ClassName.method.
+                let label = key
+                    .split("->")
+                    .nth(1)
+                    .and_then(|m| m.split('(').next())
+                    .unwrap_or(&key)
+                    .to_string();
+                shell.open_smali_link_context_menu(leaf, line, label, pos, cx);
+            },
+        )
     });
 
     // Hover expands. One-shot: re-entering a node that's already been
@@ -186,6 +219,7 @@ pub fn render_dex_callgraph(
         Some(header_subtitle),
         content,
         node_click,
+        node_right_click,
         node_hover,
         hooks,
         cx,

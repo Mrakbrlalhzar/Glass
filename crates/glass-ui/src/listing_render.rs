@@ -452,34 +452,80 @@ pub fn render_listing_row_with(
                                     .map(|s| (s.to_string(), true))
                             });
                         let display = chunk.text.clone();
-                        let tooltip_label = format!("goto {display}");
+                        let tooltip_label =
+                            format!("Follow {display}  (⇧+click = new tab)");
                         let mut el = base
                             .cursor_pointer()
                             .hover(|this| this.underline());
                         if let Some((section_name, is_data)) = target {
+                            // Left-click: shift = force new tab,
+                            // plain = reuse same-type tab.
+                            let left_weak = weak.clone();
+                            let left_artifact = artifact.clone();
+                            let left_section = section_name.clone();
                             el = el.on_mouse_down(
                                 gpui::MouseButton::Left,
-                                move |_ev, _w, cx: &mut App| {
-                                    let Some(entity) = weak.upgrade() else { return };
-                                    let artifact = artifact.clone();
-                                    let section_name = section_name.clone();
+                                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                    let Some(entity) = left_weak.upgrade() else {
+                                        return;
+                                    };
+                                    let artifact = left_artifact.clone();
+                                    let section_name = left_section.clone();
+                                    let new_tab = ev.modifiers.shift;
                                     cx.update_entity(&entity, |shell, cx| {
                                         if is_data {
-                                            shell.open_hex_in_new_tab(
-                                                artifact,
-                                                section_name,
-                                                t,
-                                                cx,
+                                            if new_tab {
+                                                shell.open_hex_force_new_tab(
+                                                    artifact, section_name, t, cx,
+                                                );
+                                            } else {
+                                                shell.open_hex_in_new_tab(
+                                                    artifact, section_name, t, cx,
+                                                );
+                                            }
+                                        } else if new_tab {
+                                            shell.open_listing_force_new_tab(
+                                                artifact, section_name, t, cx,
                                             );
                                         } else {
                                             shell.open_listing_at(
-                                                artifact,
-                                                section_name,
-                                                t,
-                                                cx,
+                                                artifact, section_name, t, cx,
                                             );
                                         }
                                     });
+                                    cx.stop_propagation();
+                                },
+                            );
+                            // Right-click: open the link context menu
+                            // with Follow / Follow in new tab, plus
+                            // Show CFG when the target is in a text
+                            // section.
+                            let right_weak = weak.clone();
+                            let right_artifact = artifact.clone();
+                            let right_section = section_name.clone();
+                            let right_display = display.clone();
+                            el = el.on_mouse_down(
+                                gpui::MouseButton::Right,
+                                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                    let Some(entity) = right_weak.upgrade() else {
+                                        return;
+                                    };
+                                    let artifact = right_artifact.clone();
+                                    let section_name = right_section.clone();
+                                    let pos = ev.position;
+                                    let display = right_display.clone();
+                                    cx.update_entity(&entity, |shell, cx| {
+                                        shell.open_link_context_menu(
+                                            artifact,
+                                            section_name,
+                                            t,
+                                            is_data,
+                                            display,
+                                            pos,
+                                            cx,
+                                        );
+                                    });
+                                    cx.stop_propagation();
                                 },
                             );
                         }

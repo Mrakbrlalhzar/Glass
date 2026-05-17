@@ -199,11 +199,35 @@ pub fn render_cfg(
     let node_click: Option<NodeClickFn> = Some({
         let blocks = blocks_arc.clone();
         let artifact = artifact_arc.clone();
-        Box::new(move |shell: &mut Shell, nid: NodeId, cx: &mut Context<Shell>| {
-            if let Some(block) = blocks.get(nid.0) {
-                shell.open_listing_at_addr(artifact.clone(), block.start_addr, cx);
-            }
-        })
+        Box::new(
+            move |shell: &mut Shell,
+                  nid: NodeId,
+                  mods: gpui::Modifiers,
+                  cx: &mut Context<Shell>| {
+                let Some(block) = blocks.get(nid.0) else { return };
+                if mods.shift {
+                    // Shift+click → force a fresh Listing tab so the
+                    // user can compare the block address against the
+                    // current view.
+                    let bundle = match shell.bundle().cloned() {
+                        Some(b) => b,
+                        None => return,
+                    };
+                    if let Some(section) =
+                        bundle.text_section_for_addr(&artifact, block.start_addr)
+                    {
+                        shell.open_listing_force_new_tab(
+                            artifact.clone(),
+                            section.to_string(),
+                            block.start_addr,
+                            cx,
+                        );
+                    }
+                } else {
+                    shell.open_listing_at_addr(artifact.clone(), block.start_addr, cx);
+                }
+            },
+        )
     });
 
     let hooks = CameraHooks {
@@ -245,7 +269,8 @@ pub fn render_cfg(
         Some(header_subtitle),
         content,
         node_click,
-        None,
+        None, // node_right_click
+        None, // node_hover
         hooks,
         cx,
     )
