@@ -842,7 +842,7 @@ pub(crate) struct Shell {
     focus_handle: FocusHandle,
     /// Source path the bundle was loaded from. Used so save_state can
     /// remember where to reopen it from (Open Recent).
-    source_path: Option<PathBuf>,
+    pub(crate) source_path: Option<PathBuf>,
     pub(crate) state: ShellState,
     /// Set while loading. UI reads this on every paint to render the bar.
     pub(crate) progress: Option<Arc<Mutex<Progress>>>,

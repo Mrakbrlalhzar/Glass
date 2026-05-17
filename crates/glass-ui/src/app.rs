@@ -123,7 +123,30 @@ fn open_nth_recent(db: Option<glass_db::Database>, idx: usize, cx: &mut App) {
     let recents = handle.recent_bundles(RECENT_SLOTS);
     let Some(rec) = recents.into_iter().nth(idx) else { return };
     let Some(path) = rec.source_path else { return };
-    open_glass_window(Some(PathBuf::from(path)), db, cx);
+    open_path(PathBuf::from(path), db, cx);
+}
+
+/// Open `path` — reuse the first empty Glass window if one is open,
+/// otherwise spawn a fresh window. Empty = the user hasn't loaded
+/// anything into this window yet (no bundle), so dropping a load
+/// into it doesn't lose any state.
+fn open_path(path: PathBuf, db: Option<glass_db::Database>, cx: &mut App) {
+    let empty_shell: Option<gpui::Entity<Shell>> =
+        cx.windows().into_iter().find_map(|wh| {
+            let typed = wh.downcast::<Shell>()?;
+            let entity = typed.entity(cx).ok()?;
+            let is_empty = entity.read(cx).is_empty();
+            is_empty.then_some(entity)
+        });
+    if let Some(shell) = empty_shell {
+        shell.update(cx, |s, _| {
+            s.source_path = Some(path.clone());
+            s.state = ShellState::Loading;
+        });
+        spawn_loader(&shell, path, cx);
+    } else {
+        open_glass_window(Some(path), db, cx);
+    }
 }
 
 fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
@@ -195,7 +218,7 @@ fn open_file_dialog_and_window(
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(paths))) = receiver.await else { return };
         let Some(path) = paths.into_iter().next() else { return };
-        let _ = cx.update(|cx| open_glass_window(Some(path), db, cx));
+        let _ = cx.update(|cx| open_path(path, db, cx));
     })
     .detach();
 }

@@ -340,6 +340,13 @@ impl Shell {
         }
     }
 
+    /// True when no bundle has been loaded into this window yet. The
+    /// Open / Open Recent paths reuse an empty window in preference
+    /// to spawning a new one — see `app::open_path`.
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self.state, ShellState::Empty)
+    }
+
     /// Resolve a tab to its current `LeafId` (which may change across
     /// bundle reloads even though the `TabKind` identity is stable).
     pub(crate) fn tab_leaf(&self, index: usize) -> Option<LeafId> {
