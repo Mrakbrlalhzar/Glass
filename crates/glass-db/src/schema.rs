@@ -104,6 +104,17 @@ pub enum TabState {
         /// Camera zoom (1.0 = native pixel scale).
         zoom: f32,
     },
+    /// DEX method call graph rooted on a specific method. Uses the
+    /// JNI signature so it survives DEX reshuffles.
+    DexCallGraph {
+        /// Class JNI sig, e.g. `Lcom/example/Foo;`.
+        class_jni: String,
+        /// `name(sig)ret` token (everything after `->`).
+        method_decl: String,
+        pan_x: f32,
+        pan_y: f32,
+        zoom: f32,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

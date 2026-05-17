@@ -5,10 +5,13 @@
 * CLI command defaulting to GUI (no ‘gui’ command needed)
 * Closing the last window terminates the command line app
 * glass menu should be ‘Glass’
+* Opening a file in an empty window does not create a new window but reuses this one
 * Open 2nd file, offset x,y position of 2nd window
+* In disassembly view, don’t allow cursor to select basic block rule line
 * References search, right click ‘find references’
 * Goto address function - top bar (straight to section)
 * Overview bar cursor should go to nearest function start
+* Package as a MacOS app in a CI job
 * Extend search to search for instruction sequences with operands fuzzy e.g. adrp <reg>; add <reg>, <reg>, <anything>
 * script engine API over surface of all functionality
 * scripting setup e.g. scripts describe their function and add to menus
