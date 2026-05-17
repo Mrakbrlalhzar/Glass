@@ -131,7 +131,12 @@ cargo build --release -p glass-cli
 open dist/Glass.app
 ```
 
-The bundle is ad-hoc signed (not Developer-ID signed / notarized), so on first launch macOS will refuse to open it; right-click → **Open** to bypass Gatekeeper once. CI uploads a fresh `Glass.app.zip` artifact on every push to `main` — grab the latest from the Actions tab if you'd rather not build locally.
+The bundle is ad-hoc signed (not Developer-ID signed / notarized), so on first launch macOS will refuse to open it; right-click → **Open** to bypass Gatekeeper once.
+
+Two ways to grab a prebuilt zip without building locally:
+
+- **Latest `main`** — every push uploads a `Glass-app-<sha>.zip` as a 14-day workflow artifact. Pull it from the [Actions tab](https://github.com/azw413/Glass/actions).
+- **Tagged release** — pushing a `v*` tag (e.g. `v0.1.0`) triggers the same workflow and additionally publishes a `Glass-<tag>-macOS.zip` to the [Releases page](https://github.com/azw413/Glass/releases) with auto-generated release notes.
 
 ## Workspace
 

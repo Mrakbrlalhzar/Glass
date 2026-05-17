@@ -3,9 +3,14 @@ name: Build macOS .app
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+# Release uploads need write access to repo contents.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -34,15 +39,42 @@ jobs:
       - name: Assemble .app bundle
         run: ./packaging/make-app.sh
 
+      # Tagged builds get a versioned filename so the release-attached
+      # zip self-identifies. Branch / PR builds stay keyed by the
+      # commit sha.
+      - name: Decide zip name
+        id: zip
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            name="Glass-${tag}-macOS.zip"
+          else
+            name="Glass-app-${GITHUB_SHA}.zip"
+          fi
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
       - name: Zip Glass.app
         run: |
           cd dist
-          zip -r Glass-app-${{ github.sha }}.zip Glass.app
+          zip -r "${{ steps.zip.outputs.name }}" Glass.app
 
-      - name: Upload artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: Glass.app-${{ github.sha }}
-          path: dist/Glass-app-${{ github.sha }}.zip
+          path: dist/${{ steps.zip.outputs.name }}
           if-no-files-found: error
           retention-days: 14
+
+      # On a v* tag push: create (or update) a GitHub Release and
+      # attach the versioned zip. Skipped for branch / PR / manual
+      # runs — those only produce a workflow artifact.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ steps.zip.outputs.name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
