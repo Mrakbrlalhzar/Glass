@@ -151,18 +151,37 @@ pub fn render_section_map(
                 move |this, _ev: &gpui::MouseDownEvent, _window, cx| {
                     let Some(idx) = this.hovered_section else { return };
                     let Some(sec) = sections.get(idx) else { return };
-                    let addr = sec.address;
+                    let cursor_addr = this.bar_cursor_addr;
                     match sec.kind {
                         NativeSectionKind::Text => {
+                            // Snap to the covering function start so we
+                            // don't open mid-instruction (the bar's
+                            // per-pixel cursor addr isn't word-aligned
+                            // in general, and even when it is it can
+                            // land inside a function body — confusing
+                            // when the listing scrolls to a random
+                            // instruction).
+                            let snap_addr = cursor_addr
+                                .and_then(|c| {
+                                    this.bundle()
+                                        .and_then(|b| b.symbol_maps.get(&artifact))
+                                        .and_then(|sm| sm.covering(c))
+                                        .map(|s| s.address)
+                                })
+                                .unwrap_or(sec.address);
                             this.open_listing_in_new_tab(
                                 artifact.clone(),
                                 sec.name.to_string(),
-                                addr,
+                                snap_addr,
                                 cx,
                             );
                         }
                         NativeSectionKind::Bss => {}
                         _ => {
+                            // Non-text sections: keep the cursor's
+                            // actual byte address so the hex view
+                            // scrolls to the clicked byte.
+                            let addr = cursor_addr.unwrap_or(sec.address);
                             this.open_hex_in_new_tab(
                                 artifact.clone(),
                                 sec.name.to_string(),
