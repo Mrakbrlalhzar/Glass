@@ -2,7 +2,7 @@
 
 * ~~Control flow graph view of disassembly~~
 * ~~Control flow graph for DEX methods~~
-* CLI command defaulting to GUI (no ‘gui’ command needed)
+* ~~CLI command defaulting to GUI (no ‘gui’ command needed)~~
 * Closing the last window terminates the command line app
 * glass menu should be ‘Glass’
 * Opening a file in an empty window does not create a new window but reuses this one

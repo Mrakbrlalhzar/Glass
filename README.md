@@ -98,15 +98,18 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
 3. **Run it**:
 
    ```sh
-   # Open the GUI on an Android APK or iOS IPA
-   ./target/release/glass gui ~/path/to/app.apk
-   ./target/release/glass gui ~/path/to/app.ipa
+   # Open the GUI on an Android APK or iOS IPA — no subcommand needed.
+   ./target/release/glass ~/path/to/app.apk
+   ./target/release/glass ~/path/to/app.ipa
 
    # Or on a standalone binary — ELF .so, Mach-O .dylib, or raw
    # executable. Fat / universal Mach-O is sliced automatically.
-   ./target/release/glass gui ~/path/to/libfoo.so
-   ./target/release/glass gui ~/path/to/libBar.dylib
-   ./target/release/glass gui /usr/lib/dyld
+   ./target/release/glass ~/path/to/libfoo.so
+   ./target/release/glass ~/path/to/libBar.dylib
+   ./target/release/glass /usr/lib/dyld
+
+   # No args → opens an empty Glass window; use File → Open.
+   ./target/release/glass
 
    # Headless bundle inspect
    ./target/release/glass bundle ~/path/to/app.apk

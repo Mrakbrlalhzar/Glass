@@ -6,8 +6,15 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "glass", about = "Glass mobile interactive disassembler")]
 struct Cli {
+    /// Bundle / binary to open when no subcommand is given. With no
+    /// path either, opens an empty Glass window.
+    path: Option<PathBuf>,
+    /// Ignore any previously-saved tabs / expansion state on this
+    /// launch. Only meaningful when running the GUI (no subcommand).
+    #[arg(long)]
+    fresh: bool,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -72,7 +79,14 @@ fn main() -> Result<()> {
         )
         .init();
 
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let cmd = match cli.cmd {
+        Some(c) => c,
+        // No subcommand → fall back to GUI. Honour any positional
+        // path + the top-level --fresh flag.
+        None => Cmd::Gui { path: cli.path, fresh: cli.fresh },
+    };
+    match cmd {
         Cmd::Arm64 { path, limit } => dump_arm64(path, limit),
         Cmd::Bundle { path } => dump_bundle(path),
         Cmd::Gui { path, fresh } => run_gui(path, fresh),
