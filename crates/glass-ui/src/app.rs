@@ -302,6 +302,12 @@ fn open_glass_window(
             ..Default::default()
         },
         move |window, cx| {
+            // Set an explicit OS-level window title. Without this,
+            // AppKit picks up the executable name ("glass" — lower-
+            // case) and that string then shows up in the Window menu
+            // and elsewhere. Loader updates this to the bundle name
+            // once a bundle finishes loading.
+            window.set_window_title("Glass");
             let shell = cx.new(|cx| {
                 Shell::new(path_for_window.clone(), db_for_window.clone(), window, cx)
             });

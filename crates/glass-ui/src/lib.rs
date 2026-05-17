@@ -907,7 +907,7 @@ pub(crate) struct Shell {
 
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = rgb(0x1e1e22);
         let panel = rgb(0x26262c);
         let border = rgb(0x36363c);
@@ -925,6 +925,12 @@ impl Render for Shell {
             ShellState::Error(_) => "Glass — load failed".to_string(),
             ShellState::Empty => "Glass — no bundle loaded".to_string(),
         };
+        // Push the same string to the OS window title so the Window
+        // menu (and Dock tooltip, and Mission Control card) reads
+        // "Glass — …" rather than the binary's lower-case executable
+        // name. set_window_title is cheap and idempotent at the
+        // platform level, so calling it every render is fine.
+        window.set_window_title(&header_text);
 
         // Pre-build the goto-address widget (only when a bundle is
         // loaded). Returns None otherwise so the header skips it.
