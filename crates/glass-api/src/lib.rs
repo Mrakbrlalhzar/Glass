@@ -22,12 +22,17 @@
 
 mod bundle;
 mod cfg;
+mod dex;
 mod disasm;
 mod inspect;
 mod symbols;
 
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
+pub use dex::{
+    ClassInfo, ClassListing, FieldInfo, FieldListing, MethodCallSite,
+    MethodCallsResult, MethodInfo, MethodListing, SmaliBody,
+};
 pub use disasm::{decode_word, DecodeResult, DisasmListing, DisasmRow};
 pub use inspect::{
     ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,

@@ -143,6 +143,55 @@ pub fn calls_from(
     output::emit(envelope, format, render_calls_from)
 }
 
+pub fn classes(
+    path: PathBuf,
+    package: Option<String>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        Ok(bundle.classes(package.as_deref()))
+    })?;
+    output::emit(envelope, format, render_classes)
+}
+
+pub fn smali(path: PathBuf, class: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.smali(&class)
+    })?;
+    output::emit(envelope, format, render_smali)
+}
+
+pub fn methods(path: PathBuf, class: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.methods(&class)
+    })?;
+    output::emit(envelope, format, render_methods)
+}
+
+pub fn fields(path: PathBuf, class: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.fields(&class)
+    })?;
+    output::emit(envelope, format, render_fields)
+}
+
+pub fn method_calls(
+    path: PathBuf,
+    class: String,
+    method: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.method_calls(&class, &method)
+    })?;
+    output::emit(envelope, format, render_method_calls)
+}
+
 // ---- text renderers --------------------------------------------------------
 
 fn render_inspect(
@@ -362,6 +411,92 @@ fn render_calls_from(
             (None, _) => "(indirect)".to_string(),
         };
         writeln!(out, "  {}  →  {}", c.site_address, target)?;
+    }
+    Ok(())
+}
+
+fn render_classes(
+    data: &glass_api::ClassListing,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{} of {} classes", data.shown, data.total)?;
+    for c in &data.classes {
+        writeln!(
+            out,
+            "  {}  ({} fields, {} methods)  extends {}",
+            c.java, c.field_count, c.method_count, c.super_class,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_smali(
+    data: &glass_api::SmaliBody,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "# {}", data.class)?;
+    out.write_all(data.smali.as_bytes())?;
+    if !data.smali.ends_with('\n') {
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+fn render_methods(
+    data: &glass_api::MethodListing,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}  ({} methods)", data.class, data.methods.len())?;
+    for m in &data.methods {
+        let ctor = if m.constructor { "  <init>" } else { "" };
+        writeln!(
+            out,
+            "  {}{}  ({} ops)  [{}]{}",
+            m.name,
+            m.descriptor,
+            m.op_count,
+            m.modifiers.join(" "),
+            ctor,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_fields(
+    data: &glass_api::FieldListing,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}  ({} fields)", data.class, data.fields.len())?;
+    for f in &data.fields {
+        writeln!(
+            out,
+            "  {}:{}  [{}]",
+            f.name,
+            f.type_jni,
+            f.modifiers.join(" "),
+        )?;
+    }
+    Ok(())
+}
+
+fn render_method_calls(
+    data: &glass_api::MethodCallsResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}->{}{}  ({} call sites)",
+        data.class,
+        data.method,
+        data.descriptor,
+        data.calls.len(),
+    )?;
+    for c in &data.calls {
+        writeln!(
+            out,
+            "  {:<22}  {}->{}{}",
+            c.kind, c.target_class, c.target_method, c.target_descriptor,
+        )?;
     }
     Ok(())
 }

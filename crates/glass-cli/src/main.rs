@@ -79,6 +79,24 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             func.clone(),
             format,
         )),
+        Cmd::Classes { path, package } => {
+            Some(verbs::classes(path.clone(), package.clone(), format))
+        }
+        Cmd::Smali { path, class } => {
+            Some(verbs::smali(path.clone(), class.clone(), format))
+        }
+        Cmd::Methods { path, class } => {
+            Some(verbs::methods(path.clone(), class.clone(), format))
+        }
+        Cmd::Fields { path, class } => {
+            Some(verbs::fields(path.clone(), class.clone(), format))
+        }
+        Cmd::MethodCalls { path, class, method } => Some(verbs::method_calls(
+            path.clone(),
+            class.clone(),
+            method.clone(),
+            format,
+        )),
         _ => None,
     }
 }
@@ -186,6 +204,42 @@ enum Cmd {
         /// Function entry — hex address or exact symbol name.
         #[arg(long)]
         func: String,
+    },
+    /// List DEX classes (APK only). Use `--package` to filter by
+    /// JNI or Java prefix (e.g. `--package Lkotlin/` or `--package
+    /// kotlin.`).
+    Classes {
+        path: PathBuf,
+        #[arg(long)]
+        package: Option<String>,
+    },
+    /// Print the full smali body of a class.
+    Smali {
+        path: PathBuf,
+        /// Class — JNI (`Lcom/foo/Bar;`) or Java (`com.foo.Bar`).
+        #[arg(long)]
+        class: String,
+    },
+    /// List methods declared by a class.
+    Methods {
+        path: PathBuf,
+        #[arg(long)]
+        class: String,
+    },
+    /// List fields declared by a class.
+    Fields {
+        path: PathBuf,
+        #[arg(long)]
+        class: String,
+    },
+    /// List every `invoke-*` call site inside a method. `--method`
+    /// is `name` (first match) or `name(descriptor)`.
+    MethodCalls {
+        path: PathBuf,
+        #[arg(long)]
+        class: String,
+        #[arg(long)]
+        method: String,
     },
 
     // ----- Legacy text-output commands -------------------------------
@@ -340,7 +394,12 @@ fn main() -> Result<()> {
         | Cmd::Disasm { .. }
         | Cmd::Decode { .. }
         | Cmd::CfgOf { .. }
-        | Cmd::CallsFrom { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::CallsFrom { .. }
+        | Cmd::Classes { .. }
+        | Cmd::Smali { .. }
+        | Cmd::Methods { .. }
+        | Cmd::Fields { .. }
+        | Cmd::MethodCalls { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 

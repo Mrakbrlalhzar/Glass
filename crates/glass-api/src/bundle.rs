@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use glass_arch_arm64::{Arm64Binary, SymbolMap};
 use glass_db::ArtifactId;
 use parking_lot::RwLock;
+use smali::types::SmaliClass;
 
 /// What kind of input a bundle came from. Drives which artifact
 /// fields are populated and which queries are meaningful.
@@ -46,6 +47,9 @@ pub struct Bundle {
     pub(crate) kind: BundleKind,
     pub(crate) label: String,
     pub(crate) artifacts: Vec<ParsedArtifact>,
+    /// Lifted DEX classes (APK only). Aggregated across every
+    /// `classes*.dex` file in the bundle. Empty for IPA / Native.
+    pub(crate) dex_classes: Vec<SmaliClass>,
     // Future caches (search index, xref maps) hang off this struct
     // as more verbs land — each behind its own RwLock<Option<Arc<...>>>
     // so cache fills serialise without blocking the reader path.
@@ -137,11 +141,19 @@ fn open_apk(path: &Path, label: String) -> Result<Bundle> {
             symbol_map: RwLock::new(None),
         });
     }
+    let mut dex_classes = Vec::new();
+    for dex in &apk.dex_files {
+        let classes = dex
+            .classes()
+            .with_context(|| format!("lifting smali from {}", dex.name))?;
+        dex_classes.extend(classes.iter().cloned());
+    }
     Ok(Bundle {
         source_path: path.to_path_buf(),
         kind: BundleKind::Apk,
         label,
         artifacts,
+        dex_classes,
     })
 }
 
@@ -188,6 +200,7 @@ fn open_ipa(path: &Path, label: String) -> Result<Bundle> {
         kind: BundleKind::Ipa,
         label,
         artifacts,
+        dex_classes: Vec::new(),
     })
 }
 
@@ -206,5 +219,6 @@ fn open_native(path: &Path, label: String) -> Result<Bundle> {
         kind: BundleKind::Native,
         label,
         artifacts: vec![artifact],
+        dex_classes: Vec::new(),
     })
 }
