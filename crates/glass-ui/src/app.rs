@@ -401,6 +401,16 @@ fn spawn_loader(shell: &gpui::Entity<Shell>, path: PathBuf, cx: &mut App) {
                 shell.restore_state(&bundle);
                 shell.rebuild_list_state();
                 shell.save_state();
+                // Rebuild the macOS app menu so File → Open Recent
+                // reflects the new ordering (this bundle just moved
+                // to the top of the recent list during save_state).
+                // Without this the menu labels go stale and clicking
+                // "the same row" actually opens a different file —
+                // the recent list reorders under the menu, but the
+                // OpenRecentN action handlers re-query at click time
+                // and pick up the post-reorder list.
+                let db = shell.db.clone();
+                set_app_menus(cx, db.as_ref());
                 // Kick off xref-index builders. Each runs on its own
                 // background task and writes results into the
                 // bundle's XrefStore. The Shell renders progress
