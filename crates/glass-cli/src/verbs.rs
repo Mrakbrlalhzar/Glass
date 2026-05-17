@@ -52,6 +52,47 @@ pub fn hash(path: PathBuf, format: Format) -> Result<()> {
     output::emit(envelope, format, render_hash)
 }
 
+pub fn symbols(
+    path: PathBuf,
+    artifact: Option<String>,
+    filter: Option<String>,
+    kind: Option<glass_api::SymbolKindName>,
+    limit: Option<usize>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        let query = glass_api::SymbolQuery {
+            artifact: artifact.as_deref(),
+            filter: filter.as_deref(),
+            kind,
+            limit,
+        };
+        Ok(bundle.symbols(query))
+    })?;
+    output::emit(envelope, format, render_symbols)
+}
+
+pub fn symbol_at(
+    path: PathBuf,
+    addr: String,
+    artifact: String,
+    format: Format,
+) -> Result<()> {
+    let addr = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow::anyhow!("bad address {addr:?}: {e}"))?;
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        Ok(bundle.symbol_at(&artifact, addr))
+    })?;
+    output::emit(envelope, format, render_symbol_at)
+}
+
+pub fn demangle(name: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| Ok(glass_api::demangle(&name)))?;
+    output::emit(envelope, format, render_demangle)
+}
+
 // ---- text renderers --------------------------------------------------------
 
 fn render_inspect(
@@ -134,6 +175,52 @@ fn render_hash(
         "{}  ({} bytes in {} ms)",
         data.artifact_id, data.size_bytes, data.duration_ms,
     )
+}
+
+fn render_symbols(
+    data: &Vec<glass_api::SymbolListing>,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    for listing in data {
+        writeln!(
+            out,
+            "{}  {} of {} symbols",
+            listing.artifact, listing.shown, listing.total,
+        )?;
+        for s in &listing.symbols {
+            writeln!(
+                out,
+                "  {:>18}  {:>10}  {:?}  {}",
+                s.address, s.size, s.kind, s.demangled,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn render_symbol_at(
+    data: &Option<glass_api::SymbolInfo>,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    match data {
+        Some(s) => writeln!(
+            out,
+            "{}  {} bytes  {:?}  {}  ({})",
+            s.address, s.size, s.kind, s.demangled, s.name,
+        ),
+        None => writeln!(out, "(no symbol covers that address)"),
+    }
+}
+
+fn render_demangle(
+    data: &glass_api::DemangleResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    if data.demangled == data.input {
+        writeln!(out, "{}  (not mangled)", data.input)
+    } else {
+        writeln!(out, "{}", data.demangled)
+    }
 }
 
 // Marker — `Envelope` referenced in the function signatures.

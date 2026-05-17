@@ -8,6 +8,26 @@ mod verbs;
 
 use output::Format;
 
+/// Clap-friendly mirror of `glass_api::SymbolKindName`. Kept here
+/// so glass-api stays free of clap.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+enum SymbolKindArg {
+    Function,
+    Object,
+    Other,
+}
+
+impl From<SymbolKindArg> for glass_api::SymbolKindName {
+    fn from(k: SymbolKindArg) -> Self {
+        match k {
+            SymbolKindArg::Function => glass_api::SymbolKindName::Function,
+            SymbolKindArg::Object => glass_api::SymbolKindName::Object,
+            SymbolKindArg::Other => glass_api::SymbolKindName::Other,
+        }
+    }
+}
+
 /// Returns Some(result) for automation verbs that handle their own
 /// emission, None for legacy text-output subcommands that the
 /// regular match below dispatches.
@@ -20,6 +40,23 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         }
         Cmd::BinaryInfo { path } => Some(verbs::binary_info(path.clone(), format)),
         Cmd::Hash { path } => Some(verbs::hash(path.clone(), format)),
+        Cmd::Symbols { path, artifact, filter, kind, limit } => {
+            Some(verbs::symbols(
+                path.clone(),
+                artifact.clone(),
+                filter.clone(),
+                kind.map(Into::into),
+                *limit,
+                format,
+            ))
+        }
+        Cmd::SymbolAt { path, addr, artifact } => Some(verbs::symbol_at(
+            path.clone(),
+            addr.clone(),
+            artifact.clone(),
+            format,
+        )),
+        Cmd::Demangle { name } => Some(verbs::demangle(name.clone(), format)),
         _ => None,
     }
 }
@@ -60,6 +97,33 @@ enum Cmd {
     BinaryInfo { path: PathBuf },
     /// Content-hash a file (replaces hash-bench).
     Hash { path: PathBuf },
+    /// List symbols across one or all artifacts.
+    Symbols {
+        path: PathBuf,
+        /// Limit to one artifact (label or hex-prefix of its id).
+        #[arg(long)]
+        artifact: Option<String>,
+        /// Substring filter (case-insensitive) on the demangled name.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Only return symbols of this kind.
+        #[arg(long, value_enum)]
+        kind: Option<SymbolKindArg>,
+        /// Cap results per artifact.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Look up the symbol covering / at an address.
+    SymbolAt {
+        path: PathBuf,
+        /// Hex address (with or without 0x prefix).
+        addr: String,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+    },
+    /// Demangle a single symbol name (no bundle required).
+    Demangle { name: String },
 
     // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
@@ -206,7 +270,10 @@ fn main() -> Result<()> {
         | Cmd::Artifacts { .. }
         | Cmd::Sections { .. }
         | Cmd::BinaryInfo { .. }
-        | Cmd::Hash { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::Hash { .. }
+        | Cmd::Symbols { .. }
+        | Cmd::SymbolAt { .. }
+        | Cmd::Demangle { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 

@@ -18,7 +18,9 @@ pub use cfg::{
 };
 pub use format::{Chunk, ChunkKind};
 pub use macho_fat::thin_slice_macho;
-pub use symbol_map::{Symbol, SymbolKind, SymbolMap, SymbolSources};
+pub use symbol_map::{
+    demangle as demangle_symbol, Symbol, SymbolKind, SymbolMap, SymbolSources,
+};
 
 pub struct Arm64Binary {
     pub path: std::path::PathBuf,

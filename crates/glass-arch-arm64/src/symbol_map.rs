@@ -49,7 +49,7 @@ pub struct Symbol {
 /// Run `symbolic-demangle` over `raw`, returning the demangled form
 /// when it differs from the input. Falls back to the raw name on any
 /// error so callers can use this unconditionally.
-fn demangle(raw: &str) -> String {
+pub fn demangle(raw: &str) -> String {
     use symbolic_common::{Language, Name, NameMangling};
     use symbolic_demangle::{Demangle, DemangleOptions};
     // Mangled inputs always start with a sigil — `_Z` (Itanium C++),

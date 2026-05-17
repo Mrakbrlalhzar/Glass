@@ -22,11 +22,15 @@
 
 mod bundle;
 mod inspect;
+mod symbols;
 
 pub use bundle::{open, Bundle, BundleKind};
 pub use inspect::{
     ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,
     SectionInfo,
+};
+pub use symbols::{
+    demangle, DemangleResult, SymbolInfo, SymbolKindName, SymbolListing, SymbolQuery,
 };
 
 use anyhow::{Context, Result};
