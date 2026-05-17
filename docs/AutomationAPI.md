@@ -253,6 +253,280 @@ become thin: glass-cli parses argv → dispatches → serialises to
 JSON; glass-script binds JS functions → calls the same API → returns
 to rquickjs.
 
+## Scripting model — discovery, lifecycle, hooks
+
+The CLI shape above covers "I want to ask Glass a question from
+the command line." Scripts cover the more interesting case:
+**user-supplied analyses that live inside the GUI**. Loaded
+automatically at startup, hooked into menus / context actions, and
+free to render their own results back into the window.
+
+### Discovery
+
+- Scripts live in `~/Library/Application Support/Glass/scripts/`
+  (macOS) — one file per script, plain JS / TypeScript. Sub-
+  directories allowed; the loader walks recursively.
+- On launch, Glass scans the directory. For each `*.js` file:
+  1. Parse + evaluate the module in its own QuickJS Realm.
+  2. Call the module's `describe()` function. If absent or it
+     throws, the script is marked failed; surfaced in the
+     **Glass → Scripts…** dialog with the error.
+  3. Cache the result keyed by file path + mtime. Re-runs only
+     when the file changes (live edit-and-reload).
+- The scripts directory ships with a sample script per hook kind
+  so new users have something to crib from.
+
+### `describe()` — the metadata contract
+
+Returns a single object describing what the script wants to be:
+
+```js
+export function describe() {
+  return {
+    name: "Find unreachable exports",
+    description: "Symbols exported from .dynsym with zero xrefs.",
+    version: "1.0.0",
+    author: "azw",
+    permissions: ["read"],          // see below
+    hooks: [
+      // Always-available menu item.
+      { kind: "menu", path: "Scripts / Analyse / Unreachable exports" },
+      // Per-view context-menu entry. The `when` field is a
+      // boolean expression evaluated when the menu opens; "true"
+      // means always show.
+      { kind: "context", view: "listing", label: "Find unreachable exports", when: "selection.kind == 'function'" },
+      // Keyboard shortcut. Activatable from anywhere.
+      { kind: "shortcut", binding: "cmd-shift-u" },
+      // Lifecycle. Fires once per bundle load, before the user
+      // can interact. Heavy work should defer to `idle`.
+      { kind: "lifecycle", event: "bundle-loaded" },
+    ],
+    // Optional. When omitted the script doesn't produce output —
+    // useful for pure side-effects like annotating a bundle.
+    output: { kind: "pane", title: "Unreachable exports" },
+  };
+}
+```
+
+Hook kinds:
+
+| Kind | Args bag passed to `execute()` | Notes |
+|---|---|---|
+| `menu` | `{ kind: "menu" }` | Top-level / submenu entry. `path` is `/`-separated; Glass creates the submenu hierarchy. |
+| `context` | `{ kind: "context", view, target }` | `view` = `listing`/`hex`/`smali`/`cfg`/`dex-cg`/`overview`. `target` is view-specific (address + artifact for listing, method key for smali, etc.). |
+| `shortcut` | `{ kind: "shortcut", chord }` | Bound globally. Conflicts with built-in shortcuts → script fails to register with a clear error. |
+| `lifecycle` | `{ kind: "lifecycle", event, bundleId }` | `event` ∈ `app-launch`, `bundle-loaded`, `tab-open`, `tab-close`, `app-quit`. Run on the main thread by default; opt into background by returning a promise. |
+
+### `execute(args)` — the work
+
+Glass calls `execute(args)` synchronously by default. The script
+can:
+
+- Read from the bundle via `glass.*` (whichever capabilities its
+  declared `permissions` allow).
+- Emit content into its declared `output` channel.
+- Trigger GUI actions: open a tab, focus a window, show a toast.
+
+Output kinds:
+
+| `output.kind` | Behaviour |
+|---|---|
+| `pane` | A new side panel (or focused if already open) named `title`. Script populates it via `glass.output.push(element)`. Cleared at the start of each `execute()` unless `accumulate: true`. |
+| `tab` | A new transient tab kind. Same `push()` API; persists across tab switches but not across app restarts. |
+| `console` | Equivalent to CLI mode — emits JSON / text the user can copy. Surfaced in a small modal. |
+| (omitted) | No output channel; the script is pure side-effect (annotates, opens a built-in view, etc.). |
+
+`glass.output.push(...)` takes a structured element — not raw
+HTML. The element vocabulary maps to gpui primitives so we don't
+have to ship an HTML renderer:
+
+```js
+glass.output.push({ kind: "heading", text: "Methods calling Cipher.doFinal" });
+glass.output.push({
+  kind: "table",
+  header: ["Class", "Method", "Call site"],
+  rows: matches.map(m => [
+    { text: m.class, link: { kind: "smali", jni: m.classJni } },
+    { text: m.method },
+    { text: m.callerKey, link: { kind: "smali", jni: m.classJni, line: m.line } },
+  ]),
+});
+glass.output.push({ kind: "code", language: "smali", text: snippet });
+glass.output.push({ kind: "log", level: "warn", text: "47 methods skipped (no body)" });
+```
+
+Element kinds (MVP): `heading`, `text`, `table`, `code`, `log`,
+`divider`, `link`. `link.kind` reuses the same `SearchJump` enum
+as the palette so navigation behaviour is identical.
+
+### Lifecycles, end-to-end
+
+#### Script that adds a context-menu entry
+
+```
+app launch:
+  walk scripts dir → for each *.js:
+    parse + eval module in fresh Realm
+    call describe()
+    register declared hooks
+      e.g. context-menu hook "Find unreachable exports" on listing view
+
+user opens a bundle, right-clicks an address in the disassembly:
+  Glass builds the context menu
+    evaluates each registered context hook's `when` expression
+    inserts the matching ones at the bottom
+  user picks "Find unreachable exports"
+    Glass creates / focuses the output pane named "Unreachable exports"
+    Glass calls script.execute({
+      kind: "context",
+      view: "listing",
+      target: { artifact: "...", section: ".text", address: "0x100a4" },
+    })
+    script does its work, calls glass.output.push(...)
+    Glass renders the pushed elements into the pane
+
+next time user right-clicks: script's Realm is preserved → any
+module-level state from the previous call is still there.
+```
+
+#### Lifecycle script that runs at load
+
+```
+user opens an APK:
+  loader pipeline runs through to ShellState::Ready
+  Glass fires the `bundle-loaded` lifecycle event
+    for each script that registered for this event:
+      Glass.spawn_background({
+        script.execute({
+          kind: "lifecycle",
+          event: "bundle-loaded",
+          bundleId: "blake3:...",
+        })
+      })
+  watchdog: each script gets a 30s budget; exceeding it pauses
+  it and surfaces a warning in the Scripts dialog.
+```
+
+#### Reload-on-edit during development
+
+```
+user edits ~/.../scripts/foo.js:
+  fs-watcher fires
+  Glass re-reads + re-evaluates the module in a new Realm
+  describe() runs again → hooks re-registered (replacing the old ones)
+  the next time the user invokes the script, the new code runs
+```
+
+### Permissions
+
+`describe().permissions` is a coarse-grained capability declaration:
+
+| Permission | Grants |
+|---|---|
+| `read` | Every read-only `glass.*` call. Default for new scripts. |
+| `annotate` | Write paths into `redb`: annotations, bookmarks. |
+| `gui` | Open / focus tabs, show notifications, prompt the user. |
+| `network` | `glass.fetch(url)`. Behind a confirmation dialog on first use per script. |
+| `fs` | Read / write outside the bundle (e.g. emit a report.csv next to the binary). |
+
+A script tries to call something its declared permissions don't
+cover → the binding throws a `PermissionDeniedError` the script
+can catch + show in its UI. Glass also surfaces these in the
+Scripts dialog so the user sees which scripts touched what.
+
+The user can override per-script in **Glass → Scripts… → Permissions**.
+
+### Worked examples — what's achievable
+
+#### 1. Decryption-routine detector
+*"Every smali method called `decrypt*` that calls a Cipher API."*
+- `bundle-loaded` lifecycle hook.
+- Read `glass.classes()` → for each class with matching methods,
+  read `glass.smali()` → grep for `Ljavax/crypto/Cipher;->doFinal`
+  / similar.
+- Output a `table` pane with class / method / call-site links.
+
+#### 2. JNI binding mapper
+*"Show the JNI native function for each `native` smali method."*
+- Context-menu entry on smali `.method native` lines.
+- Read the method signature, apply JNI mangling, search native
+  exports for the demangled name, open a Listing tab there.
+
+#### 3. Anti-debug fingerprint
+*"Walk every native lib, flag known anti-debug patterns."*
+- Lifecycle `bundle-loaded` on APK / IPA.
+- For each AArch64 text section: scan for `ptrace`, `__strncmp_chk`,
+  `gettid`-comparing-against-known-debugger-pids patterns.
+- Annotate matched addresses (`annotate` permission), push to
+  the output pane.
+
+#### 4. Symbol-export coverage report
+*"How many of this binary's exports have actual callers?"*
+- Menu entry.
+- `glass.symbols({ kind: "Function" })` + `glass.callers(addr)` for each.
+- Output: code-listing of uncalled exports + a count summary.
+
+#### 5. Selective demangling
+*"Demangle a single symbol with verbose output."*
+- Shortcut `cmd-shift-d`, context-menu on a listing operand.
+- `glass.demangle(name, { verbose: true })`.
+- Output: `console` kind — small modal.
+
+#### 6. CFG complexity scorer
+*"Annotate each function with a cyclomatic-complexity score."*
+- Lifecycle `bundle-loaded`.
+- For each function: `glass.cfg()` → compute edges − nodes + 2.
+- Annotate high-complexity functions; render a sortable table in
+  the pane.
+
+#### 7. String reference dumper
+*"Every place in the binary that points at a string matching a
+regex."*
+- Menu entry; prompts for the regex via `glass.gui.prompt()`.
+- `glass.strings()` filtered by regex → for each, `glass.xrefAddress()`.
+- Output: table linking to each call site.
+
+#### 8. DEX → native bridge map *(post cross-DEX↔native xrefs)*
+*"Every Java method that's bound to a native symbol."*
+- Lifecycle `bundle-loaded` on APK.
+- `glass.jniBindings()` → table with two-column links (smali ↔ native).
+
+### Risk + safety
+
+- **Watchdog timer.** Each script invocation has a budget
+  (default 30 s for lifecycle, 5 s for menu / context). Exceeding
+  it pauses the QuickJS interpreter (rquickjs supports this).
+  Pausing once → warning. Twice → script disabled until next
+  manual reload.
+- **Crash isolation.** A script throwing doesn't unwind into
+  Glass; the host catches, surfaces the stack trace in the
+  Scripts dialog, leaves the rest of the app alive.
+- **No filesystem / network without declared permission.**
+  See the permissions table above.
+- **Disable / enable per script.** A simple checklist in the
+  Scripts dialog. State persisted in `~/Library/Application
+  Support/Glass/scripts/.disabled` (single file, one path per line)
+  so the user can also flip it from outside Glass.
+- **Reset module state.** A "Reset" button next to each script
+  drops + re-creates its Realm — clears caches, runs `describe()`
+  again. Handy when iterating.
+
+### What scripts can't (yet) do
+
+Out of scope for the first cut; document the gaps so script
+authors know what's coming:
+
+- **Persist results across app restarts** beyond what they
+  annotate via the existing `redb` paths. A proper
+  `glass.storage` key-value store is a follow-up.
+- **Run after the app exits.** No daemon / scheduled-task model.
+- **Modify the binary on disk.** Needs the in-place-edit writer
+  from the roadmap; once that lands, scripts get
+  `glass.patch(addr, bytes)` behind the `fs` permission.
+- **Block on UI input across multiple steps.** A wizard-style
+  multi-prompt flow needs an explicit Generator-style API; v1
+  exposes only single `glass.gui.prompt(question)`.
+
 ## Open questions
 
 - **Bundle handle lifetime in JS.** Single-script: bundle opens
@@ -289,5 +563,16 @@ to rquickjs.
 3. Stand up the rquickjs host in `glass-script`. Start with a
    handful of bindings (`open`, `symbols`, `disasm`) to validate
    the FFI shape before scaling out.
-4. Wire `glass run script.js` into the CLI. GUI menu integration
-   comes later.
+4. Wire `glass run script.js` into the CLI for headless single-
+   script execution.
+5. Scripts directory + GUI integration:
+   - Loader that walks `~/Library/Application Support/Glass/scripts/`,
+     calls `describe()` per file, registers hooks.
+   - Hook plumbing for `menu`, `context`, `shortcut`, `lifecycle`.
+   - Output-pane gpui surface + the structured-element renderer.
+   - Watchdog timer + crash isolation.
+   - Permissions enforcement at the binding layer.
+   - **Glass → Scripts…** management dialog (list, enable/disable,
+     reset, view permissions).
+6. Ship the per-hook sample scripts (one per row from "Worked
+   examples" above) so users have working code to crib.
