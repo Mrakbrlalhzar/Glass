@@ -12,10 +12,10 @@
 * ~~Goto address function - top bar (straight to section) - validates address as typing (red -> white) and then jump to appropriate view~~
 * ~~Overview bar cursor should go to nearest function start for disassembly views rather than actual address (might not be byte aligned otherwise)~~
 * ~~Package as a MacOS app in a CI job (github action)~~
-* Extend search to search for instruction sequences with operands fuzzy e.g. adrp <reg>; add <reg>, <reg>, <anything>
-* script engine API over surface of all functionality
-* scripting setup e.g. scripts describe their function and add to menus
-* execute scripts
-* In place edits (instructions & data), patch and save binary
-* Command line capabilities
-* MCP skills catalog over API
+* Extend search to search for instruction sequences with operands fuzzy e.g. adrp <reg>; add <reg>, <reg>, <anything> *(note: query language design first — sketch a pattern grammar + matcher prototype against an existing SymbolMap+text-section before plumbing into the cmd-F palette. Deferred.)*
+* script engine API over surface of all functionality *(note: `glass-script` crate exists as a placeholder; needs the QuickJS host + a designed API surface — what gets exposed (tabs, symbols, listing rows, write-paths?) is the hard part. Deferred.)*
+* scripting setup e.g. scripts describe their function and add to menus *(note: depends on the scripting engine landing first.)*
+* execute scripts *(note: depends on the scripting engine landing first.)*
+* In place edits (instructions & data), patch and save binary *(note: needs a writer in armv8-encode + reverse mapping from edited rows back to container offsets; also UX for an edit/undo stack and a "save patched binary" path. Deferred.)*
+* Command line capabilities *(note: scope unclear — likely means non-GUI subcommands that mirror in-app operations (search, xrefs, dump-symbols). Worth designing alongside the scripting engine since they share an API surface. Deferred.)*
+* MCP skills catalog over API *(note: depends on the scripting/API surface landing first — the MCP server would be a transport over the same API.)*
