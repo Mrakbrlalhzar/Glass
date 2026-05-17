@@ -148,10 +148,11 @@ struct Cli {
     /// launch. Only meaningful when running the GUI (no subcommand).
     #[arg(long)]
     fresh: bool,
-    /// Output format for automation-API verbs. Ignored by the GUI
-    /// and the legacy subcommands (arm64, bundle, db-dump, cfg).
-    #[arg(long, value_enum, global = true, default_value_t = Format::default())]
-    format: Format,
+    /// Render automation-API verbs as human-readable text instead
+    /// of JSON. Ignored by the GUI and the legacy subcommands
+    /// (arm64, bundle, cfg).
+    #[arg(long, global = true)]
+    text: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -402,7 +403,7 @@ fn main() -> Result<()> {
         // path + the top-level --fresh flag.
         None => Cmd::Gui { path: cli.path, fresh: cli.fresh },
     };
-    let format = cli.format;
+    let format = Format::from_flag(cli.text);
     // Automation verbs handle their own JSON / text emission and
     // exit with a structured error on failure.
     if let Some(handler) = automation_dispatch(&cmd, format) {
