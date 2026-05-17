@@ -164,7 +164,14 @@ pub fn render_dex_callgraph(
                     .and_then(|m| m.split('(').next())
                     .unwrap_or(&key)
                     .to_string();
-                shell.open_smali_link_context_menu(leaf, line, label, pos, cx);
+                shell.open_smali_link_context_menu(
+                    leaf,
+                    line,
+                    Some(key.clone()),
+                    label,
+                    pos,
+                    cx,
+                );
             },
         )
     });

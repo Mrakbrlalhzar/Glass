@@ -31,32 +31,80 @@ impl Shell {
         accent: gpui::Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let results: Vec<SearchEntry> = self
-            .search_index
-            .as_ref()
-            .map(|idx| {
-                idx.filter(&self.palette_query, 50)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let results: Vec<SearchEntry> = self.palette_visible_entries();
         let selected = self.palette_selected;
         let results_arc: Arc<Vec<SearchEntry>> = Arc::new(results);
         let scroll = self.palette_list_state.clone();
         let len = self.palette_list_len;
         let weak = cx.entity().downgrade();
 
-        let status = if self.search_indexing {
+        // Scope chip — shown above the input row when scoped.
+        let scope_chip: Option<gpui::Div> = self.palette_scope.as_ref().map(|scope| {
+            let progress = scope.progress.as_ref().map(|p| p.lock().clone());
+            let count_text = match progress.as_ref() {
+                Some(p) => format!(
+                    "{} — indexing {}/{}",
+                    scope.label, p.current, p.total
+                ),
+                None => format!("{} — {} results", scope.label, scope.entries.len()),
+            };
+            div()
+                .flex_shrink_0()
+                .px_3()
+                .py_2()
+                .bg(rgb(0x2a313cff & 0x00ff_ffff | 0xff_00_00_00))
+                .border_b_1()
+                .border_color(border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x66c2ff))
+                                .child("⇉"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(fg)
+                                .text_sm()
+                                .font_family("Courier New")
+                                .child(SharedString::from(count_text)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(dim)
+                                .child(SharedString::from("Esc clears scope")),
+                        ),
+                )
+        });
+
+        let status = if self.palette_scope.is_some() {
+            format!("{} shown", len)
+        } else if self.search_indexing {
             "indexing…".to_string()
         } else if self.search_index.is_none() {
             "no index".to_string()
         } else {
-            format!("{} of {} matches", len, self
-                .search_index
-                .as_ref()
-                .map(|i| i.entries.len())
-                .unwrap_or(0))
+            format!(
+                "{} of {} matches",
+                len,
+                self.search_index.as_ref().map(|i| i.entries.len()).unwrap_or(0)
+            )
+        };
+
+        let placeholder = if self.palette_scope.is_some() {
+            "filter results…"
+        } else {
+            "search symbols, classes, strings…"
         };
 
         let input_row = div()
@@ -82,7 +130,7 @@ impl Shell {
                     .text_base()
                     .font_family("Courier New")
                     .child(if self.palette_query.is_empty() {
-                        SharedString::from("search symbols, classes, strings…")
+                        SharedString::from(placeholder)
                     } else {
                         SharedString::from(self.palette_query.clone())
                     }),
@@ -168,8 +216,8 @@ impl Shell {
                     this.close_palette(cx);
                 }),
             )
-            .child(
-                div()
+            .child({
+                let mut card = div()
                     .id("palette-card")
                     .mt(px(80.))
                     .w(px(960.))
@@ -182,16 +230,17 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    // Eat clicks inside so the backdrop handler doesn't fire.
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         |_ev, _w, cx: &mut App| {
                             cx.stop_propagation();
                         },
-                    )
-                    .child(input_row)
-                    .child(list_el),
-            )
+                    );
+                if let Some(chip) = scope_chip {
+                    card = card.child(chip);
+                }
+                card.child(input_row).child(list_el)
+            })
     }
 
     /// Render the right-click context menu as a small floating panel

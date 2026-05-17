@@ -26,7 +26,9 @@ use crate::cfg_block::{
 use crate::graph::{
     self, EdgeKind, EdgeStyle, GraphScene, NodeHints, NodeId, NodeRect, NodeTags,
 };
-use crate::graph_canvas::{render_graph_canvas, CameraHooks, NodeClickFn, NodeContentFn};
+use crate::graph_canvas::{
+    render_graph_canvas, CameraHooks, NodeClickFn, NodeContentFn, NodeRightClickFn,
+};
 use crate::{LoadedBundle, Shell};
 
 const LOD_PILL_MAX: f32 = 50.;
@@ -230,6 +232,42 @@ pub fn render_cfg(
         )
     });
 
+    // Right-click on a block → open the link context menu with
+    // Follow / Follow in new tab + Callers of function. Uses the
+    // block's start_addr as both the navigation target and the
+    // xref query target.
+    let node_right_click: Option<NodeRightClickFn> = Some({
+        let blocks = blocks_arc.clone();
+        let artifact = artifact_arc.clone();
+        Box::new(
+            move |shell: &mut Shell,
+                  nid: NodeId,
+                  pos: gpui::Point<gpui::Pixels>,
+                  cx: &mut Context<Shell>| {
+                let Some(block) = blocks.get(nid.0) else { return };
+                let bundle = match shell.bundle().cloned() {
+                    Some(b) => b,
+                    None => return,
+                };
+                let Some(section) =
+                    bundle.text_section_for_addr(&artifact, block.start_addr)
+                else {
+                    return;
+                };
+                let display = format!("0x{:x}", block.start_addr);
+                shell.open_link_context_menu(
+                    artifact.clone(),
+                    section.to_string(),
+                    block.start_addr,
+                    false,
+                    display,
+                    pos,
+                    cx,
+                );
+            },
+        )
+    });
+
     let hooks = CameraHooks {
         pan_by: Box::new(|shell, dx, dy, cx| shell.cfg_pan_by(dx, dy, cx)),
         zoom_by: Box::new(|shell, anchor, delta, cx| {
@@ -269,7 +307,7 @@ pub fn render_cfg(
         Some(header_subtitle),
         content,
         node_click,
-        None, // node_right_click
+        node_right_click,
         None, // node_hover
         hooks,
         cx,

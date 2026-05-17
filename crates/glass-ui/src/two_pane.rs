@@ -639,12 +639,46 @@ pub fn render_two_pane(
                                                 else {
                                                     return;
                                                 };
-                                                // Walk upward from the
-                                                // right-clicked line to find
-                                                // the most recent `.method`
-                                                // declaration. That's the
-                                                // method containing this
-                                                // line.
+                                                let pos = ev.position;
+                                                // First: is this row itself a
+                                                // `.field` line? If so, show
+                                                // "References to field".
+                                                if let Some(row) = right_lines.get(index) {
+                                                    let trimmed = row.trim_start();
+                                                    if let Some(after) =
+                                                        trimmed.strip_prefix(".field ")
+                                                    {
+                                                        if let Some(decl) = after
+                                                            .split_whitespace()
+                                                            .last()
+                                                        {
+                                                            let field_ref = format!(
+                                                                "{class_jni}->{decl}"
+                                                            );
+                                                            let label =
+                                                                decl.to_string();
+                                                            if let Some(entity) =
+                                                                right_weak.upgrade()
+                                                            {
+                                                                cx.update_entity(
+                                                                    &entity,
+                                                                    |shell, cx| {
+                                                                        shell.open_field_context_menu(
+                                                                            field_ref,
+                                                                            label,
+                                                                            pos,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                                // Otherwise: find the enclosing
+                                                // .method and use the method
+                                                // context menu.
                                                 let mut method_decl: Option<String> = None;
                                                 for j in (0..=index).rev() {
                                                     let Some(line) = right_lines.get(j) else { continue };
@@ -661,13 +695,10 @@ pub fn render_two_pane(
                                                         break;
                                                     }
                                                     if trimmed.starts_with(".end method") {
-                                                        // We're outside any
-                                                        // method; no menu.
                                                         return;
                                                     }
                                                 }
                                                 let Some(method_decl) = method_decl else { return };
-                                                let pos = ev.position;
                                                 if let Some(entity) = right_weak.upgrade() {
                                                     cx.update_entity(
                                                         &entity,

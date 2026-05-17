@@ -41,6 +41,32 @@ pub enum ContextMenuItem {
         method_decl: String,
         label: SharedString,
     },
+    /// "References to address" — opens the scoped palette with
+    /// every caller-site of `addr` in `artifact`.
+    XrefsToAddress {
+        artifact: glass_db::ArtifactId,
+        addr: u64,
+        label: SharedString,
+    },
+    /// "Callers of function" — same as XrefsToAddress but worded
+    /// for a function entry point. Identical mechanics.
+    CallersOfFunction {
+        artifact: glass_db::ArtifactId,
+        entry_addr: u64,
+        label: SharedString,
+    },
+    /// "Callers of method" — opens the scoped palette with every
+    /// DEX method that invokes `method_key`.
+    CallersOfMethod {
+        method_key: String,
+        label: SharedString,
+    },
+    /// "References to field" — opens the scoped palette with every
+    /// DEX method that touches `field_ref`.
+    RefsToField {
+        field_ref: String,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -114,6 +140,18 @@ pub fn render_context_menu(
             }
             ContextMenuItem::ShowDexCallGraph { label, .. } => {
                 ("Show call graph".to_string(), label.clone())
+            }
+            ContextMenuItem::XrefsToAddress { label, .. } => {
+                ("References to address".to_string(), label.clone())
+            }
+            ContextMenuItem::CallersOfFunction { label, .. } => {
+                ("Callers of function".to_string(), label.clone())
+            }
+            ContextMenuItem::CallersOfMethod { label, .. } => {
+                ("Callers of method".to_string(), label.clone())
+            }
+            ContextMenuItem::RefsToField { label, .. } => {
+                ("References to field".to_string(), label.clone())
             }
         };
         let weak = weak.clone();

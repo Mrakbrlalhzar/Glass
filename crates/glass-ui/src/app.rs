@@ -401,9 +401,97 @@ fn spawn_loader(shell: &gpui::Entity<Shell>, path: PathBuf, cx: &mut App) {
                 shell.restore_state(&bundle);
                 shell.rebuild_list_state();
                 shell.save_state();
+                // Kick off xref-index builders. Each runs on its own
+                // background task and writes results into the
+                // bundle's XrefStore. The Shell renders progress
+                // chips in scoped palettes while these build.
+                spawn_xref_builders(&bundle, cx);
             }
             cx.notify();
         });
     })
     .detach();
+}
+
+/// Spawn the three xref-index builders on background tasks. Each
+/// transitions the matching `XrefStore` slot through
+/// Pending → Building(progress) → Ready(index).
+fn spawn_xref_builders(bundle: &crate::LoadedBundle, cx: &mut App) {
+    use crate::xref::{XrefIndexState, XrefProgress};
+    use parking_lot::Mutex;
+
+    // ---- DEX callers (inverse method_calls) ---------------------
+    // Cheap — milliseconds even on huge DEX. Still on a background
+    // task for uniformity.
+    {
+        let slot = bundle.xrefs.dex_callers.clone();
+        let method_calls = bundle.method_calls.clone();
+        let progress = Arc::new(Mutex::new(XrefProgress {
+            label: "DEX callers".to_string(),
+            current: 0,
+            total: method_calls.len(),
+        }));
+        *slot.write() = XrefIndexState::Building(progress.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let mut inv: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for (caller, callees) in method_calls.iter() {
+                    for callee in callees {
+                        inv.entry(callee.clone()).or_default().push(caller.clone());
+                    }
+                    let mut p = progress.lock();
+                    p.current += 1;
+                }
+                *slot.write() = XrefIndexState::Ready(Arc::new(inv));
+            })
+            .detach();
+    }
+
+    // ---- AArch64 xref index (the slow one) ----------------------
+    // Walks every text section, decodes every instruction. 1-2s on
+    // a 23 MB lib. The actual builder lands in a follow-up commit;
+    // for now we transition straight to Ready(empty) so the slot is
+    // queryable.
+    {
+        let slot = bundle.xrefs.native.clone();
+        let text_sections = bundle.text_sections.clone();
+        let progress = Arc::new(Mutex::new(XrefProgress {
+            label: "Native references".to_string(),
+            current: 0,
+            total: text_sections
+                .values()
+                .map(|t| t.bytes.len() / 4)
+                .sum(),
+        }));
+        *slot.write() = XrefIndexState::Building(progress.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let xrefs = crate::xref::build_native_xrefs(&text_sections, &progress);
+                *slot.write() = XrefIndexState::Ready(Arc::new(xrefs));
+            })
+            .detach();
+    }
+
+    // ---- DEX field refs -----------------------------------------
+    {
+        let slot = bundle.xrefs.dex_field_refs.clone();
+        let bodies = bundle.bodies.clone();
+        let kinds = bundle.kinds.clone();
+        let progress = Arc::new(Mutex::new(XrefProgress {
+            label: "DEX field refs".to_string(),
+            current: 0,
+            total: kinds
+                .iter()
+                .filter(|k| matches!(k, crate::LeafKind::SmaliClass { .. }))
+                .count(),
+        }));
+        *slot.write() = XrefIndexState::Building(progress.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let refs = crate::xref::build_dex_field_refs(&bodies, &kinds, &progress);
+                *slot.write() = XrefIndexState::Ready(Arc::new(refs));
+            })
+            .detach();
+    }
 }

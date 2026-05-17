@@ -58,7 +58,7 @@ impl SearchIndex {
     }
 }
 
-fn is_subsequence(needle: &str, hay: &str) -> bool {
+pub(crate) fn is_subsequence(needle: &str, hay: &str) -> bool {
     let mut h = hay.chars();
     'outer: for nc in needle.chars() {
         for hc in h.by_ref() {

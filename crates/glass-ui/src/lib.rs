@@ -48,6 +48,7 @@ mod shell_actions;
 mod shell_render;
 mod smali;
 mod two_pane;
+mod xref;
 
 pub use app::launch;
 use context_menu::{ContextMenuItem, ContextMenuState};
@@ -55,6 +56,7 @@ use dex_callgraph::DexCallGraphState;
 use loader::load_bundle_blocking;
 pub use loader::snapshot_arm64;
 pub use search::{build_search_index, SearchEntry, SearchIndex, SearchJump};
+pub use xref::{PaletteScope, PaletteScopeSource, XrefIndexState, XrefProgress, XrefStore};
 use search::jni_to_dotted;
 
 pub use hex::{build_hex_rows, hex_row_for_addr, HexRow};
@@ -191,6 +193,11 @@ pub struct LoadedBundle {
     /// Pre-flattened AndroidManifest rows for the XML viewer. Empty
     /// for non-APK bundles or APKs without a parseable manifest.
     pub manifest_rows: Arc<Vec<ManifestRow>>,
+    /// Cross-reference store. Built on background threads after
+    /// foreground load completes so first paint stays fast. Right-
+    /// click "References / Callers" menus consult this; while a
+    /// given index is `Building` the menu shows a progress chip.
+    pub xrefs: xref::XrefStore,
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
@@ -907,11 +914,16 @@ pub(crate) struct Shell {
     pub(crate) search_indexing: bool,
     /// Palette modal state. Survives close+reopen — the user's last
     /// query and selection come back when they click the icon again.
-    palette_open: bool,
+    pub(crate) palette_open: bool,
     pub(crate) palette_query: String,
     pub(crate) palette_selected: usize,
     pub(crate) palette_list_state: ListState,
     pub(crate) palette_list_len: usize,
+    /// When `Some`, the palette is showing a scoped result set
+    /// (e.g. "Callers of foo") rather than the bundle-wide search.
+    /// Esc clears the scope back to bundle-wide search rather than
+    /// closing the palette outright.
+    pub(crate) palette_scope: Option<crate::PaletteScope>,
     /// Whether the palette's text input has focus. Set on open and on
     /// any click inside the input area.
     palette_focused: bool,
@@ -1119,6 +1131,13 @@ impl Render for Shell {
                 this.toggle_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
+                // Esc on a scoped palette first clears the scope —
+                // back to bundle-wide search. Only a second Esc
+                // closes the palette outright.
+                if this.palette_open && this.palette_scope.is_some() {
+                    this.clear_palette_scope(cx);
+                    return;
+                }
                 this.close_palette(cx);
                 this.close_context_menu(cx);
                 this.close_about(cx);

@@ -18,7 +18,8 @@ use crate::context_menu::{ContextMenuItem, ContextMenuState};
 use crate::dex_callgraph::DexCallGraphState;
 use crate::hex::{build_hex_rows, hex_row_for_addr, HexRow};
 use crate::listing_model::{build_listing_rows, listing_row_for_addr, DataPeek, ListingRow};
-use crate::search::{build_search_index, SearchIndex, SearchJump};
+use crate::search::{build_search_index, is_subsequence, SearchIndex, SearchJump};
+use crate::SearchEntry;
 use crate::{
     flatten, scroll_into_view_with_context, CfgViewState, Expanded, LeafId, LeafKind,
     LoadedBundle, NativeSectionKind, Progress, RowKind, SectionInfo, Shell, ShellState, Tab,
@@ -68,6 +69,7 @@ impl Shell {
             palette_selected: 0,
             palette_list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
             palette_list_len: 0,
+            palette_scope: None,
             palette_focused: false,
             context_menu: None,
             goto_focused: false,
@@ -736,6 +738,151 @@ impl Shell {
     pub(crate) fn close_palette(&mut self, cx: &mut Context<Self>) {
         if self.palette_open {
             self.palette_open = false;
+            // Reset scope on close so the next cmd-F opens a clean
+            // bundle-wide search.
+            self.palette_scope = None;
+            cx.notify();
+        }
+    }
+
+    /// Open the palette in scoped mode. The header chip shows
+    /// `label`, the list shows `scope.entries` (refined by typing).
+    /// Esc clears the scope rather than closing the palette
+    /// outright.
+    pub(crate) fn open_scoped_palette(
+        &mut self,
+        scope: crate::PaletteScope,
+        cx: &mut Context<Self>,
+    ) {
+        let was_pending = scope.progress.is_some();
+        self.palette_scope = Some(scope);
+        self.palette_open = true;
+        self.palette_focused = true;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.refresh_palette_list();
+        cx.notify();
+        if was_pending {
+            self.spawn_xref_scope_poller(cx);
+        }
+    }
+
+    /// Tick at ~30 fps while the open scoped palette is still
+    /// waiting on a building xref index. Each tick re-checks the
+    /// XrefStore and rebuilds the scope's entries when the index
+    /// transitions to Ready. Stops once the scope is gone, closed,
+    /// or the index is done.
+    fn spawn_xref_scope_poller(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let stop = this
+                    .update(cx, |shell, cx| {
+                        shell.refresh_xref_scope_if_pending(cx)
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// If the current palette scope is waiting on a building xref
+    /// index, peek at the underlying state and rebuild entries when
+    /// the index has become Ready. Returns true when the poller
+    /// should stop.
+    pub(crate) fn refresh_xref_scope_if_pending(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::xref::{PaletteScopeSource, XrefIndexState};
+        if !self.palette_open {
+            return true;
+        }
+        let Some(scope) = self.palette_scope.as_ref() else { return true };
+        if scope.progress.is_none() {
+            return true;
+        }
+        // Nudge the renderer so the progress meter advances even if
+        // no transition is happening yet.
+        cx.notify();
+        let bundle = match self.bundle().cloned() {
+            Some(b) => b,
+            None => return true,
+        };
+        let source = scope.source.clone();
+        // Pull the relevant slot. Returns (Some(rebuilt_entries),
+        // _) on transition to Ready, (None, false) while still
+        // building, (None, true) on Failed.
+        let (new_entries, failed) = match source {
+            PaletteScopeSource::NativeXrefs { artifact, target_addr } => {
+                match bundle.xrefs.native.read().clone() {
+                    XrefIndexState::Ready(idx) => (
+                        Some(build_native_xref_entries(
+                            &bundle,
+                            &artifact,
+                            target_addr,
+                            &idx,
+                        )),
+                        false,
+                    ),
+                    XrefIndexState::Failed(_) => (None, true),
+                    _ => (None, false),
+                }
+            }
+            PaletteScopeSource::DexCallers { method_key } => {
+                match bundle.xrefs.dex_callers.read().clone() {
+                    XrefIndexState::Ready(idx) => (
+                        Some(build_dex_caller_entries(&bundle, &method_key, &idx)),
+                        false,
+                    ),
+                    XrefIndexState::Failed(_) => (None, true),
+                    _ => (None, false),
+                }
+            }
+            PaletteScopeSource::DexFieldRefs { field_ref } => {
+                match bundle.xrefs.dex_field_refs.read().clone() {
+                    XrefIndexState::Ready(idx) => (
+                        Some(build_dex_field_entries(&bundle, &field_ref, &idx)),
+                        false,
+                    ),
+                    XrefIndexState::Failed(_) => (None, true),
+                    _ => (None, false),
+                }
+            }
+        };
+        if let Some(entries) = new_entries {
+            if let Some(scope) = self.palette_scope.as_mut() {
+                scope.entries = Arc::new(entries);
+                scope.progress = None;
+            }
+            self.refresh_palette_list();
+            cx.notify();
+            return true;
+        }
+        if failed {
+            if let Some(scope) = self.palette_scope.as_mut() {
+                scope.progress = None;
+            }
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Clear the current scope without closing the palette. Used as
+    /// the first effect of Esc when scoped — Esc on a non-scoped
+    /// palette closes it.
+    pub(crate) fn clear_palette_scope(&mut self, cx: &mut Context<Self>) {
+        if self.palette_scope.is_some() {
+            self.palette_scope = None;
+            self.palette_query.clear();
+            self.palette_selected = 0;
+            self.refresh_palette_list();
             cx.notify();
         }
     }
@@ -784,13 +931,20 @@ impl Shell {
             .unwrap_or(&method_decl)
             .to_string();
         let label = SharedString::from(display);
+        let method_key = format!("{class_jni}->{method_decl}");
         self.context_menu = Some(ContextMenuState {
             position,
-            items: vec![ContextMenuItem::ShowDexCallGraph {
-                class_jni,
-                method_decl,
-                label,
-            }],
+            items: vec![
+                ContextMenuItem::ShowDexCallGraph {
+                    class_jni,
+                    method_decl,
+                    label: label.clone(),
+                },
+                ContextMenuItem::CallersOfMethod {
+                    method_key,
+                    label,
+                },
+            ],
         });
         cx.notify();
     }
@@ -828,8 +982,9 @@ impl Shell {
             ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
             ContextMenuItem::FollowInNewTab { target, label: label.clone() },
         ];
-        // Add Show CFG when the address has a covering function in
-        // a text section.
+        // Add Show CFG + Callers of function when the address has a
+        // covering function in a text section; otherwise add a
+        // generic References to address item.
         if !is_data {
             if let Some(bundle) = self.bundle() {
                 if let Some(sym) = bundle
@@ -842,8 +997,27 @@ impl Shell {
                         entry_addr: sym.address,
                         label: SharedString::from(sym.display_name.clone()),
                     });
+                    items.push(ContextMenuItem::CallersOfFunction {
+                        artifact: artifact.clone(),
+                        entry_addr: sym.address,
+                        label: SharedString::from(sym.display_name.clone()),
+                    });
+                } else {
+                    items.push(ContextMenuItem::XrefsToAddress {
+                        artifact: artifact.clone(),
+                        addr,
+                        label: label.clone(),
+                    });
                 }
             }
+        } else {
+            // Hex target — references to that byte (often a string
+            // literal or data pointer).
+            items.push(ContextMenuItem::XrefsToAddress {
+                artifact: artifact.clone(),
+                addr,
+                label: label.clone(),
+            });
         }
         self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
@@ -853,10 +1027,27 @@ impl Shell {
     /// in new tab; both navigate to the method's smali. (Smali tabs
     /// dedupe by class so "new tab" reuses an existing class tab —
     /// see the comment in `activate_follow`.)
+    /// Right-click on a `.field` line in a smali listing — shows
+    /// "References to field" only. (Fields have no follow target;
+    /// they're just storage locations.)
+    pub(crate) fn open_field_context_menu(
+        &mut self,
+        field_ref: String,
+        display: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let label = SharedString::from(display);
+        let items = vec![ContextMenuItem::RefsToField { field_ref, label }];
+        self.context_menu = Some(ContextMenuState { position, items });
+        cx.notify();
+    }
+
     pub(crate) fn open_smali_link_context_menu(
         &mut self,
         leaf: LeafId,
         line: usize,
+        method_key: Option<String>,
         display: String,
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
@@ -864,10 +1055,13 @@ impl Shell {
         use crate::context_menu::FollowTarget;
         let label = SharedString::from(display);
         let target = FollowTarget::SmaliMethod { leaf, line };
-        let items = vec![
+        let mut items = vec![
             ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
-            ContextMenuItem::FollowInNewTab { target, label },
+            ContextMenuItem::FollowInNewTab { target, label: label.clone() },
         ];
+        if let Some(key) = method_key {
+            items.push(ContextMenuItem::CallersOfMethod { method_key: key, label });
+        }
         self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
     }
@@ -908,7 +1102,122 @@ impl Shell {
             } => {
                 self.show_dex_callgraph(class_jni, method_decl, label, cx);
             }
+            ContextMenuItem::XrefsToAddress { artifact, addr, label } => {
+                self.open_xrefs_to_address(artifact, addr, label, cx);
+            }
+            ContextMenuItem::CallersOfFunction { artifact, entry_addr, label } => {
+                self.open_xrefs_to_address(artifact, entry_addr, label, cx);
+            }
+            ContextMenuItem::CallersOfMethod { method_key, label } => {
+                self.open_callers_of_method(method_key, label, cx);
+            }
+            ContextMenuItem::RefsToField { field_ref, label } => {
+                self.open_refs_to_field(field_ref, label, cx);
+            }
         }
+    }
+
+    /// Build a scoped palette for "References to address" / "Callers
+    /// of function". Consults the bundle's native xref index; when
+    /// the index is still building we open an empty palette and the
+    /// chip's progress meter populates. When ready, we resolve each
+    /// caller-site address to a `SearchEntry` so the user can jump
+    /// directly to it.
+    pub(crate) fn open_xrefs_to_address(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        addr: u64,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::xref::{PaletteScope, PaletteScopeSource, XrefIndexState};
+        let Some(bundle) = self.bundle().cloned() else { return };
+        let state = bundle.xrefs.native.read().clone();
+        let (entries, progress) = match state {
+            XrefIndexState::Ready(idx) => {
+                let entries = build_native_xref_entries(&bundle, &artifact, addr, &idx);
+                (entries, None)
+            }
+            XrefIndexState::Building(p) => (Vec::new(), Some(p)),
+            _ => (Vec::new(), None),
+        };
+        self.open_scoped_palette(
+            PaletteScope {
+                label: format!("References to {}", label),
+                entries: Arc::new(entries),
+                progress,
+                source: PaletteScopeSource::NativeXrefs {
+                    artifact,
+                    target_addr: addr,
+                },
+            },
+            cx,
+        );
+    }
+
+    /// "Callers of method" — invert the DEX caller index for
+    /// `method_key` and turn the caller list into smali deep-link
+    /// SearchEntries.
+    pub(crate) fn open_callers_of_method(
+        &mut self,
+        method_key: String,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::xref::{PaletteScope, PaletteScopeSource, XrefIndexState};
+        let Some(bundle) = self.bundle().cloned() else { return };
+        let state = bundle.xrefs.dex_callers.read().clone();
+        let (entries, progress) = match state {
+            XrefIndexState::Ready(idx) => {
+                let entries = build_dex_caller_entries(&bundle, &method_key, &idx);
+                (entries, None)
+            }
+            XrefIndexState::Building(p) => (Vec::new(), Some(p)),
+            _ => (Vec::new(), None),
+        };
+        self.open_scoped_palette(
+            PaletteScope {
+                label: format!("Callers of {}", label),
+                entries: Arc::new(entries),
+                progress,
+                source: PaletteScopeSource::DexCallers {
+                    method_key,
+                },
+            },
+            cx,
+        );
+    }
+
+    /// "References to field" — same shape, queries the DEX field-
+    /// reference index.
+    pub(crate) fn open_refs_to_field(
+        &mut self,
+        field_ref: String,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::xref::{PaletteScope, PaletteScopeSource, XrefIndexState};
+        let Some(bundle) = self.bundle().cloned() else { return };
+        let state = bundle.xrefs.dex_field_refs.read().clone();
+        let (entries, progress) = match state {
+            XrefIndexState::Ready(idx) => {
+                let entries = build_dex_field_entries(&bundle, &field_ref, &idx);
+                (entries, None)
+            }
+            XrefIndexState::Building(p) => (Vec::new(), Some(p)),
+            _ => (Vec::new(), None),
+        };
+        self.open_scoped_palette(
+            PaletteScope {
+                label: format!("References to {}", label),
+                entries: Arc::new(entries),
+                progress,
+                source: PaletteScopeSource::DexFieldRefs {
+                    field_ref,
+                },
+            },
+            cx,
+        );
     }
 
     /// Dispatch a Follow / FollowInNewTab action. Plain follow reuses
@@ -1105,17 +1414,56 @@ impl Shell {
         cx.notify();
     }
 
+    /// Currently-displayed palette entries, taking the scope into
+    /// account. When scoped, filter within `scope.entries`; else
+    /// query the bundle-wide index. Returned vector is sized to the
+    /// palette's display cap.
+    pub(crate) fn palette_visible_entries(&self) -> Vec<SearchEntry> {
+        const CAP: usize = 50;
+        if let Some(scope) = self.palette_scope.as_ref() {
+            // Scoped: fixed entry set + fuzzy refinement via the
+            // same matching tiers the bundle search uses.
+            let q = self.palette_query.to_lowercase();
+            let mut scored: Vec<(u8, usize, &SearchEntry)> = Vec::new();
+            for e in scope.entries.iter() {
+                let hay = e.display.to_lowercase();
+                let tier = if q.is_empty() {
+                    0
+                } else if hay.starts_with(&q) {
+                    0
+                } else if hay.contains(&q) {
+                    1
+                } else if is_subsequence(&q, &hay) {
+                    2
+                } else {
+                    continue;
+                };
+                scored.push((tier, e.display.len(), e));
+            }
+            scored.sort_by_key(|&(tier, len, _)| (tier, len));
+            scored
+                .into_iter()
+                .take(CAP)
+                .map(|(_, _, e)| e.clone())
+                .collect()
+        } else if let Some(idx) = self.search_index.as_ref() {
+            idx.filter(&self.palette_query, CAP)
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn palette_activate(&mut self, cx: &mut Context<Self>) {
-        let Some(idx) = self.search_index.clone() else {
-            return;
-        };
-        let cap = 50;
-        let results = idx.filter(&self.palette_query, cap);
+        let results = self.palette_visible_entries();
         let Some(entry) = results.get(self.palette_selected).cloned() else {
             return;
         };
         let jump = entry.jump.clone();
         self.palette_open = false;
+        self.palette_scope = None;
         match jump {
             SearchJump::Listing { artifact, section, addr } => {
                 self.open_listing_in_new_tab(artifact, section, addr, cx);
@@ -1149,13 +1497,10 @@ impl Shell {
     }
 
     /// Recompute `palette_list_len` so up/down navigation knows the
-    /// number of currently-displayed rows.
+    /// number of currently-displayed rows. Takes the scope into
+    /// account.
     pub(crate) fn refresh_palette_list(&mut self) {
-        let len = self
-            .search_index
-            .as_ref()
-            .map(|idx| idx.filter(&self.palette_query, 50).len())
-            .unwrap_or(0);
+        let len = self.palette_visible_entries().len();
         if len != self.palette_list_len {
             self.palette_list_state = ListState::new(len, ListAlignment::Top, px(800.));
             self.palette_list_len = len;
@@ -1475,4 +1820,118 @@ impl Shell {
         cx.notify();
         self.save_state();
     }
+}
+
+// ---- Xref → SearchEntry adapters ------------------------------------------
+//
+// These convert raw xref-index hits into displayable palette
+// SearchEntries — same data shape as the bundle-wide cmd-F results,
+// so the existing palette filter / activate machinery handles them.
+
+fn build_native_xref_entries(
+    bundle: &LoadedBundle,
+    artifact: &glass_db::ArtifactId,
+    target_addr: u64,
+    idx: &crate::xref::NativeXrefs,
+) -> Vec<SearchEntry> {
+    let Some(per_art) = idx.get(artifact) else { return Vec::new() };
+    let Some(sites) = per_art.get(&target_addr) else { return Vec::new() };
+    sites
+        .iter()
+        .filter_map(|&site| {
+            let section = bundle.text_section_for_addr(artifact, site)?;
+            let sym = bundle
+                .symbol_maps
+                .get(artifact)
+                .and_then(|sm| sm.covering(site));
+            let display = match sym {
+                Some(s) if s.address == site => s.display_name.clone(),
+                Some(s) => format!("{}+0x{:x}", s.display_name, site - s.address),
+                None => format!("0x{:x}", site),
+            };
+            let chip = format!("{section} · 0x{site:x}");
+            Some(SearchEntry {
+                display,
+                chip,
+                kind_glyph: "→",
+                jump: SearchJump::Listing {
+                    artifact: artifact.clone(),
+                    section: section.to_string(),
+                    addr: site,
+                },
+            })
+        })
+        .collect()
+}
+
+fn build_dex_caller_entries(
+    bundle: &LoadedBundle,
+    callee_key: &str,
+    idx: &crate::xref::DexCallers,
+) -> Vec<SearchEntry> {
+    let Some(callers) = idx.get(callee_key) else { return Vec::new() };
+    callers
+        .iter()
+        .filter_map(|caller_key| {
+            // method_lines tells us where to scroll. Use the class
+            // JNI as the SmaliClass jump target.
+            let class_jni = caller_key.split("->").next()?.to_string();
+            let _line = bundle.method_lines.get(caller_key).map(|&(_, l)| l).unwrap_or(0);
+            let display = caller_key
+                .split("->")
+                .nth(1)
+                .and_then(|m| m.split('(').next())
+                .map(|n| {
+                    let cls = class_jni
+                        .trim_start_matches('L')
+                        .trim_end_matches(';')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&class_jni);
+                    format!("{cls}.{n}")
+                })
+                .unwrap_or_else(|| caller_key.clone());
+            Some(SearchEntry {
+                display,
+                chip: "method".to_string(),
+                kind_glyph: "ƒ",
+                jump: SearchJump::SmaliClass { class_jni },
+            })
+        })
+        .collect()
+}
+
+fn build_dex_field_entries(
+    bundle: &LoadedBundle,
+    field_ref: &str,
+    idx: &crate::xref::DexFieldRefs,
+) -> Vec<SearchEntry> {
+    let _ = bundle;
+    let Some(touchers) = idx.get(field_ref) else { return Vec::new() };
+    touchers
+        .iter()
+        .filter_map(|method_key| {
+            let class_jni = method_key.split("->").next()?.to_string();
+            let display = method_key
+                .split("->")
+                .nth(1)
+                .and_then(|m| m.split('(').next())
+                .map(|n| {
+                    let cls = class_jni
+                        .trim_start_matches('L')
+                        .trim_end_matches(';')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&class_jni);
+                    format!("{cls}.{n}")
+                })
+                .unwrap_or_else(|| method_key.clone());
+            Some(SearchEntry {
+                display,
+                chip: "method".to_string(),
+                kind_glyph: "ƒ",
+                jump: SearchJump::SmaliClass { class_jni },
+            })
+        })
+        .collect()
 }

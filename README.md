@@ -58,6 +58,7 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 - Horizontal + vertical scrollbars on listing, hex, and manifest views.
 - Cmd-F symbol palette with fuzzy filter.
 - Top-bar **Goto address** field: type a hex address, Enter jumps to the listing (text section) or hex view (data section). Invalid addresses turn the input red.
+- Right-click cross-references in every view: **References to address** / **Callers of function** in the listing, hex and CFG; **Callers of method** / **References to field** in smali. Results show in the palette with a scope chip; Esc clears the scope back to bundle-wide search. Indices build on a background thread after load — a progress chip shows while in flight.
 - Cmd-O open, Cmd-N new window. macOS app menu with **File → Open Recent** (last 10 bundles).
 - Window bounds + open tabs + tree expansion state persisted per-bundle in `redb`; relaunching reopens where you left off.
 
