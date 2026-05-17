@@ -1118,6 +1118,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
                 this.close_palette(cx);
                 this.close_context_menu(cx);
+                this.close_about(cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteUp, _w, cx| {
                 if this.palette_open {
