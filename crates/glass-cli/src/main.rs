@@ -4,8 +4,25 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod output;
+mod verbs;
 
 use output::Format;
+
+/// Returns Some(result) for automation verbs that handle their own
+/// emission, None for legacy text-output subcommands that the
+/// regular match below dispatches.
+fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
+    match cmd {
+        Cmd::Inspect { path } => Some(verbs::inspect(path.clone(), format)),
+        Cmd::Artifacts { path } => Some(verbs::artifacts(path.clone(), format)),
+        Cmd::Sections { path, artifact } => {
+            Some(verbs::sections(path.clone(), artifact.clone(), format))
+        }
+        Cmd::BinaryInfo { path } => Some(verbs::binary_info(path.clone(), format)),
+        Cmd::Hash { path } => Some(verbs::hash(path.clone(), format)),
+        _ => None,
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "glass", about = "Glass mobile interactive disassembler")]
@@ -27,6 +44,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    // ----- Automation verbs (structured JSON output) -----------------
+    /// Inspect a bundle: kind, label, content hash, artifact list.
+    Inspect { path: PathBuf },
+    /// List the artifacts in a bundle.
+    Artifacts { path: PathBuf },
+    /// Per-artifact section table.
+    Sections {
+        path: PathBuf,
+        /// Limit to one artifact (label or hex-prefix of its id).
+        #[arg(long)]
+        artifact: Option<String>,
+    },
+    /// Per-artifact binary info: format, architecture, raw counts.
+    BinaryInfo { path: PathBuf },
+    /// Content-hash a file (replaces hash-bench).
+    Hash { path: PathBuf },
+
+    // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
     Arm64 {
         path: PathBuf,
@@ -94,6 +129,16 @@ fn main() -> Result<()> {
         // path + the top-level --fresh flag.
         None => Cmd::Gui { path: cli.path, fresh: cli.fresh },
     };
+    let format = cli.format;
+    // Automation verbs handle their own JSON / text emission and
+    // exit with a structured error on failure.
+    if let Some(handler) = automation_dispatch(&cmd, format) {
+        if let Err(e) = handler {
+            std::process::exit(output::emit_error(&e, format));
+        }
+        return Ok(());
+    }
+    // Legacy text-output subcommands fall through to here.
     match cmd {
         Cmd::Arm64 { path, limit } => dump_arm64(path, limit),
         Cmd::Bundle { path } => dump_bundle(path),
@@ -155,6 +200,13 @@ fn main() -> Result<()> {
             println!("hash {} MB in {:?} -> {}", bytes.len() / 1_000_000, t.elapsed(), id);
             Ok(())
         }
+        // Automation verbs are already handled by automation_dispatch
+        // above; this arm exists only so the match is exhaustive.
+        Cmd::Inspect { .. }
+        | Cmd::Artifacts { .. }
+        | Cmd::Sections { .. }
+        | Cmd::BinaryInfo { .. }
+        | Cmd::Hash { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 

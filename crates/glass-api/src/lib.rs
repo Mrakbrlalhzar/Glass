@@ -24,7 +24,38 @@ mod bundle;
 mod inspect;
 
 pub use bundle::{open, Bundle, BundleKind};
-pub use inspect::{ArtifactInfo, ArtifactKind, BundleInspection};
+pub use inspect::{
+    ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,
+    SectionInfo,
+};
+
+use anyhow::{Context, Result};
+use std::path::Path;
+use std::time::Instant;
+
+/// Content-hash a file. Returns the artifact id + byte count +
+/// elapsed wall time (lets `glass hash` double as the old
+/// `hash-bench`). No bundle parsing — pure read + hash.
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct HashResult {
+    pub artifact_id: String,
+    pub size_bytes: usize,
+    pub duration_ms: u128,
+}
+
+pub fn hash_file(path: impl AsRef<Path>) -> Result<HashResult> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let start = Instant::now();
+    let id = glass_db::ArtifactId::from_bytes(&bytes);
+    let duration_ms = start.elapsed().as_millis();
+    Ok(HashResult {
+        artifact_id: id.to_string(),
+        size_bytes: bytes.len(),
+        duration_ms,
+    })
+}
 
 // Re-export the underlying domain types so consumers depend on
 // glass-api only, not the whole crate graph.
