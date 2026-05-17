@@ -24,6 +24,25 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Native binary layout overview with section data
 * Xref search of callers, references to data
 
+## Scripting
+
+Every analysis Glass does in the GUI is also exposed as a CLI verb that emits structured JSON. The same `glass` binary is the automation entry point — pick a subcommand and you get a one-shot, scriptable result, perfect for `jq` pipelines and CI.
+
+```sh
+# What classes ship in this APK?
+glass classes ./app.apk --package com.example. --text
+
+# Who calls glass::main, by address?
+glass callers ./libfoo.so --artifact libfoo.so --symbol "glass::main"
+
+# Every `onCreate` across DEX, machine-readable:
+glass search ./app.apk onCreate | jq '.data.hits[] | select(.kind=="method")'
+```
+
+Pass `--text` for a human-readable rendering, omit it for JSON.
+
+Full reference: **[docs/cli-api.md](docs/cli-api.md)**.
+
 ## Screenshots
 
 A walk through the main views — click any thumbnail to see it full size.
