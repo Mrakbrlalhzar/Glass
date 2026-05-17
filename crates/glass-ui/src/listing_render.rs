@@ -69,7 +69,20 @@ pub fn h_shift(
     row_index: usize,
     ctx: Option<&RowCtx>,
 ) -> gpui::Stateful<gpui::Div> {
-    h_shift_with_addr(inner, h_offset, row_height, row_index, ctx, None)
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, true)
+}
+
+/// Like `h_shift` but the row is non-selectable (no click handler,
+/// no selection background). Used for basic-block separators which
+/// have no meaningful selection target.
+pub fn h_shift_unselectable(
+    inner: gpui::Div,
+    h_offset: Pixels,
+    row_height: f32,
+    row_index: usize,
+    ctx: Option<&RowCtx>,
+) -> gpui::Stateful<gpui::Div> {
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, false)
 }
 
 pub fn h_shift_with_addr(
@@ -80,7 +93,20 @@ pub fn h_shift_with_addr(
     ctx: Option<&RowCtx>,
     row_addr: Option<u64>,
 ) -> gpui::Stateful<gpui::Div> {
-    let is_selected = ctx.map(|c| c.selected_row == Some(row_index)).unwrap_or(false);
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, row_addr, true)
+}
+
+fn h_shift_inner(
+    inner: gpui::Div,
+    h_offset: Pixels,
+    row_height: f32,
+    row_index: usize,
+    ctx: Option<&RowCtx>,
+    row_addr: Option<u64>,
+    selectable: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let is_selected = selectable
+        && ctx.map(|c| c.selected_row == Some(row_index)).unwrap_or(false);
     let mut outer = div()
         .id(("listing-row", row_index))
         .h(px(row_height))
@@ -90,33 +116,35 @@ pub fn h_shift_with_addr(
     if is_selected {
         outer = outer.bg(rgb(COLOUR_ROW_SELECTED));
     }
-    if let Some(ctx) = ctx {
-        let weak = ctx.shell.clone();
-        outer = outer.on_mouse_down(
-            gpui::MouseButton::Left,
-            move |_ev, _w, cx: &mut App| {
-                if let Some(entity) = weak.upgrade() {
-                    cx.update_entity(&entity, |shell, cx| {
-                        shell.select_active_row(row_index, cx);
-                    });
-                }
-            },
-        );
-        if let Some(addr) = row_addr {
+    if selectable {
+        if let Some(ctx) = ctx {
             let weak = ctx.shell.clone();
-            let artifact = ctx.artifact.clone();
             outer = outer.on_mouse_down(
-                gpui::MouseButton::Right,
-                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                gpui::MouseButton::Left,
+                move |_ev, _w, cx: &mut App| {
                     if let Some(entity) = weak.upgrade() {
-                        let pos = ev.position;
-                        let artifact = artifact.clone();
                         cx.update_entity(&entity, |shell, cx| {
-                            shell.open_listing_context_menu(artifact, addr, pos, cx);
+                            shell.select_active_row(row_index, cx);
                         });
                     }
                 },
             );
+            if let Some(addr) = row_addr {
+                let weak = ctx.shell.clone();
+                let artifact = ctx.artifact.clone();
+                outer = outer.on_mouse_down(
+                    gpui::MouseButton::Right,
+                    move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                        if let Some(entity) = weak.upgrade() {
+                            let pos = ev.position;
+                            let artifact = artifact.clone();
+                            cx.update_entity(&entity, |shell, cx| {
+                                shell.open_listing_context_menu(artifact, addr, pos, cx);
+                            });
+                        }
+                    },
+                );
+            }
         }
     }
     outer.child(
@@ -343,7 +371,7 @@ pub fn render_listing_row_with(
             row_index,
             ctx,
         ),
-        ListingRow::BasicBlockSeparator { arrows } => h_shift(
+        ListingRow::BasicBlockSeparator { arrows } => h_shift_unselectable(
             div()
                 .flex()
                 .flex_row()
