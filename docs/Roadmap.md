@@ -4,7 +4,7 @@
 * ~~Control flow graph for DEX methods~~
 * ~~CLI command defaulting to GUI (no ‘gui’ command needed)~~
 * ~~Closing the last window terminates the command line app~~
-* glass menu should be ‘Glass’
+* glass menu should be ‘Glass’ *(note: `NSProcessInfo.setProcessName("Glass")` already runs at launch; needs verification on user's machine — may only repro when running the bare `glass` binary from a fresh shell rather than via cargo run)*
 * Opening a file in an empty window does not create a new window but reuses this one
 * Open 2nd file, offset x,y position of 2nd window
 * In disassembly view, don’t allow cursor to select basic block rule line
