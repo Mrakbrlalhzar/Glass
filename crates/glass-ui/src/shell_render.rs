@@ -389,7 +389,14 @@ impl Shell {
         };
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         let Some(view) = tab.dex_callgraph.as_mut() else { return };
-        crate::dex_callgraph::seed_root(view, &bundle.method_calls, class_jni, method_decl);
+        crate::dex_callgraph::seed_root(
+            view,
+            &bundle.method_calls,
+            &bundle.bodies,
+            &bundle.method_lines,
+            class_jni,
+            method_decl,
+        );
     }
 
     pub(crate) fn expand_dex_callee(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -400,7 +407,13 @@ impl Shell {
         let Some(idx) = self.active_tab else { return };
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         let Some(view) = tab.dex_callgraph.as_mut() else { return };
-        let changed = crate::dex_callgraph::expand_callee(view, &bundle.method_calls, key);
+        let changed = crate::dex_callgraph::expand_callee(
+            view,
+            &bundle.method_calls,
+            &bundle.bodies,
+            &bundle.method_lines,
+            key,
+        );
         cx.notify();
         if changed {
             self.save_state();

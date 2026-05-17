@@ -155,6 +155,16 @@ pub struct NodeHints {
     /// Explicit rank to pin the node to (0 = root). When `None`, the
     /// layout assigns ranks via BFS distance from the root.
     pub rank: Option<usize>,
+    /// Pre-tuned horizontal hint within a rank (e.g. from an upstream
+    /// barycenter pass). Smaller = further left. When `None`, the
+    /// layout uses the barycenter sweep over the scene's edges.
+    pub x_hint: Option<f32>,
+}
+
+impl Default for NodeHints {
+    fn default() -> Self {
+        Self { size_px: (180., 60.), rank: None, x_hint: None }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -225,21 +235,20 @@ pub struct EdgeSegment {
     pub horizontal: bool,
 }
 
-pub const EDGE_COLOR_CONTROL: u32 = 0x9aa3b3;
-pub const EDGE_COLOR_CONTROL_DOTTED: u32 = 0x6e7382;
-pub const EDGE_COLOR_CALL: u32 = 0x66c2ff;
+pub const EDGE_COLOR_SOLID: u32 = 0x9aa3b3;
+pub const EDGE_COLOR_DOTTED: u32 = 0x6e7382;
 pub const EDGE_THICKNESS: f32 = 2.;
 const DOT_LEN: f32 = 4.;
 const DOT_GAP: f32 = 3.;
 
-/// Colour an edge gets at its current style + kind.
-pub fn edge_colour(style: EdgeStyle, kind: EdgeKind) -> gpui::Rgba {
-    let base = match kind {
-        EdgeKind::Call => EDGE_COLOR_CALL,
-        EdgeKind::ControlFlow => match style {
-            EdgeStyle::Solid => EDGE_COLOR_CONTROL,
-            EdgeStyle::Dotted => EDGE_COLOR_CONTROL_DOTTED,
-        },
+/// Colour an edge gets at its current style. `kind` is currently
+/// presentational-only — both control-flow and call edges render in
+/// the same grey so the native CFG and the DEX call graph look
+/// consistent. Conditional edges (dotted) get the dimmer shade.
+pub fn edge_colour(style: EdgeStyle, _kind: EdgeKind) -> gpui::Rgba {
+    let base = match style {
+        EdgeStyle::Solid => EDGE_COLOR_SOLID,
+        EdgeStyle::Dotted => EDGE_COLOR_DOTTED,
     };
     gpui::rgba((base << 8) | 0xee)
 }
@@ -527,30 +536,89 @@ pub fn layout_scene(scene: &mut GraphScene) {
         }
     }
 
-    // 3) X positions. For each rank, sort by barycenter order and
-    // place left-to-right honouring each node's size_px.
+    // 3) Width-aware placement.
+    //
+    // Within a rank, sort by either:
+    //   - `x_hint` if the caller supplied it (CFG passes through the
+    //     barycenter-tuned x from the arch crate's layout pass), or
+    //   - the post-sweep `pos[id]` index above (used by the DEX call
+    //     graph, which has no explicit hint).
+    // Then scale hints to honour each block's width, walk left-to-right
+    // bumping each block past `prev.right + COL_GAP`, and centre the
+    // rank on x = 0. Result: parents/children align by hint, no
+    // overlaps, every rank tightly packed without dead space.
     const RANK_GAP_PX: f32 = 60.;
     const COL_GAP_PX: f32 = 30.;
     let mut world_x: Vec<f32> = vec![0.; n];
     let mut world_y: Vec<f32> = vec![0.; n];
     let mut cursor_y_px = 0.0_f32;
     for (_r, ids) in &by_rank {
-        let total_w_px: f32 = ids
-            .iter()
-            .map(|nid| scene.nodes[nid.0].hints.size_px.0)
-            .sum::<f32>()
-            + COL_GAP_PX * ((ids.len().saturating_sub(1)) as f32);
         let max_h_px = ids
             .iter()
             .map(|nid| scene.nodes[nid.0].hints.size_px.1)
             .fold(0.0_f32, f32::max);
-        let mut x_cursor_px = -total_w_px / 2.;
-        for &NodeId(id) in ids {
-            let (w, _h) = scene.nodes[id].hints.size_px;
-            // Convert px → world by dividing by WORLD_UNIT (zoom = 1).
-            world_x[id] = x_cursor_px / WORLD_UNIT;
-            world_y[id] = cursor_y_px / WORLD_UNIT;
-            x_cursor_px += w + COL_GAP_PX;
+
+        // Sort the rank by x_hint when present, else by the sweep
+        // position. Stable tie-break by id.
+        let mut ordered: Vec<NodeId> = ids.clone();
+        ordered.sort_by(|&a, &b| {
+            let ka = scene.nodes[a.0]
+                .hints
+                .x_hint
+                .unwrap_or(pos[a.0] as f32);
+            let kb = scene.nodes[b.0]
+                .hints
+                .x_hint
+                .unwrap_or(pos[b.0] as f32);
+            ka.partial_cmp(&kb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        // Build initial left-edge positions from the (possibly
+        // unit-less) hint. Scale the hint span so it spreads blocks
+        // roughly in proportion to the widest block in the rank.
+        let widest = ordered
+            .iter()
+            .map(|nid| scene.nodes[nid.0].hints.size_px.0)
+            .fold(0.0_f32, f32::max)
+            .max(1.0);
+        let scale = widest + COL_GAP_PX;
+        let mut placement: Vec<(f32, f32, NodeId)> = ordered
+            .iter()
+            .enumerate()
+            .map(|(idx, &nid)| {
+                let w = scene.nodes[nid.0].hints.size_px.0;
+                // Use the x_hint as a multiplier on `scale`; when the
+                // hint is `None`, fall back to the sweep-position
+                // index so we get a deterministic spread.
+                let hint = scene.nodes[nid.0]
+                    .hints
+                    .x_hint
+                    .unwrap_or(idx as f32);
+                let left = hint * scale - w / 2.;
+                (left, w, nid)
+            })
+            .collect();
+        // Enforce non-overlap by walking left-to-right.
+        for k in 1..placement.len() {
+            let (prev_left, prev_w, _) = placement[k - 1];
+            let min_left = prev_left + prev_w + COL_GAP_PX;
+            if placement[k].0 < min_left {
+                placement[k].0 = min_left;
+            }
+        }
+        // Centre the rank on x = 0.
+        if !placement.is_empty() {
+            let (first_left, _, _) = placement[0];
+            let last_idx = placement.len() - 1;
+            let (last_left, last_w, _) = placement[last_idx];
+            let total_extent = last_left + last_w - first_left;
+            let shift = -first_left - total_extent / 2.;
+            for &(left, _, nid) in &placement {
+                world_x[nid.0] = (left + shift) / WORLD_UNIT;
+                world_y[nid.0] = cursor_y_px / WORLD_UNIT;
+            }
         }
         cursor_y_px += max_h_px + RANK_GAP_PX;
     }
@@ -591,14 +659,67 @@ impl NodeRect {
     }
 }
 
-/// Route every edge given the placed-node rects. Edges entering /
-/// exiting the same block are distributed across the block's top /
-/// bottom edge in target-x order so they never cross each other at
-/// the attach point.
+/// Route every edge given the placed-node rects.
+///
+/// Routes have three shapes, picked per edge:
+///
+/// 1. **Adjacent-rank forward** (target rank == source rank + 1):
+///    3-segment Manhattan route — exit source bottom, cross in the
+///    rank-gap, enter target top. Each edge in the same gap gets a
+///    dedicated horizontal lane so multiple parallel edges don't
+///    overlap.
+///
+/// 2. **Multi-rank forward** (target rank > source rank + 1):
+///    5-segment route. Exit source bottom, into the source's rank
+///    gap, then up/down through a vertical channel clear of every
+///    intermediate block, into the target's rank gap, enter target
+///    top.
+///
+/// 3. **Back-edge** (target rank <= source rank): exit source side,
+///    travel up the cleaner side-highway (left or right), enter
+///    target side. Arrowhead points sideways at the target.
+///
+/// Fan-in / fan-out attach points are sorted by the other end's x so
+/// edges to right-side targets exit the right portion of the source,
+/// edges from left-side sources enter the left portion of the target.
+/// Eliminates needless crossings.
+///
+/// Each node is assumed to have a rank derived from its world-y
+/// position (rows of nodes at similar y form a rank). Callers that
+/// laid the scene out via `layout_scene` get this for free.
 pub fn route_edges(scene: &GraphScene, rects: &[NodeRect]) -> Vec<RoutedEdge> {
     let n = scene.nodes.len();
-    // Group outgoing / incoming edges per node so we can sort them
-    // by the other end's x for fan-in / fan-out distribution.
+    if n == 0 || scene.edges.is_empty() {
+        return Vec::new();
+    }
+
+    // Group nodes into ranks by world-y (the value stored in
+    // `scene.positions[i].1`). A rank is a contiguous run of nodes
+    // sharing roughly the same y. This avoids needing the caller to
+    // re-derive ranks for routing — `layout_scene` already placed
+    // nodes on quantised rows.
+    let mut node_rank: Vec<usize> = vec![0; n];
+    let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    {
+        let mut ys: Vec<(f32, usize)> = (0..n)
+            .map(|i| (scene.positions[i].map(|(_, y)| y).unwrap_or(0.), i))
+            .collect();
+        ys.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut current_rank = 0usize;
+        let mut last_y = f32::MIN;
+        for (y, idx) in ys {
+            if (y - last_y).abs() > 0.05 && last_y != f32::MIN {
+                current_rank += 1;
+            }
+            last_y = y;
+            node_rank[idx] = current_rank;
+            by_rank.entry(current_rank).or_default().push(idx);
+        }
+    }
+
+    // Sort outgoing edges by target x, incoming by source x. Each
+    // edge then knows its slot index among its block's outgoing /
+    // incoming peers, which fixes the attach fraction.
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut in_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (ei, e) in scene.edges.iter().enumerate() {
@@ -634,14 +755,129 @@ pub fn route_edges(scene: &GraphScene, rects: &[NodeRect]) -> Vec<RoutedEdge> {
     let out_total: Vec<usize> = out_edges.iter().map(|v| v.len()).collect();
     let in_total: Vec<usize> = in_edges.iter().map(|v| v.len()).collect();
 
-    // Trim the last segment by this much so the arrowhead's body
-    // isn't covered by the line.
+    // Rank geometry: each rank's bottom y, the next rank's top y
+    // (i.e. the rank-gap band), and the x-intervals each block
+    // occupies. Used by horizontal-lane allocation and vertical-
+    // channel picking.
+    struct RankGeom {
+        bottom_y: f32,
+        next_top_y: f32,
+        intervals: Vec<(f32, f32)>,
+    }
+    let mut rank_geom: BTreeMap<usize, RankGeom> = BTreeMap::new();
+    for (rank, indices) in &by_rank {
+        let bottom_y = indices
+            .iter()
+            .map(|&i| rects[i].y + rects[i].h)
+            .fold(f32::MIN, f32::max);
+        let mut intervals: Vec<(f32, f32)> = indices
+            .iter()
+            .map(|&i| (rects[i].x, rects[i].x + rects[i].w))
+            .collect();
+        intervals.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rank_geom.insert(
+            *rank,
+            RankGeom {
+                bottom_y,
+                next_top_y: bottom_y, // patched below
+                intervals,
+            },
+        );
+    }
+    let ranks_sorted: Vec<usize> = rank_geom.keys().copied().collect();
+    for w in ranks_sorted.windows(2) {
+        let upper = w[0];
+        let lower = w[1];
+        let next_top = by_rank[&lower]
+            .iter()
+            .map(|&i| rects[i].y)
+            .fold(f32::MAX, f32::min);
+        if let Some(entry) = rank_geom.get_mut(&upper) {
+            entry.next_top_y = next_top;
+        }
+    }
+
+    // Scene bounds — fallback side-highway columns when no internal
+    // vertical channel is clear of every intermediate block.
+    let scene_left = rects.iter().map(|r| r.x).fold(f32::MAX, f32::min) - 24.;
+    let scene_right = rects
+        .iter()
+        .map(|r| r.x + r.w)
+        .fold(f32::MIN, f32::max)
+        + 24.;
+
+    let mut h_lanes: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
+    let mut v_lane_count: HashMap<i32, usize> = HashMap::new();
+
+    /// Find a vertical x clear of every block in ranks strictly
+    /// between `rank_lo` and `rank_hi`. Walks outward from `prefer`
+    /// in 12 px steps. Falls back to the closer scene edge as a
+    /// side-highway when nothing fits.
+    fn pick_vertical_lane(
+        prefer: f32,
+        rank_lo: usize,
+        rank_hi: usize,
+        rank_geom: &BTreeMap<usize, RankGeom>,
+        scene_left: f32,
+        scene_right: f32,
+    ) -> f32 {
+        let blocks: Vec<(f32, f32)> = {
+            let mut out = Vec::new();
+            let (lo, hi) = (rank_lo.min(rank_hi), rank_lo.max(rank_hi));
+            for r in lo..=hi {
+                if r == rank_lo || r == rank_hi {
+                    continue;
+                }
+                if let Some(g) = rank_geom.get(&r) {
+                    out.extend(g.intervals.iter().copied());
+                }
+            }
+            out
+        };
+        let clear = |x: f32| -> bool {
+            let margin = 4.;
+            !blocks
+                .iter()
+                .any(|&(l, r)| x >= l - margin && x <= r + margin)
+        };
+        if clear(prefer) {
+            return prefer;
+        }
+        let step = 12.;
+        for k in 1..200 {
+            let dx = step * k as f32;
+            let left = prefer - dx;
+            if left >= scene_left && clear(left) {
+                return left;
+            }
+            let right = prefer + dx;
+            if right <= scene_right && clear(right) {
+                return right;
+            }
+            if left < scene_left && right > scene_right {
+                break;
+            }
+        }
+        if (prefer - scene_left).abs() < (prefer - scene_right).abs() {
+            scene_left
+        } else {
+            scene_right
+        }
+    }
+
+    /// Pixels the final line segment is shortened by so the
+    /// arrowhead's wedge body isn't painted over by the line.
     const ARROW_TRIM_PX: f32 = 7.;
 
     let mut routed = Vec::with_capacity(scene.edges.len());
     for (ei, e) in scene.edges.iter().enumerate() {
         let Some(src) = rects.get(e.from.0).copied() else { continue };
         let Some(dst) = rects.get(e.to.0).copied() else { continue };
+        let from_rank = node_rank[e.from.0];
+        let to_rank = node_rank[e.to.0];
+
         let on = out_total[e.from.0].max(1);
         let in_n = in_total[e.to.0].max(1);
         let out_frac = (out_slot[ei] + 1) as f32 / (on + 1) as f32;
@@ -650,39 +886,199 @@ pub fn route_edges(scene: &GraphScene, rects: &[NodeRect]) -> Vec<RoutedEdge> {
         let sy = src.y + src.h;
         let tx = dst.x + dst.w * in_frac;
         let ty = dst.y;
-        // Simple 3-segment Manhattan route: down to mid, across,
-        // down to target. The earlier multi-rank / back-edge work
-        // in render_cfg picked the horizontal y from the rank-gap
-        // band — but that depends on rank geometry that's not yet
-        // surfaced through this shared API. We'll re-introduce it
-        // in a follow-up; this gets parity with the current DEX
-        // call graph routing and gets the abstraction in.
-        let mid_y = (sy + ty) / 2.;
-        let mut segments = Vec::with_capacity(3);
-        segments.push(EdgeSegment {
-            x: sx,
-            y: sy.min(mid_y),
-            length: (mid_y - sy).abs(),
-            horizontal: false,
-        });
-        segments.push(EdgeSegment {
-            x: sx.min(tx),
-            y: mid_y,
-            length: (tx - sx).abs(),
-            horizontal: true,
-        });
-        let final_y_top = mid_y.min(ty);
-        let final_y_len = ((ty - mid_y).abs() - ARROW_TRIM_PX).max(0.);
-        segments.push(EdgeSegment {
-            x: tx,
-            y: final_y_top,
-            length: final_y_len,
-            horizontal: false,
-        });
+
+        // Allocate this edge a horizontal lane within the source's
+        // rank-gap. Stack lanes around the gap midline.
+        let gap_top = rank_geom
+            .get(&from_rank)
+            .map(|g| g.bottom_y)
+            .unwrap_or(sy);
+        let gap_bottom = rank_geom
+            .get(&from_rank)
+            .map(|g| g.next_top_y)
+            .unwrap_or(sy + 24.);
+        let gap_mid = (gap_top + gap_bottom) / 2.;
+        let lanes = h_lanes.entry(from_rank).or_default();
+        let lane_idx = lanes.len();
+        let lane_step = 5.;
+        let lane_y = gap_mid + ((lane_idx as f32 / 2.).ceil() as f32)
+            * lane_step
+            * if lane_idx % 2 == 0 { 1. } else { -1. };
+        let half = ((gap_bottom - gap_top).abs() / 2. - 4.).max(0.);
+        let lane_y = lane_y.clamp(gap_mid - half, gap_mid + half);
+        lanes.push(lane_y);
+
+        let single_rank_forward = to_rank == from_rank + 1;
+        let is_back_edge = to_rank <= from_rank;
+        let segments: Vec<EdgeSegment>;
+        let arrow_pos: (f32, f32, ArrowHeadDir);
+
+        if single_rank_forward {
+            // 3-segment route via the rank-gap lane.
+            let final_y_top = lane_y.min(ty);
+            let final_y_len = (ty - lane_y).abs() - ARROW_TRIM_PX;
+            segments = vec![
+                EdgeSegment {
+                    x: sx,
+                    y: sy.min(lane_y),
+                    length: (lane_y - sy).abs(),
+                    horizontal: false,
+                },
+                EdgeSegment {
+                    x: sx.min(tx),
+                    y: lane_y,
+                    length: (tx - sx).abs(),
+                    horizontal: true,
+                },
+                EdgeSegment {
+                    x: tx,
+                    y: final_y_top,
+                    length: final_y_len.max(0.),
+                    horizontal: false,
+                },
+            ];
+            arrow_pos = (tx, ty, ArrowHeadDir::Down);
+        } else if is_back_edge {
+            // Back-edge: side-highway. Pick whichever side yields a
+            // clear vertical lane closer to the source / target.
+            let exit_y = src.y + src.h * out_frac;
+            let entry_y = dst.y + dst.h * in_frac;
+            let right_prefer = src.x.max(dst.x + dst.w) + 24.;
+            let left_prefer = src.x.min(dst.x) - 24.;
+            let right_lane = pick_vertical_lane(
+                right_prefer,
+                from_rank,
+                to_rank,
+                &rank_geom,
+                scene_left,
+                scene_right,
+            );
+            let left_lane = pick_vertical_lane(
+                left_prefer,
+                from_rank,
+                to_rank,
+                &rank_geom,
+                scene_left,
+                scene_right,
+            );
+            let right_cost = (right_lane - (src.x + src.w)).abs()
+                + (right_lane - (dst.x + dst.w)).abs();
+            let left_cost =
+                (left_lane - src.x).abs() + (left_lane - dst.x).abs();
+            let use_right = right_cost <= left_cost;
+            let v_lane_x = if use_right { right_lane } else { left_lane };
+            let exit_side_x = if use_right { src.x + src.w } else { src.x };
+            let entry_side_x = if use_right { dst.x + dst.w } else { dst.x };
+            let key = (v_lane_x / 6.).round() as i32;
+            let cnt = v_lane_count.entry(key).or_insert(0);
+            let v_offset = (*cnt as f32)
+                * 4.
+                * if use_right { 1. } else { -1. };
+            *cnt += 1;
+            let v_x = v_lane_x + v_offset;
+
+            let (h3_x, h3_len) = if use_right {
+                let stop_x = entry_side_x + ARROW_TRIM_PX;
+                (stop_x.min(v_x), (v_x - stop_x).abs().max(0.))
+            } else {
+                let stop_x = entry_side_x - ARROW_TRIM_PX;
+                (v_x.min(stop_x), (stop_x - v_x).abs().max(0.))
+            };
+            segments = vec![
+                EdgeSegment {
+                    x: exit_side_x.min(v_x),
+                    y: exit_y,
+                    length: (v_x - exit_side_x).abs(),
+                    horizontal: true,
+                },
+                EdgeSegment {
+                    x: v_x,
+                    y: exit_y.min(entry_y),
+                    length: (entry_y - exit_y).abs(),
+                    horizontal: false,
+                },
+                EdgeSegment {
+                    x: h3_x,
+                    y: entry_y,
+                    length: h3_len,
+                    horizontal: true,
+                },
+            ];
+            arrow_pos = (
+                entry_side_x,
+                entry_y,
+                if use_right {
+                    ArrowHeadDir::Left
+                } else {
+                    ArrowHeadDir::Right
+                },
+            );
+        } else {
+            // Forward multi-rank. Pick a vertical lane clear of
+            // every intermediate block.
+            let prefer = (sx + tx) / 2.;
+            let v_lane_x = pick_vertical_lane(
+                prefer,
+                from_rank,
+                to_rank,
+                &rank_geom,
+                scene_left,
+                scene_right,
+            );
+            let key = (v_lane_x / 6.).round() as i32;
+            let cnt = v_lane_count.entry(key).or_insert(0);
+            let v_offset = (*cnt as f32) * 4.;
+            *cnt += 1;
+            let v_x = v_lane_x + v_offset;
+
+            // Approach y: the rank-gap above the target.
+            let approach_y = rank_geom
+                .iter()
+                .find(|(r, _)| **r + 1 == to_rank)
+                .map(|(_, g)| (g.bottom_y + g.next_top_y) / 2.)
+                .unwrap_or(ty - 12.);
+
+            let final_y_top = approach_y.min(ty);
+            let final_y_len = (ty - approach_y).abs() - ARROW_TRIM_PX;
+            segments = vec![
+                EdgeSegment {
+                    x: sx,
+                    y: sy.min(lane_y),
+                    length: (lane_y - sy).abs(),
+                    horizontal: false,
+                },
+                EdgeSegment {
+                    x: sx.min(v_x),
+                    y: lane_y,
+                    length: (v_x - sx).abs(),
+                    horizontal: true,
+                },
+                EdgeSegment {
+                    x: v_x,
+                    y: lane_y.min(approach_y),
+                    length: (approach_y - lane_y).abs(),
+                    horizontal: false,
+                },
+                EdgeSegment {
+                    x: v_x.min(tx),
+                    y: approach_y,
+                    length: (tx - v_x).abs(),
+                    horizontal: true,
+                },
+                EdgeSegment {
+                    x: tx,
+                    y: final_y_top,
+                    length: final_y_len.max(0.),
+                    horizontal: false,
+                },
+            ];
+            arrow_pos = (tx, ty, ArrowHeadDir::Down);
+        }
+
         routed.push(RoutedEdge {
             segments,
-            arrow_tip: (tx, ty),
-            arrow_dir: ArrowHeadDir::Down,
+            arrow_tip: (arrow_pos.0, arrow_pos.1),
+            arrow_dir: arrow_pos.2,
         });
     }
     routed

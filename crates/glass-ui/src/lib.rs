@@ -28,12 +28,12 @@ use gpui_platform::application;
 
 mod app;
 mod cfg_block;
-mod cfg_edge;
 mod cfg_render;
 mod context_menu;
 mod dex_callgraph;
 mod dex_cg_render;
 mod graph;
+mod graph_canvas;
 mod hex;
 mod listing_model;
 mod listing_render;
@@ -49,11 +49,6 @@ mod smali;
 mod two_pane;
 
 pub use app::launch;
-use cfg_block::{
-    build_cfg_from_text_sections, cfg_block_bg, render_cfg_block_content, render_cfg_block_pill,
-    CfgBlockRenderCtx, CfgBlockSummary, CfgLayoutPlan, CFG_BLOCK_BORDER,
-};
-use cfg_edge::{render_edge_arrowhead, render_edge_segment, ArrowHeadDir, EdgeSegment};
 use context_menu::{ContextMenuItem, ContextMenuState};
 use dex_callgraph::DexCallGraphState;
 use loader::load_bundle_blocking;

@@ -11,10 +11,17 @@ A fast, native, **mobile-app first** interactive disassembler. Spiritual success
 
 License: GPL-3.0-only (inherited from `smali`).
 
-
 ## Why?
 
 We’ve all used IDA Pro — it’s the industry standard for reversing and has years of plugins behind it, but it’s slow, expensive, and dated. Glass is 100% Rust native with a GPU-accelerated UI for fluid interaction. It’s also 100% free and open source — please contribute.
+
+## Features
+* Buttery smooth 120fps GPU accelerated rendering
+* Lightning fast analysis: 1-2 seconds for most larger binaries compared with minutes on IDA Pro
+* Fully linked and annotated disassemblies with control flow lines, data literals in comments, clickable links to other functions. All coloured for easy visibility.
+* Control flow graphs showing basic blocks and clickable links to other functions
+* Full project search for symbols or string literals across DEX, code and data sections
+* Native binary layout overview with section data
 
 ## Status
 
