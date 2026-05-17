@@ -93,6 +93,30 @@ pub fn demangle(name: String, format: Format) -> Result<()> {
     output::emit(envelope, format, render_demangle)
 }
 
+pub fn disasm(
+    path: PathBuf,
+    artifact: String,
+    section: Option<String>,
+    limit: Option<usize>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.disasm(&artifact, section.as_deref(), limit)
+    })?;
+    output::emit(envelope, format, render_disasm)
+}
+
+pub fn decode(word: String, addr: String, format: Format) -> Result<()> {
+    let word_n = u32::from_str_radix(word.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow::anyhow!("bad word {word:?}: {e}"))?;
+    let addr_n = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow::anyhow!("bad addr {addr:?}: {e}"))?;
+    let envelope =
+        output::measured(|| Ok(glass_api::decode_word(word_n, addr_n)))?;
+    output::emit(envelope, format, render_decode)
+}
+
 // ---- text renderers --------------------------------------------------------
 
 fn render_inspect(
@@ -221,6 +245,45 @@ fn render_demangle(
     } else {
         writeln!(out, "{}", data.demangled)
     }
+}
+
+fn render_disasm(
+    data: &glass_api::DisasmListing,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{} {}  (base {}, {} of {} instructions)",
+        data.artifact, data.section, data.base_address, data.shown, data.total_instructions,
+    )?;
+    for r in &data.rows {
+        if let Some(sym) = &r.symbol {
+            writeln!(out, "{sym}:")?;
+        }
+        let op = if r.operands.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", r.operands)
+        };
+        let comment = match &r.comment {
+            Some(c) => format!("  ; {c}"),
+            None => String::new(),
+        };
+        writeln!(out, "  {}  {}  {}{}{}", r.address, r.bytes, r.mnemonic, op, comment)?;
+    }
+    Ok(())
+}
+
+fn render_decode(
+    data: &glass_api::DecodeResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let op = if data.operands.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", data.operands)
+    };
+    writeln!(out, "{} → {}{}", data.word, data.mnemonic, op)
 }
 
 // Marker — `Envelope` referenced in the function signatures.

@@ -21,10 +21,12 @@
 //! parallel queries don't fight; cache fills are serialised.
 
 mod bundle;
+mod disasm;
 mod inspect;
 mod symbols;
 
 pub use bundle::{open, Bundle, BundleKind};
+pub use disasm::{decode_word, DecodeResult, DisasmListing, DisasmRow};
 pub use inspect::{
     ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,
     SectionInfo,

@@ -57,6 +57,16 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             format,
         )),
         Cmd::Demangle { name } => Some(verbs::demangle(name.clone(), format)),
+        Cmd::Disasm { path, artifact, section, limit } => Some(verbs::disasm(
+            path.clone(),
+            artifact.clone(),
+            section.clone(),
+            *limit,
+            format,
+        )),
+        Cmd::Decode { word, addr } => {
+            Some(verbs::decode(word.clone(), addr.clone(), format))
+        }
         _ => None,
     }
 }
@@ -124,6 +134,27 @@ enum Cmd {
     },
     /// Demangle a single symbol name (no bundle required).
     Demangle { name: String },
+    /// Linear-sweep disassembly of a text section.
+    Disasm {
+        path: PathBuf,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+        /// Section name (e.g. `.text`, `__text`). When omitted,
+        /// picks the first text section in the artifact.
+        #[arg(long)]
+        section: Option<String>,
+        /// Cap on returned rows.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Decode one 32-bit AArch64 instruction word (no bundle
+    /// required). `word` is hex; `addr` defaults to 0.
+    Decode {
+        word: String,
+        #[arg(long, default_value = "0")]
+        addr: String,
+    },
 
     // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
@@ -273,7 +304,9 @@ fn main() -> Result<()> {
         | Cmd::Hash { .. }
         | Cmd::Symbols { .. }
         | Cmd::SymbolAt { .. }
-        | Cmd::Demangle { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::Demangle { .. }
+        | Cmd::Disasm { .. }
+        | Cmd::Decode { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 
