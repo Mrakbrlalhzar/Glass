@@ -179,6 +179,58 @@ pub fn fields(path: PathBuf, class: String, format: Format) -> Result<()> {
     output::emit(envelope, format, render_fields)
 }
 
+pub fn xref_addr(
+    path: PathBuf,
+    artifact: String,
+    addr: String,
+    format: Format,
+) -> Result<()> {
+    let addr_n = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow::anyhow!("bad address {addr:?}: {e}"))?;
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.xref_addr(&artifact, addr_n)
+    })?;
+    output::emit(envelope, format, render_xref)
+}
+
+pub fn callers(
+    path: PathBuf,
+    artifact: String,
+    symbol: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.callers(&artifact, &symbol)
+    })?;
+    output::emit(envelope, format, render_xref)
+}
+
+pub fn dex_callers(
+    path: PathBuf,
+    method_key: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        Ok(bundle.dex_callers(&method_key))
+    })?;
+    output::emit(envelope, format, render_dex_callers)
+}
+
+pub fn field_refs(
+    path: PathBuf,
+    field_ref: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        Ok(bundle.field_refs(&field_ref))
+    })?;
+    output::emit(envelope, format, render_field_refs)
+}
+
 pub fn method_calls(
     path: PathBuf,
     class: String,
@@ -497,6 +549,46 @@ fn render_method_calls(
             "  {:<22}  {}->{}{}",
             c.kind, c.target_class, c.target_method, c.target_descriptor,
         )?;
+    }
+    Ok(())
+}
+
+fn render_xref(
+    data: &glass_api::XrefResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let target = match &data.target_symbol {
+        Some(s) => format!("{}  ({})", data.target_address, s),
+        None => data.target_address.clone(),
+    };
+    writeln!(out, "{}  {} sites", target, data.sites.len())?;
+    for s in &data.sites {
+        match &s.function {
+            Some(fname) => writeln!(out, "  {}  in {}", s.address, fname)?,
+            None => writeln!(out, "  {}", s.address)?,
+        }
+    }
+    Ok(())
+}
+
+fn render_dex_callers(
+    data: &glass_api::DexCallersResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "callers of {}  ({})", data.method_key, data.callers.len())?;
+    for c in &data.callers {
+        writeln!(out, "  {c}")?;
+    }
+    Ok(())
+}
+
+fn render_field_refs(
+    data: &glass_api::FieldRefsResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "users of {}  ({})", data.field_ref, data.methods.len())?;
+    for m in &data.methods {
+        writeln!(out, "  {m}")?;
     }
     Ok(())
 }

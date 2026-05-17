@@ -97,6 +97,28 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             method.clone(),
             format,
         )),
+        Cmd::XrefAddr { path, artifact, addr } => Some(verbs::xref_addr(
+            path.clone(),
+            artifact.clone(),
+            addr.clone(),
+            format,
+        )),
+        Cmd::Callers { path, artifact, symbol } => Some(verbs::callers(
+            path.clone(),
+            artifact.clone(),
+            symbol.clone(),
+            format,
+        )),
+        Cmd::DexCallers { path, method_key } => Some(verbs::dex_callers(
+            path.clone(),
+            method_key.clone(),
+            format,
+        )),
+        Cmd::FieldRefs { path, field_ref } => Some(verbs::field_refs(
+            path.clone(),
+            field_ref.clone(),
+            format,
+        )),
         _ => None,
     }
 }
@@ -240,6 +262,38 @@ enum Cmd {
         class: String,
         #[arg(long)]
         method: String,
+    },
+    /// Native callers / address-takes for a given address.
+    XrefAddr {
+        path: PathBuf,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+        /// Hex address (with or without 0x prefix).
+        addr: String,
+    },
+    /// Native callers of a symbol by name.
+    Callers {
+        path: PathBuf,
+        #[arg(long)]
+        artifact: String,
+        /// Symbol display name or raw name.
+        #[arg(long)]
+        symbol: String,
+    },
+    /// DEX methods that `invoke-*` the given method key
+    /// (`Lclass;->name(descriptor)return`).
+    DexCallers {
+        path: PathBuf,
+        #[arg(long = "method")]
+        method_key: String,
+    },
+    /// DEX methods that touch the given field reference
+    /// (`Lclass;->name:Ltype;`).
+    FieldRefs {
+        path: PathBuf,
+        #[arg(long = "field")]
+        field_ref: String,
     },
 
     // ----- Legacy text-output commands -------------------------------
@@ -399,7 +453,11 @@ fn main() -> Result<()> {
         | Cmd::Smali { .. }
         | Cmd::Methods { .. }
         | Cmd::Fields { .. }
-        | Cmd::MethodCalls { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::MethodCalls { .. }
+        | Cmd::XrefAddr { .. }
+        | Cmd::Callers { .. }
+        | Cmd::DexCallers { .. }
+        | Cmd::FieldRefs { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 

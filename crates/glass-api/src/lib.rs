@@ -26,6 +26,7 @@ mod dex;
 mod disasm;
 mod inspect;
 mod symbols;
+mod xref;
 
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
@@ -40,6 +41,9 @@ pub use inspect::{
 };
 pub use symbols::{
     demangle, DemangleResult, SymbolInfo, SymbolKindName, SymbolListing, SymbolQuery,
+};
+pub use xref::{
+    DexCallersResult, FieldRefsResult, XrefResult, XrefSite,
 };
 
 use anyhow::{Context, Result};
