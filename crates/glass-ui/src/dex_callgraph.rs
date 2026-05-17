@@ -142,7 +142,7 @@ fn count_instructions(
     method_lines: &HashMap<String, (LeafId, usize)>,
     key: &str,
 ) -> Option<usize> {
-    let (LeafId(leaf), start) = method_lines.get(key)?.clone();
+    let (LeafId(leaf), start) = *method_lines.get(key)?;
     let body = bodies.get(leaf)?;
     let mut n = 0usize;
     for line in body.lines().skip(start + 1) {

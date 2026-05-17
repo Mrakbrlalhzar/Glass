@@ -8,17 +8,14 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, ListAlignment, ListOffset, ListState, Pixels,
-    SharedString, Window,
+    div, list, prelude::*, px, rgb, App, Context, Pixels,
+    SharedString,
 };
 
 use crate::cfg_block::build_cfg_from_text_sections;
 use crate::context_menu::{self, ContextMenuState};
-use crate::listing_render::LISTING_ROW_HEIGHT;
-use crate::palette::{COLOUR_BB_SEPARATOR, COLOUR_SYMBOL_HEADER};
-use crate::scrollbar::list_scrollbar;
 use crate::{
-    LeafId, LoadedBundle, Progress, SearchEntry, Shell, ShellState, Tab, TabKind, TextTooltip,
+    LeafId, LoadedBundle, Progress, SearchEntry, Shell, ShellState,
 };
 
 impl Shell {
@@ -388,8 +385,6 @@ impl Shell {
     ) -> impl IntoElement {
         crate::section_map::render_section_map(self, bundle, artifact, panel, border, fg, dim, cx)
     }
-
-    #[allow(dead_code)]
 
     /// Render the CFG canvas for the function at `entry_addr` in
     /// `artifact`. The graph is built lazily on the first paint; the

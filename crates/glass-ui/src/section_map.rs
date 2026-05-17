@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, Pixels, SharedString,
+    div, list, prelude::*, px, rgb, App, Context, SharedString,
 };
 
 use crate::scrollbar::list_scrollbar;
@@ -20,9 +20,9 @@ use crate::{LoadedBundle, NativeSectionKind, SectionInfo, Shell};
 /// the section bar so the cursor's cell pops without losing its kind
 /// colour.
 pub fn brighten(rgb_hex: u32) -> u32 {
-    let r = ((rgb_hex >> 16) & 0xff) as u32;
-    let g = ((rgb_hex >> 8) & 0xff) as u32;
-    let b = (rgb_hex & 0xff) as u32;
+    let r = (rgb_hex >> 16) & 0xff;
+    let g = (rgb_hex >> 8) & 0xff;
+    let b = rgb_hex & 0xff;
     let lift = |c: u32| (c + (0xff - c) / 4).min(0xff);
     (lift(r) << 16) | (lift(g) << 8) | lift(b)
 }

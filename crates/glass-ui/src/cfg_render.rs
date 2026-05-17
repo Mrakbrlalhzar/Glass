@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, AnyElement, Context, SharedString};
+use gpui::{div, prelude::*, AnyElement, Context, SharedString};
 
 use crate::cfg_block::{
     render_cfg_block_content, render_cfg_block_pill, CfgBlockRenderCtx, CfgBlockSummary,

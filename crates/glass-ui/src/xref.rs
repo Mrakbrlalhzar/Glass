@@ -26,10 +26,12 @@ use parking_lot::RwLock;
 /// Ready`. `Failed` is defensive — none of the builders are
 /// fallible today but the state machine accommodates them.
 #[derive(Clone)]
+#[derive(Default)]
 pub enum XrefIndexState<T> {
     /// Build hasn't started yet. The Shell shouldn't see this in
     /// practice (the loader fires builders immediately after bundle
     /// hand-off), but it's the cheap initial value.
+    #[default]
     Pending,
     /// Build is running. The `XrefProgress` is shared with the
     /// worker so the UI can render `current / total`.
@@ -129,11 +131,6 @@ impl XrefStore {
     }
 }
 
-impl<T> Default for XrefIndexState<T> {
-    fn default() -> Self {
-        XrefIndexState::Pending
-    }
-}
 
 impl<T> XrefIndexState<T> {
     /// Convenience: whether any consumer has the finished index in

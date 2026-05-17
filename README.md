@@ -22,6 +22,7 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Control flow graphs showing basic blocks and clickable links to other functions
 * Full project search for symbols or string literals across DEX, code and data sections
 * Native binary layout overview with section data
+* Xref search of callers, references to data
 
 ## Status
 

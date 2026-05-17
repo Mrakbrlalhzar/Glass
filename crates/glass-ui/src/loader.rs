@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use glass_arch_arm64::Arm64Binary;
 use glass_mobile::{ApkBundle, Bundle, IpaBundle};
 use gpui::SharedString;

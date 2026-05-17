@@ -1,8 +1,10 @@
 //! Thin wrapper over `redb` that knows our four tables and serialises
 //! records as JSON. JSON is the right choice for v1 because:
-//!   - records are small (one per bundle/artifact),
-//!   - schema evolves quickly, and self-describing wire format helps,
-//!   - a corrupt DB can be inspected with `jq` while debugging.
+//!
+//! - records are small (one per bundle/artifact),
+//! - schema evolves quickly, and self-describing wire format helps,
+//! - a corrupt DB can be inspected with `jq` while debugging.
+//!
 //! We can swap to bincode behind this module later if profiling shows
 //! it matters.
 

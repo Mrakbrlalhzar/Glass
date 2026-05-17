@@ -23,3 +23,6 @@ gpui_platform.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+
+[lints]
+workspace = true

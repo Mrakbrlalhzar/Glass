@@ -92,7 +92,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         // gpui's window stack during this menu callback.
         cx.on_action(|_: &About, cx: &mut App| {
             cx.spawn(async move |cx| {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     for wh in cx.windows() {
                         if let Some(typed) = wh.downcast::<Shell>() {
                             let _ = cx.update_window(typed.into(), |root, _w, cx| {
@@ -158,7 +158,7 @@ fn open_nth_recent(db: Option<glass_db::Database>, idx: usize, cx: &mut App) {
 /// inside gpui. Spawning sidesteps the problem entirely.
 fn open_path(path: PathBuf, db: Option<glass_db::Database>, cx: &mut App) {
     cx.spawn(async move |cx| {
-        let _ = cx.update(|cx| open_path_now(path, db, cx));
+        cx.update(|cx| open_path_now(path, db, cx));
     })
     .detach();
 }
@@ -262,7 +262,7 @@ fn open_file_dialog_and_window(
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(paths))) = receiver.await else { return };
         let Some(path) = paths.into_iter().next() else { return };
-        let _ = cx.update(|cx| open_path(path, db, cx));
+        cx.update(|cx| open_path(path, db, cx));
     })
     .detach();
 }

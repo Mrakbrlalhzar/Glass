@@ -15,3 +15,6 @@ bitflags = "2"
 # Demangle C++ (Itanium), Rust, Swift and ObjC symbols.
 symbolic-demangle = { version = "12", default-features = false, features = ["cpp", "rust", "swift"] }
 symbolic-common = "12"
+
+[lints]
+workspace = true

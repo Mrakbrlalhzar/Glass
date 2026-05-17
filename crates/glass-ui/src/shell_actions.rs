@@ -10,18 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    px, App, Bounds, Context, ListAlignment, ListOffset, ListState, Pixels, SharedString, Window,
+    px, Bounds, Context, ListAlignment, ListOffset, ListState, Pixels, SharedString, Window,
 };
 
-use crate::cfg_block::build_cfg_from_text_sections;
 use crate::context_menu::{ContextMenuItem, ContextMenuState};
-use crate::dex_callgraph::DexCallGraphState;
-use crate::hex::{build_hex_rows, hex_row_for_addr, HexRow};
+use crate::hex::{build_hex_rows, hex_row_for_addr};
 use crate::listing_model::{build_listing_rows, listing_row_for_addr, DataPeek, ListingRow};
-use crate::search::{build_search_index, is_subsequence, SearchIndex, SearchJump};
+use crate::search::{build_search_index, is_subsequence, SearchJump};
 use crate::SearchEntry;
 use crate::{
-    flatten, scroll_into_view_with_context, CfgViewState, Expanded, LeafId, LeafKind,
+    flatten, scroll_into_view_with_context, Expanded, LeafId,
     LoadedBundle, NativeSectionKind, Progress, RowKind, SectionInfo, Shell, ShellState, Tab,
     TabKind, TextSectionBytes,
 };
@@ -710,14 +708,6 @@ impl Shell {
         self.save_state();
     }
 
-    /// Open (or focus) a Listing tab for the given (artifact, section)
-    /// with an initial scroll target. If a matching tab is already open,
-    /// we focus it and update its pending scroll target so the next
-    /// paint jumps to the requested address.
-    /// Select a row in the active tab. Idempotent. Clears any
-    /// per-byte selection (hex view) so a fresh row click resets the
-    /// cell highlight; cell clicks re-set the byte via `select_byte`
-    /// afterwards.
     // ---- search palette ----------------------------------------------------
 
     pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {

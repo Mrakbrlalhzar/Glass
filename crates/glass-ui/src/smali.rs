@@ -88,7 +88,7 @@ pub fn tokenize_smali_line(line: &str) -> Vec<Chunk> {
             } else if j < bytes.len() && b"VZBSCIJFD".contains(&bytes[j]) {
                 j += 1;
             } else {
-                push(&mut out, (c as char).to_string(), ChunkKind::Plain);
+                push(&mut out, c.to_string(), ChunkKind::Plain);
                 i += 1;
                 continue;
             }

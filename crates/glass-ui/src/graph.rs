@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use gpui::{
-    div, prelude::*, px, rgb, Bounds, Pixels, Point, SharedString,
+    div, prelude::*, px, Bounds, Pixels, Point, SharedString,
 };
 
 // ---- Camera & world coordinates --------------------------------------------
@@ -134,6 +134,9 @@ impl GraphCamera {
 pub struct NodeId(pub usize);
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // id/label/tags are part of the public scene model
+                    // but only `hints` is currently read inside layout/
+                    // routing. Kept for callers and future view kinds.
 pub struct GraphNode {
     pub id: NodeId,
     /// Display label — used for the tab title and debug logs; the
@@ -168,6 +171,10 @@ impl Default for NodeHints {
 }
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // tags are populated at scene construction but
+                    // not yet read by the renderers — they'll drive
+                    // entry-block / exit-block colouring once the
+                    // shared canvas grows those styles.
 pub struct NodeTags {
     /// Warm tint — exit / terminal blocks in a CFG, leaf methods
     /// in a call graph.
@@ -552,7 +559,7 @@ pub fn layout_scene(scene: &mut GraphScene) {
     let mut world_x: Vec<f32> = vec![0.; n];
     let mut world_y: Vec<f32> = vec![0.; n];
     let mut cursor_y_px = 0.0_f32;
-    for (_r, ids) in &by_rank {
+    for ids in by_rank.values() {
         let max_h_px = ids
             .iter()
             .map(|nid| scene.nodes[nid.0].hints.size_px.1)
@@ -654,6 +661,11 @@ impl NodeRect {
     pub fn cx(&self) -> f32 {
         self.x + self.w / 2.
     }
+    /// Vertical centre. Symmetric with `cx` — currently unused
+    /// in-tree but exposed for future routing tweaks (vertical fan-
+    /// in attach distribution mirrors what `route_edges` already
+    /// does horizontally with `cx`).
+    #[allow(dead_code)]
     pub fn cy(&self) -> f32 {
         self.y + self.h / 2.
     }

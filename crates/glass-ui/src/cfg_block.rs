@@ -7,7 +7,7 @@
 //! `CfgBlockSummary` so the call sites in `render_cfg` can resolve
 //! call targets once per block.
 
-use gpui::{div, prelude::*, px, rgb, App, SharedString};
+use gpui::{div, prelude::*, rgb, App, SharedString};
 
 use crate::palette::{
     COLOUR_ADDR, COLOUR_ADDRESS_OP, COLOUR_BYTES, COLOUR_MNEMONIC, COLOUR_PUNCT, COLOUR_REGISTER,
@@ -156,7 +156,7 @@ pub fn render_cfg_block_content(
         if let Some((entry_addr, name)) = call {
             let entry_addr = *entry_addr;
             let name = name.clone();
-            let label = SharedString::from(name);
+            let label = name;
             let elem: gpui::AnyElement = match ctx {
                 Some(c) => {
                     let weak = c.shell.clone();

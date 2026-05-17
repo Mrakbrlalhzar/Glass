@@ -14,17 +14,12 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use anyhow::{Context as _, Result};
-use glass_arch_arm64::Arm64Binary;
-use glass_mobile::{ApkBundle, Bundle, IpaBundle};
 use gpui::{
-    App, Bounds, Context, FocusHandle, KeyBinding, ListAlignment, ListOffset, ListState, Pixels,
-    Render, SharedString, Window, WindowBounds, WindowOptions, actions, div, list, prelude::*,
-    px, rgb, size,
+    Bounds, Context, FocusHandle, ListAlignment, ListOffset, ListState, Pixels,
+    Render, SharedString, Window, actions, div, prelude::*,
+    px, rgb,
 };
-use gpui_platform::application;
 
 mod about;
 mod app;
@@ -51,32 +46,19 @@ mod two_pane;
 mod xref;
 
 pub use app::launch;
-use context_menu::{ContextMenuItem, ContextMenuState};
+use context_menu::ContextMenuState;
 use dex_callgraph::DexCallGraphState;
-use loader::load_bundle_blocking;
 pub use loader::snapshot_arm64;
 pub use search::{build_search_index, SearchEntry, SearchIndex, SearchJump};
 pub use xref::{PaletteScope, PaletteScopeSource, XrefIndexState, XrefProgress, XrefStore};
-use search::jni_to_dotted;
 
 pub use hex::{build_hex_rows, hex_row_for_addr, HexRow};
 pub use listing_model::{
     build_listing_rows, listing_row_for_addr, ArrowDirection, ArrowRole, ArrowSegment, ArrowStyle,
     DataPeek, ListingRow, ARROW_MAX_LANES,
 };
-use listing_render::{
-    render_hex_row, render_listing_row_with, RowCtx, HEX_ROW_HEIGHT, HEX_ROW_MIN_WIDTH,
-    LISTING_ROW_HEIGHT, LISTING_ROW_MIN_WIDTH,
-};
+use listing_render::LISTING_ROW_HEIGHT;
 pub use manifest::{flatten_info_plist, flatten_manifest, ManifestRow};
-use palette::{
-    chunk_colour, COLOUR_ADDR, COLOUR_ADDRESS_OP, COLOUR_BB_SEPARATOR, COLOUR_BYTES,
-    COLOUR_COMMENT, COLOUR_DIRECTIVE, COLOUR_IMMEDIATE, COLOUR_LABEL, COLOUR_MNEMONIC,
-    COLOUR_MODIFIER, COLOUR_PLAIN, COLOUR_PUNCT, COLOUR_REGISTER, COLOUR_ROW_SELECTED,
-    COLOUR_STRING, COLOUR_SYMBOL_HEADER, COLOUR_TYPE, COLOUR_TYPE_EXTERNAL,
-};
-use scrollbar::{horizontal_scrollbar_offset, list_scrollbar};
-use smali::{extract_class_jni, tokenize_smali_line};
 
 actions!(
     glass,
@@ -221,7 +203,7 @@ pub struct DataSectionBytes {
 impl DataSectionBytes {
     /// How many 16-byte rows the hex view will render.
     pub fn row_count(&self) -> usize {
-        (self.bytes.len() + 15) / 16
+        self.bytes.len().div_ceil(16)
     }
 
     /// Base address of the `n`-th row.
@@ -291,7 +273,6 @@ pub(crate) fn scroll_into_view_with_context(state: &ListState, target_row: usize
     });
 }
 
-/// Find the hex row index containing `addr`, or the nearest one below.
 // ---- AndroidManifest XML viewer --------------------------------------------
 
 
@@ -355,9 +336,6 @@ impl NativeSectionKind {
         }
     }
 }
-
-/// Lighten an opaque 0xRRGGBB by ~25% per channel. Used to give the
-/// hovered section in the bar a "this is the one" lift.
 
 /// Minimal text-only tooltip view. gpui's `tooltip()` API wants an
 /// `AnyView`, so we build a tiny entity that just renders its string.
@@ -690,26 +668,6 @@ impl CfgViewState {
         self.camera.zoom
     }
 }
-
-/// Pixels per world unit at zoom = 1.0. World coords are normalised
-/// against this so a block at `(x, y)` lands at screen pixel
-/// `(viewport_centre + (x - pan_x) * world_unit * zoom)`.
-///
-/// These mirror the canonical values in `graph::WORLD_UNIT` etc. —
-/// kept here as aliases so the CFG-specific rendering can refer to
-/// them without an explicit module path. PR B's modularisation step
-/// will move the CFG renderer into its own module and these
-/// aliases go away.
-const CFG_WORLD_UNIT: f32 = graph::WORLD_UNIT;
-const CFG_MIN_ZOOM: f32 = graph::MIN_ZOOM;
-const CFG_MAX_ZOOM: f32 = graph::MAX_ZOOM;
-const CFG_ZOOM_STEP: f32 = graph::ZOOM_STEP;
-
-/// LOD threshold — measured in *pixels of a block's on-screen size*
-/// (its width at the current zoom). Below `LOD_PILL_MAX`, a block is
-/// just a coloured pill with its label; above it, the block shows
-/// the symbol header + first instructions + count summary.
-const LOD_PILL_MAX: f32 = 50.;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TabKind {
