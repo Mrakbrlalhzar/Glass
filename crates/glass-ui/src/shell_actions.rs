@@ -72,6 +72,7 @@ impl Shell {
             context_menu: None,
             goto_focused: false,
             goto_query: String::new(),
+            about_open: false,
         }
     }
 
@@ -893,6 +894,20 @@ impl Shell {
     pub(crate) fn goto_open(&mut self, cx: &mut Context<Self>) {
         self.goto_focused = true;
         cx.notify();
+    }
+
+    pub(crate) fn open_about(&mut self, cx: &mut Context<Self>) {
+        if !self.about_open {
+            self.about_open = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn close_about(&mut self, cx: &mut Context<Self>) {
+        if self.about_open {
+            self.about_open = false;
+            cx.notify();
+        }
     }
 
     pub(crate) fn goto_close(&mut self, cx: &mut Context<Self>) {

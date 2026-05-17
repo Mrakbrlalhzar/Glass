@@ -18,7 +18,7 @@ use gpui_platform::application;
 
 use crate::loader::load_bundle_blocking;
 use crate::{
-    CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
+    About, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
     OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7, OpenRecent8, OpenRecent9,
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
     TogglePalette,
@@ -86,6 +86,25 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         }
         cx.on_action(|_: &Quit, cx: &mut App| {
             cx.quit();
+        });
+        // About → tell every Shell window to show its About modal.
+        // Deferred via cx.spawn so we never read a window that's on
+        // gpui's window stack during this menu callback.
+        cx.on_action(|_: &About, cx: &mut App| {
+            cx.spawn(async move |cx| {
+                let _ = cx.update(|cx| {
+                    for wh in cx.windows() {
+                        if let Some(typed) = wh.downcast::<Shell>() {
+                            let _ = cx.update_window(typed.into(), |root, _w, cx| {
+                                if let Ok(entity) = root.downcast::<Shell>() {
+                                    entity.update(cx, |shell, cx| shell.open_about(cx));
+                                }
+                            });
+                        }
+                    }
+                });
+            })
+            .detach();
         });
 
         register_open_recent_actions(db.clone(), cx);
@@ -206,7 +225,7 @@ fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
 
     cx.set_menus([
         gpui::Menu::new("Glass").items([
-            gpui::MenuItem::action("About Glass", Quit).disabled(true),
+            gpui::MenuItem::action("About Glass", About),
             gpui::MenuItem::separator(),
             gpui::MenuItem::action("Quit", Quit),
         ]),

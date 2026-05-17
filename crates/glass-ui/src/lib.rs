@@ -26,6 +26,7 @@ use gpui::{
 };
 use gpui_platform::application;
 
+mod about;
 mod app;
 mod cfg_block;
 mod cfg_render;
@@ -87,6 +88,7 @@ actions!(
         NewWindow,
         CloseWindow,
         Quit,
+        About,
         // Up to 10 recent-bundle slots. Each is a zero-sized action
         // wired to a separate handler that opens index N from the
         // recent list. Avoids needing serde-deriving payload actions
@@ -899,6 +901,8 @@ pub(crate) struct Shell {
     /// into `goto_query`; Enter parses + navigates, ESC closes.
     pub(crate) goto_focused: bool,
     pub(crate) goto_query: String,
+    /// Whether the About-Glass modal is currently shown.
+    pub(crate) about_open: bool,
 }
 
 
@@ -1064,6 +1068,12 @@ impl Render for Shell {
                     .into_any_element()
             });
 
+        let about_overlay: Option<gpui::AnyElement> = if self.about_open {
+            Some(about::render_about(panel, border, fg, dim, cx))
+        } else {
+            None
+        };
+
         let mut root = div()
             .id("glass-root")
             .track_focus(&self.focus_handle)
@@ -1104,6 +1114,12 @@ impl Render for Shell {
             // this revision — this is enough for our two text fields.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
                 let k = &ev.keystroke;
+                // Escape always closes the About modal first if it's
+                // up — beats palette / goto handling.
+                if this.about_open && k.key == "escape" {
+                    this.close_about(cx);
+                    return;
+                }
                 if this.goto_focused {
                     if k.key == "escape" {
                         this.goto_close(cx);
@@ -1149,6 +1165,9 @@ impl Render for Shell {
             root = root.child(o);
         }
         if let Some(o) = context_menu_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = about_overlay {
             root = root.child(o);
         }
         root
