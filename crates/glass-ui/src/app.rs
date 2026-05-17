@@ -232,13 +232,23 @@ fn open_glass_window(
     cx: &mut App,
 ) {
     let settings = glass_db::load_window_settings();
-    let bounds = match settings.bounds {
+    let mut bounds = match settings.bounds {
         Some(b) => Bounds {
             origin: gpui::point(px(b.x), px(b.y)),
             size: size(px(b.width), px(b.height)),
         },
         None => Bounds::centered(None, size(px(1200.), px(800.)), cx),
     };
+    // Stagger windows so a 2nd / 3rd window doesn't open exactly on
+    // top of the existing one(s). Step is small enough that the
+    // window stays visible on screen but big enough that the title
+    // bar of the underneath window peeks out.
+    const STAGGER_PX: f32 = 32.;
+    let stagger = (cx.windows().len() as f32) * STAGGER_PX;
+    if stagger > 0. {
+        bounds.origin.x += px(stagger);
+        bounds.origin.y += px(stagger);
+    }
     let path_for_window = path.clone();
     let db_for_window = db.clone();
     cx.open_window(
