@@ -1206,8 +1206,14 @@ impl Shell {
     ) {
         self.overflow_open = false;
         let kind = TabKind::Hex { artifact, section };
-        self.tabs.push(Tab::new(kind));
-        let idx = self.tabs.len() - 1;
+        // Dedupe per-section, same reasoning as the Listing case.
+        let idx = match self.tabs.iter().position(|t| t.kind == kind) {
+            Some(i) => i,
+            None => {
+                self.tabs.push(Tab::new(kind));
+                self.tabs.len() - 1
+            }
+        };
         self.tabs[idx].pending_scroll_addr = Some(addr);
         self.active_tab = Some(idx);
         cx.notify();
@@ -1223,8 +1229,20 @@ impl Shell {
     ) {
         self.overflow_open = false;
         let kind = TabKind::Listing { artifact, section };
-        self.tabs.push(Tab::new(kind));
-        let idx = self.tabs.len() - 1;
+        // Dedupe per-section. Two Listing tabs with the same kind
+        // confuse `spawn_listing_build`'s completion handler — it
+        // looks up the tab by kind to install rows, and `position()`
+        // returns the *first* match, so the 2nd duplicate would
+        // never receive its rows (the user sees the progress bar
+        // hang at the end). Treat repeat opens as "focus the
+        // existing tab" instead and scroll to the new address.
+        let idx = match self.tabs.iter().position(|t| t.kind == kind) {
+            Some(i) => i,
+            None => {
+                self.tabs.push(Tab::new(kind));
+                self.tabs.len() - 1
+            }
+        };
         self.tabs[idx].pending_scroll_addr = Some(addr);
         self.active_tab = Some(idx);
         cx.notify();

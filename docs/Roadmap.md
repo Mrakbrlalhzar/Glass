@@ -1,6 +1,6 @@
 ## Glass Roadmap
 
-* Opening a 2nd __text window seems to hang at the end of ‘Disassembling…’ progress bar and not transition to the disassembly view.
+* ~~Opening a 2nd __text window seems to hang at the end of ‘Disassembling…’ progress bar and not transition to the disassembly view.~~
 * ~~Need an About dialog with Glass, repo URL: https://github.com/azw413/Glass build date and time, tag version, commit hash, GPL License and attributions for 3rd party open source libraries (direct dependencies only).~~
 * ~~Control flow graph view of disassembly~~
 * ~~Control flow graph for DEX methods~~
