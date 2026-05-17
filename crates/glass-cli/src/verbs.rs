@@ -117,6 +117,32 @@ pub fn decode(word: String, addr: String, format: Format) -> Result<()> {
     output::emit(envelope, format, render_decode)
 }
 
+pub fn cfg_of(
+    path: PathBuf,
+    artifact: String,
+    func: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.cfg(&artifact, &func)
+    })?;
+    output::emit(envelope, format, render_cfg)
+}
+
+pub fn calls_from(
+    path: PathBuf,
+    artifact: String,
+    func: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.calls_from(&artifact, &func)
+    })?;
+    output::emit(envelope, format, render_calls_from)
+}
+
 // ---- text renderers --------------------------------------------------------
 
 fn render_inspect(
@@ -284,6 +310,60 @@ fn render_decode(
         format!(" {}", data.operands)
     };
     writeln!(out, "{} → {}{}", data.word, data.mnemonic, op)
+}
+
+fn render_cfg(
+    data: &glass_api::CfgResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}  ({})  {} blocks  {} edges",
+        data.function,
+        data.entry_address,
+        data.blocks.len(),
+        data.edges.len(),
+    )?;
+    for b in &data.blocks {
+        writeln!(
+            out,
+            "  block {:>3}  rank={}  x={:.1}  {}..{}  ({} insns, {} calls){}",
+            b.id,
+            b.rank,
+            b.x,
+            b.start_address,
+            b.end_address,
+            b.instruction_count,
+            b.call_count,
+            if b.exits_function { "  EXIT" } else { "" },
+        )?;
+    }
+    for e in &data.edges {
+        writeln!(out, "  edge {:>3} → {:<3}  {}", e.from, e.to, e.kind)?;
+    }
+    Ok(())
+}
+
+fn render_calls_from(
+    data: &glass_api::CallsFromResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}  ({})  {} call sites",
+        data.function,
+        data.entry_address,
+        data.calls.len(),
+    )?;
+    for c in &data.calls {
+        let target = match (&c.target_address, &c.target_name) {
+            (Some(a), Some(n)) => format!("{a}  {n}"),
+            (Some(a), None) => a.clone(),
+            (None, _) => "(indirect)".to_string(),
+        };
+        writeln!(out, "  {}  →  {}", c.site_address, target)?;
+    }
+    Ok(())
 }
 
 // Marker — `Envelope` referenced in the function signatures.

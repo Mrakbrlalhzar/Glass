@@ -67,6 +67,18 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         Cmd::Decode { word, addr } => {
             Some(verbs::decode(word.clone(), addr.clone(), format))
         }
+        Cmd::CfgOf { path, artifact, func } => Some(verbs::cfg_of(
+            path.clone(),
+            artifact.clone(),
+            func.clone(),
+            format,
+        )),
+        Cmd::CallsFrom { path, artifact, func } => Some(verbs::calls_from(
+            path.clone(),
+            artifact.clone(),
+            func.clone(),
+            format,
+        )),
         _ => None,
     }
 }
@@ -154,6 +166,26 @@ enum Cmd {
         word: String,
         #[arg(long, default_value = "0")]
         addr: String,
+    },
+    /// Build the CFG for a function (block list, edges, layout).
+    CfgOf {
+        path: PathBuf,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+        /// Function entry — hex address or exact symbol name.
+        #[arg(long)]
+        func: String,
+    },
+    /// List every call site inside a function.
+    CallsFrom {
+        path: PathBuf,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+        /// Function entry — hex address or exact symbol name.
+        #[arg(long)]
+        func: String,
     },
 
     // ----- Legacy text-output commands -------------------------------
@@ -306,7 +338,9 @@ fn main() -> Result<()> {
         | Cmd::SymbolAt { .. }
         | Cmd::Demangle { .. }
         | Cmd::Disasm { .. }
-        | Cmd::Decode { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::Decode { .. }
+        | Cmd::CfgOf { .. }
+        | Cmd::CallsFrom { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 
