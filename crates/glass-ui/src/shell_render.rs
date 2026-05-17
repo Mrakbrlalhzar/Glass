@@ -148,6 +148,7 @@ impl Shell {
             div()
                 .id(("palette-row", index))
                 .h(px(28.))
+                .w_full()
                 .px_3()
                 .flex()
                 .flex_row()
