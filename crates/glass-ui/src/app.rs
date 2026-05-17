@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    prelude::*, px, size, App, Bounds, Context, KeyBinding, Window, WindowBounds, WindowOptions,
+    prelude::*, px, size, App, Bounds, Context, KeyBinding, QuitMode, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_platform::application;
 
@@ -55,6 +56,10 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
     };
     application().run(move |cx: &mut App| {
         cx.init_colors();
+        // Quit when the last window closes — the default on macOS
+        // keeps the process alive in the dock, which doesn't match
+        // how a command-line-launched tool is expected to behave.
+        cx.set_quit_mode(QuitMode::LastWindowClosed);
         cx.bind_keys([
             KeyBinding::new("cmd-f", TogglePalette, None),
             KeyBinding::new("escape", PaletteClose, None),
