@@ -130,13 +130,36 @@ fn open_nth_recent(db: Option<glass_db::Database>, idx: usize, cx: &mut App) {
 /// otherwise spawn a fresh window. Empty = the user hasn't loaded
 /// anything into this window yet (no bundle), so dropping a load
 /// into it doesn't lose any state.
+///
+/// Avoids `WindowHandle::entity(cx)` on the active window: when this
+/// runs in response to a menu action, the active window is already
+/// "on the stack" and reading it again would abort. We use
+/// `read_window` instead, which returns `Err` for the active window
+/// rather than panicking — and we iterate the other windows first to
+/// reuse a non-active empty window when one exists.
 fn open_path(path: PathBuf, db: Option<glass_db::Database>, cx: &mut App) {
-    let empty_shell: Option<gpui::Entity<Shell>> =
-        cx.windows().into_iter().find_map(|wh| {
+    let active = cx.active_window();
+    let empty_shell: Option<gpui::Entity<Shell>> = cx
+        .windows()
+        .into_iter()
+        // Try non-active windows first; the active window may be on
+        // the stack and unreadable from here.
+        .filter(|wh| Some(*wh) != active)
+        .chain(active.into_iter())
+        .find_map(|wh| {
             let typed = wh.downcast::<Shell>()?;
-            let entity = typed.entity(cx).ok()?;
-            let is_empty = entity.read(cx).is_empty();
-            is_empty.then_some(entity)
+            // Returns Err when the window is currently on the stack.
+            // Treat that as "not reusable" and move on rather than
+            // panicking inside `entity(cx)`.
+            cx.read_window(&typed, |root_view, cx| {
+                if root_view.read(cx).is_empty() {
+                    Some(root_view.clone())
+                } else {
+                    None
+                }
+            })
+            .ok()
+            .flatten()
         });
     if let Some(shell) = empty_shell {
         shell.update(cx, |s, _| {
