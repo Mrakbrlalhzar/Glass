@@ -596,10 +596,18 @@ impl Shell {
 
         let mut bar = div()
             .h(px(30.))
+            .w_full()
             .flex_shrink_0()
             .flex()
             .flex_row()
             .items_stretch()
+            // Children are `flex_shrink_0` (fixed-width tabs) so we
+            // clip the overflow rather than letting it push the bar
+            // wider than the parent. Without this, the measure
+            // canvas reports the intrinsic width of all tabs put
+            // together — overflow logic thinks everything fits and
+            // the extra tabs spill off-screen.
+            .overflow_hidden()
             .border_b_1()
             .border_color(border)
             .bg(panel)

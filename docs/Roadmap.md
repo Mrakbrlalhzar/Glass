@@ -1,5 +1,6 @@
 ## Glass Roadmap
 
+* Opening a 2nd __text window seems to hang at the end of ‘Disassembling…’ progress bar and not transition to the disassembly view.
 * ~~Control flow graph view of disassembly~~
 * ~~Control flow graph for DEX methods~~
 * ~~CLI command defaulting to GUI (no ‘gui’ command needed)~~
