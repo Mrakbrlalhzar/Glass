@@ -596,17 +596,22 @@ impl Shell {
 
         let mut bar = div()
             .h(px(30.))
+            // w_full + min_w_0 lets the bar take the parent column's
+            // current width and shrink below the children's
+            // intrinsic sum on window shrink. Without min_w_0, the
+            // flex_shrink_0 children pin the bar at their combined
+            // width and the measure canvas never sees the smaller
+            // dimension after the user drags the window narrower.
             .w_full()
+            .min_w(px(0.))
             .flex_shrink_0()
             .flex()
             .flex_row()
             .items_stretch()
-            // Children are `flex_shrink_0` (fixed-width tabs) so we
-            // clip the overflow rather than letting it push the bar
-            // wider than the parent. Without this, the measure
-            // canvas reports the intrinsic width of all tabs put
-            // together — overflow logic thinks everything fits and
-            // the extra tabs spill off-screen.
+            // Clip overflow visually — the per-frame overflow math
+            // hides the tabs that wouldn't fit, but until the next
+            // paint settles we may render a frame with everything
+            // until the canvas reports new bounds.
             .overflow_hidden()
             .border_b_1()
             .border_color(border)
