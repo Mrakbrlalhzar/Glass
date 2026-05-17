@@ -1111,14 +1111,18 @@ impl Render for Shell {
             .text_color(fg)
             .font_family("Menlo")
             // Cmd-F toggles. Bound globally so it works whatever pane
-            // has focus.
+            // has focus. Closes the goto-address bar on open so the
+            // palette's keystrokes don't get stolen by the goto
+            // capture in on_key_down below.
             .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
+                this.goto_close(cx);
                 this.toggle_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
                 this.close_palette(cx);
                 this.close_context_menu(cx);
                 this.close_about(cx);
+                this.goto_close(cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteUp, _w, cx| {
                 if this.palette_open {
@@ -1130,8 +1134,14 @@ impl Render for Shell {
                     this.palette_move(1, cx);
                 }
             }))
+            // Enter activates the goto bar when it's focused, else
+            // the palette when it's open. Bound globally because the
+            // action keymap consumes Enter before our on_key_down
+            // listener has a chance to see it.
             .on_action(cx.listener(|this, _: &PaletteActivate, _w, cx| {
-                if this.palette_open {
+                if this.goto_focused {
+                    this.goto_activate(cx);
+                } else if this.palette_open {
                     this.palette_activate(cx);
                 }
             }))
