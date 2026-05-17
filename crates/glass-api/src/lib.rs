@@ -25,6 +25,8 @@ mod cfg;
 mod dex;
 mod disasm;
 mod inspect;
+mod search;
+mod strings;
 mod symbols;
 mod xref;
 
@@ -42,6 +44,8 @@ pub use inspect::{
 pub use symbols::{
     demangle, DemangleResult, SymbolInfo, SymbolKindName, SymbolListing, SymbolQuery,
 };
+pub use search::{SearchHit, SearchResult};
+pub use strings::{StringHit, StringsListing};
 pub use xref::{
     DexCallersResult, FieldRefsResult, XrefResult, XrefSite,
 };

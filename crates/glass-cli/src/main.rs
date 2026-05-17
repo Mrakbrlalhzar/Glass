@@ -119,6 +119,19 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             field_ref.clone(),
             format,
         )),
+        Cmd::Search { path, query, limit } => Some(verbs::search(
+            path.clone(),
+            query.clone(),
+            *limit,
+            format,
+        )),
+        Cmd::Strings { path, artifact, min, limit } => Some(verbs::strings(
+            path.clone(),
+            artifact.clone(),
+            *min,
+            *limit,
+            format,
+        )),
         _ => None,
     }
 }
@@ -295,6 +308,26 @@ enum Cmd {
         #[arg(long = "field")]
         field_ref: String,
     },
+    /// Substring-search across native symbols + DEX class /
+    /// method / field names. Case-insensitive.
+    Search {
+        path: PathBuf,
+        query: String,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Extract printable-ASCII NUL-terminated strings from a
+    /// native artifact's data sections.
+    Strings {
+        path: PathBuf,
+        #[arg(long)]
+        artifact: String,
+        /// Minimum string length. Default 4.
+        #[arg(long)]
+        min: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 
     // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
@@ -457,7 +490,9 @@ fn main() -> Result<()> {
         | Cmd::XrefAddr { .. }
         | Cmd::Callers { .. }
         | Cmd::DexCallers { .. }
-        | Cmd::FieldRefs { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::FieldRefs { .. }
+        | Cmd::Search { .. }
+        | Cmd::Strings { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 

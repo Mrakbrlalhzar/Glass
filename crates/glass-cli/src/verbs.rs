@@ -179,6 +179,33 @@ pub fn fields(path: PathBuf, class: String, format: Format) -> Result<()> {
     output::emit(envelope, format, render_fields)
 }
 
+pub fn search(
+    path: PathBuf,
+    query: String,
+    limit: Option<usize>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        Ok(bundle.search(&query, limit))
+    })?;
+    output::emit(envelope, format, render_search)
+}
+
+pub fn strings(
+    path: PathBuf,
+    artifact: String,
+    min: Option<usize>,
+    limit: Option<usize>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.strings(&artifact, min, limit)
+    })?;
+    output::emit(envelope, format, render_strings)
+}
+
 pub fn xref_addr(
     path: PathBuf,
     artifact: String,
@@ -589,6 +616,40 @@ fn render_field_refs(
     writeln!(out, "users of {}  ({})", data.field_ref, data.methods.len())?;
     for m in &data.methods {
         writeln!(out, "  {m}")?;
+    }
+    Ok(())
+}
+
+fn render_search(
+    data: &glass_api::SearchResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{:?}  {} of {} hits",
+        data.query, data.shown, data.total,
+    )?;
+    for h in &data.hits {
+        writeln!(
+            out,
+            "  [{:<6}]  {:<48}  {:<24}  → {}",
+            h.kind, h.label, h.context, h.jump,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_strings(
+    data: &glass_api::StringsListing,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}  {} of {} strings",
+        data.artifact, data.shown, data.total,
+    )?;
+    for s in &data.strings {
+        writeln!(out, "  {}  [{:<16}]  {:?}", s.address, s.section, s.value)?;
     }
     Ok(())
 }
