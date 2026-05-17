@@ -132,6 +132,8 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             *limit,
             format,
         )),
+        Cmd::Annotations { path } => Some(verbs::annotations(path.clone(), format)),
+        Cmd::DbDump { path } => Some(verbs::db_dump_v2(path.clone(), format)),
         _ => None,
     }
 }
@@ -328,6 +330,9 @@ enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Read user-set annotations (rename / comment / colour) for
+    /// the artifact identified by content-hashing `path`.
+    Annotations { path: PathBuf },
 
     // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
@@ -411,7 +416,6 @@ fn main() -> Result<()> {
         Cmd::Arm64 { path, limit } => dump_arm64(path, limit),
         Cmd::Bundle { path } => dump_bundle(path),
         Cmd::Gui { path, fresh } => run_gui(path, fresh),
-        Cmd::DbDump { path } => db_dump(path),
         Cmd::DbInjectTab { path, class_jni } => db_inject_tab(path, class_jni),
         Cmd::StringComments { path, section, limit } => {
             dump_string_comments(path, section, limit)
@@ -492,7 +496,9 @@ fn main() -> Result<()> {
         | Cmd::DexCallers { .. }
         | Cmd::FieldRefs { .. }
         | Cmd::Search { .. }
-        | Cmd::Strings { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::Strings { .. }
+        | Cmd::Annotations { .. }
+        | Cmd::DbDump { .. } => unreachable!("handled by automation_dispatch"),
     }
 }
 
@@ -650,30 +656,6 @@ fn db_inject_tab(path: PathBuf, class_jni: String) -> Result<()> {
     db.save_bundle(id, rec);
     db.flush()?;
     println!("injected tab; relaunch `glass gui {}` to restore", path.display());
-    Ok(())
-}
-
-fn db_dump(path: PathBuf) -> Result<()> {
-    let bytes = std::fs::read(&path)?;
-    let id = glass_db::BundleId::from_bytes(&bytes);
-    let db = glass_db::Database::open(false)?;
-    println!("# {} (BundleId={})", path.display(), id);
-    match db.load_bundle(&id)? {
-        Some(rec) => {
-            println!("  label       : {}", rec.label);
-            println!("  schema      : v{}", rec.schema_version);
-            println!("  last opened : unix {}", rec.last_opened_unix);
-            println!("  artifacts   : {}", rec.artifacts.len());
-            println!("  source_path : {:?}", rec.source_path);
-            println!("  expanded    : {} paths", rec.expanded_paths.len());
-            println!("  active_tab  : {:?}", rec.active_tab);
-            println!("  open_tabs   : {}", rec.open_tabs.len());
-            for (i, t) in rec.open_tabs.iter().enumerate() {
-                println!("    [{i}] {t:?}");
-            }
-        }
-        None => println!("  (no record for this bundle)"),
-    }
     Ok(())
 }
 

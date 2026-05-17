@@ -179,6 +179,16 @@ pub fn fields(path: PathBuf, class: String, format: Format) -> Result<()> {
     output::emit(envelope, format, render_fields)
 }
 
+pub fn annotations(path: PathBuf, format: Format) -> Result<()> {
+    let envelope = output::measured(|| glass_api::annotations(&path))?;
+    output::emit(envelope, format, render_annotations)
+}
+
+pub fn db_dump_v2(path: PathBuf, format: Format) -> Result<()> {
+    let envelope = output::measured(|| glass_api::db_dump(&path))?;
+    output::emit(envelope, format, render_db_dump)
+}
+
 pub fn search(
     path: PathBuf,
     query: String,
@@ -650,6 +660,46 @@ fn render_strings(
     )?;
     for s in &data.strings {
         writeln!(out, "  {}  [{:<16}]  {:?}", s.address, s.section, s.value)?;
+    }
+    Ok(())
+}
+
+fn render_annotations(
+    data: &glass_api::AnnotationsResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}  ({} annotations)", data.artifact, data.total)?;
+    for a in &data.annotations {
+        writeln!(
+            out,
+            "  [{:<8}]  {:<40}  {:<8}  {}",
+            a.key_kind, a.key, a.kind, a.value,
+        )?;
+    }
+    Ok(())
+}
+
+fn render_db_dump(
+    data: &glass_api::DbDumpResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}", data.bundle_id)?;
+    writeln!(out, "  source: {}", data.source_path)?;
+    match &data.record {
+        None => writeln!(out, "  (no record)")?,
+        Some(r) => {
+            writeln!(out, "  label         : {}", r.label)?;
+            writeln!(out, "  schema        : v{}", r.schema_version)?;
+            writeln!(out, "  last_opened   : unix {}", r.last_opened_unix)?;
+            writeln!(out, "  artifacts     : {}", r.artifact_count)?;
+            writeln!(out, "  active_tab    : {:?}", r.active_tab)?;
+            writeln!(out, "  open_tabs     : {}", r.open_tabs.len())?;
+            for (i, t) in r.open_tabs.iter().enumerate() {
+                writeln!(out, "    [{i}] {t}")?;
+            }
+            writeln!(out, "  expanded_paths: {}", r.expanded_paths.len())?;
+            writeln!(out, "  source_path   : {:?}", r.source_path)?;
+        }
     }
     Ok(())
 }

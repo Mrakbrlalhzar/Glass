@@ -20,6 +20,7 @@
 //! threads. The internal index caches are guarded by `RwLock` so
 //! parallel queries don't fight; cache fills are serialised.
 
+mod annotations;
 mod bundle;
 mod cfg;
 mod dex;
@@ -30,6 +31,10 @@ mod strings;
 mod symbols;
 mod xref;
 
+pub use annotations::{
+    annotations, db_dump, AnnotationEntry, AnnotationsResult, BundleRecordView,
+    DbDumpResult,
+};
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
 pub use dex::{
