@@ -887,9 +887,9 @@ impl Shell {
         }
     }
 
-    /// Right-click handler invoked from a Listing row. Looks up the
-    /// covering function for `addr` and opens a context menu offering
-    /// "Show CFG" for it. No-op when `addr` isn't inside any function.
+    /// Right-click handler invoked from a Listing row. Offers Show
+    /// CFG + Callers of function when the row is inside a known
+    /// symbol; a generic References to address otherwise.
     pub(crate) fn open_listing_context_menu(
         &mut self,
         artifact: glass_db::ArtifactId,
@@ -898,18 +898,36 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let Some(bundle) = self.bundle() else { return };
-        let Some(sm) = bundle.symbol_maps.get(&artifact) else { return };
-        let Some(sym) = sm.covering(addr) else { return };
-        let label = SharedString::from(sym.display_name.clone());
-        let entry_addr = sym.address;
-        self.context_menu = Some(ContextMenuState {
-            position,
-            items: vec![ContextMenuItem::ShowCfg {
-                artifact,
+        let covering = bundle
+            .symbol_maps
+            .get(&artifact)
+            .and_then(|sm| sm.covering(addr));
+        let mut items = Vec::new();
+        if let Some(sym) = covering {
+            let label = SharedString::from(sym.display_name.clone());
+            let entry_addr = sym.address;
+            items.push(ContextMenuItem::ShowCfg {
+                artifact: artifact.clone(),
+                entry_addr,
+                label: label.clone(),
+            });
+            items.push(ContextMenuItem::CallersOfFunction {
+                artifact: artifact.clone(),
                 entry_addr,
                 label,
-            }],
-        });
+            });
+        } else {
+            // No covering function — right-click on a synthesized
+            // `<name>@plt` stub, an orphan PLT entry, or any byte
+            // outside the symbol-map's range. Still useful to ask
+            // "who jumps here?".
+            items.push(ContextMenuItem::XrefsToAddress {
+                artifact: artifact.clone(),
+                addr,
+                label: SharedString::from(format!("0x{addr:x}")),
+            });
+        }
+        self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
     }
 
