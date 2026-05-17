@@ -334,6 +334,15 @@ enum Cmd {
     /// Read user-set annotations (rename / comment / colour) for
     /// the artifact identified by content-hashing `path`.
     Annotations { path: PathBuf },
+    /// Print the skill catalog — one JSON object listing every
+    /// automation verb, its description, input schema, and example
+    /// invocation. Use this to generate prompts, docs, or to drive
+    /// an external MCP client.
+    Skills,
+    /// Run as an MCP (Model Context Protocol) stdio server. Each
+    /// CLI verb becomes an LLM-callable tool. Plug into Claude
+    /// Desktop / Cursor / any MCP host.
+    Mcp,
 
     // ----- Legacy text-output commands -------------------------------
     /// Disassemble AArch64 code from an ELF or thin Mach-O.
@@ -404,6 +413,18 @@ fn main() -> Result<()> {
         None => Cmd::Gui { path: cli.path, fresh: cli.fresh },
     };
     let format = Format::from_flag(cli.text);
+    // Top-level verbs that don't fit the verb-table pattern.
+    match &cmd {
+        Cmd::Skills => {
+            let cat = glass_api::skill_catalog();
+            println!("{}", serde_json::to_string_pretty(&cat)?);
+            return Ok(());
+        }
+        Cmd::Mcp => {
+            return glass_mcp::serve_stdio();
+        }
+        _ => {}
+    }
     // Automation verbs handle their own JSON / text emission and
     // exit with a structured error on failure.
     if let Some(handler) = automation_dispatch(&cmd, format) {
@@ -500,6 +521,7 @@ fn main() -> Result<()> {
         | Cmd::Strings { .. }
         | Cmd::Annotations { .. }
         | Cmd::DbDump { .. } => unreachable!("handled by automation_dispatch"),
+        Cmd::Skills | Cmd::Mcp => unreachable!("handled above the verb-table dispatch"),
     }
 }
 

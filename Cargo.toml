@@ -7,6 +7,7 @@ members = [
     "crates/glass-mobile",
     "crates/glass-db",
     "crates/glass-api",
+    "crates/glass-mcp",
     "crates/glass-ui",
     "crates/glass-script",
     "crates/glass-cli",
@@ -92,6 +93,7 @@ glass-arch-arm64 = { path = "crates/glass-arch-arm64" }
 glass-arch-dex = { path = "crates/glass-arch-dex" }
 glass-mobile = { path = "crates/glass-mobile" }
 glass-api = { path = "crates/glass-api" }
+glass-mcp = { path = "crates/glass-mcp" }
 glass-ui = { path = "crates/glass-ui" }
 glass-db = { path = "crates/glass-db" }
 glass-script = { path = "crates/glass-script" }

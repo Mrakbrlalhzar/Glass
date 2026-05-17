@@ -295,6 +295,44 @@ With `--text`, the same message goes to stderr as `error: <msg>`.
 Stdout is empty on failure, so `glass ... | jq` will simply produce
 no output rather than swallowing a malformed line.
 
+## Skill catalog & MCP
+
+Two helper verbs expose the automation API to LLM tooling:
+
+### `skills`
+Prints the machine-readable catalog: one entry per verb with name,
+description, JSON Schema for arguments, and an example invocation.
+Useful for generating prompts, building external clients, or
+verifying the surface programmatically.
+
+```sh
+glass skills | jq '.skills[] | {name, example}'
+```
+
+### `mcp`
+Runs an MCP (Model Context Protocol) stdio server. Every verb in
+this document becomes an LLM-callable tool with the schema shown
+by `glass skills`. Plug into Claude Desktop, Cursor, Zed, or any
+other MCP host.
+
+```sh
+glass mcp                 # speak JSON-RPC over stdin/stdout
+```
+
+For Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "glass": { "command": "/usr/local/bin/glass", "args": ["mcp"] }
+  }
+}
+```
+
+Tool results come back as a single text content block whose body
+is the same `{ data, meta }` JSON envelope the CLI emits — parse
+the `.content[0].text` field as JSON.
+
 ## See also
 
 - [`docs/AutomationAPI.md`](AutomationAPI.md) — design notes for the

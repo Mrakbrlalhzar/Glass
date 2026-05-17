@@ -27,6 +27,7 @@ mod dex;
 mod disasm;
 mod inspect;
 mod search;
+mod skills;
 mod strings;
 mod symbols;
 mod xref;
@@ -50,6 +51,7 @@ pub use symbols::{
     demangle, DemangleResult, SymbolInfo, SymbolKindName, SymbolListing, SymbolQuery,
 };
 pub use search::{SearchHit, SearchResult};
+pub use skills::{catalog as skill_catalog, Skill, SkillCatalog};
 pub use strings::{StringHit, StringsListing};
 pub use xref::{
     DexCallersResult, FieldRefsResult, XrefResult, XrefSite,

@@ -24,24 +24,6 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Native binary layout overview with section data
 * Xref search of callers, references to data
 
-## Scripting
-
-Every analysis Glass does in the GUI is also exposed as a CLI verb that emits structured JSON. The same `glass` binary is the automation entry point — pick a subcommand and you get a one-shot, scriptable result, perfect for `jq` pipelines and CI.
-
-```sh
-# What classes ship in this APK?
-glass classes ./app.apk --package com.example. --text
-
-# Who calls glass::main, by address?
-glass callers ./libfoo.so --artifact libfoo.so --symbol "glass::main"
-
-# Every `onCreate` across DEX, machine-readable:
-glass search ./app.apk onCreate | jq '.data.hits[] | select(.kind=="method")'
-```
-
-Pass `--text` for a human-readable rendering, omit it for JSON.
-
-Full reference: **[docs/cli-api.md](docs/cli-api.md)**.
 
 ## Screenshots
 
@@ -81,6 +63,53 @@ A walk through the main views — click any thumbnail to see it full size.
     </td>
   </tr>
 </table>
+
+## Scripting
+
+Every analysis Glass does in the GUI is also exposed as a CLI verb that emits structured JSON. The same `glass` binary is the automation entry point — pick a subcommand and you get a one-shot, scriptable result, perfect for `jq` pipelines and CI.
+
+```sh
+# What classes ship in this APK?
+glass classes ./app.apk --package com.example. --text
+
+# Who calls glass::main, by address?
+glass callers ./libfoo.so --artifact libfoo.so --symbol "glass::main"
+
+# Every `onCreate` across DEX, machine-readable:
+glass search ./app.apk onCreate | jq '.data.hits[] | select(.kind=="method")'
+```
+
+Pass `--text` for a human-readable rendering, omit it for JSON.
+
+Full reference: **[docs/cli-api.md](docs/cli-api.md)**.
+
+This means you can script and automate common operations. 
+
+
+## Skills and MCP
+
+Every CLI verb is also exposed as a tool through an inbuilt MCP (Model Context Protocol) server, so any MCP-aware host — Claude Desktop, Cursor, Zed, your own client — can drive Glass directly to help with reversing tasks.
+
+```sh
+# Print the machine-readable skill catalog (one JSON object listing
+# every verb with its schema and an example invocation).
+glass skills
+
+# Run as an MCP stdio server. Plug into any MCP host's tool list.
+glass mcp
+```
+
+To register with **Claude Desktop**, add Glass to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "glass": { "command": "/usr/local/bin/glass", "args": ["mcp"] }
+  }
+}
+```
+
+The model can then call `inspect`, `symbols`, `disasm`, `cfg-of`, `dex-callers`, `search` and every other verb on any bundle you point it at. Tool results come back as the same JSON envelope you'd get from the CLI.
 
 ## Status
 
@@ -135,9 +164,9 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 
 ## Building
 
-Glass is currently **macOS-only** (the UI is built on `gpui` + Metal). Linux and Windows ports are possible but not yet on the near-term roadmap.
+Glass is currently **macOS-only** (the UI is built on `gpui` + Metal). Linux and Windows ports are possible and are on the near-term roadmap.
 
-There are no pre-built binaries yet, so you'll need to build from source. The good news: it's two commands.
+There is a release prebuilt binary for MacOS under Releases but if you need to build from source: the good news: it's two commands.
 
 1. **Install Rust** (if you don't already have it):
 
@@ -160,23 +189,23 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
 
    ```sh
    # Open the GUI on an Android APK or iOS IPA — no subcommand needed.
-   ./target/release/glass ~/path/to/app.apk
-   ./target/release/glass ~/path/to/app.ipa
-
+   glass ~/path/to/app.apk
+   glass ~/path/to/app.ipa
+   
    # Or on a standalone binary — ELF .so, Mach-O .dylib, or raw
    # executable. Fat / universal Mach-O is sliced automatically.
-   ./target/release/glass ~/path/to/libfoo.so
-   ./target/release/glass ~/path/to/libBar.dylib
-   ./target/release/glass /usr/lib/dyld
-
+   glass ~/path/to/libfoo.so
+   glass ~/path/to/libBar.dylib
+   glass /usr/lib/dyld
+   
    # No args → opens an empty Glass window; use File → Open.
-   ./target/release/glass
-
+   glass
+   
    # Headless bundle inspect
-   ./target/release/glass bundle ~/path/to/app.apk
-
+   glass bundle ~/path/to/app.apk
+   
    # Inspect persisted state for a bundle
-   ./target/release/glass db-dump ~/path/to/app.apk
+   glass db-dump ~/path/to/app.apk
    ```
 
 Always use the release build — debug builds disassemble orders of magnitude slower.
@@ -216,5 +245,5 @@ Two ways to grab a prebuilt zip without building locally:
 - **Next** — Persistent comments and renames on instructions; cross-references between DEX call sites and JNI-bound native symbols.
 - **iOS deeper** — Entitlements, `embedded.mobileprovision`, ObjC `__objc_classlist`, Swift metadata pass.
 - **armv7** — 32-bit ARM disassembly for older `.so` variants.
-- **Scripting** — QuickJS plugin host with a stable API for analysis passes.
+- **Internal Scripting** — QuickJS plugin host with a stable API for analysis passes.
 - **Advanced** — Signed APK rebuilding, control-flow graph view.

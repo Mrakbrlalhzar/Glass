@@ -23,6 +23,7 @@ glass-arch-dex.workspace = true
 glass-mobile.workspace = true
 glass-db.workspace = true
 glass-ui.workspace = true
+glass-mcp.workspace = true
 
 [lints]
 workspace = true
