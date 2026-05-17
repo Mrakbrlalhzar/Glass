@@ -12,8 +12,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+glass-api.workspace = true
 glass-arch-arm64.workspace = true
 armv8-encode.workspace = true
 glass-arch-dex.workspace = true

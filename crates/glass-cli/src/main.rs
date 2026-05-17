@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod output;
+
+use output::Format;
+
 #[derive(Parser)]
 #[command(name = "glass", about = "Glass mobile interactive disassembler")]
 struct Cli {
@@ -13,6 +17,10 @@ struct Cli {
     /// launch. Only meaningful when running the GUI (no subcommand).
     #[arg(long)]
     fresh: bool,
+    /// Output format for automation-API verbs. Ignored by the GUI
+    /// and the legacy subcommands (arm64, bundle, db-dump, cfg).
+    #[arg(long, value_enum, global = true, default_value_t = Format::default())]
+    format: Format,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
