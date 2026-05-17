@@ -1,0 +1,48 @@
+name: Build macOS .app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Glass.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release -p glass-cli
+
+      - name: Assemble .app bundle
+        run: ./packaging/make-app.sh
+
+      - name: Zip Glass.app
+        run: |
+          cd dist
+          zip -r Glass-app-${{ github.sha }}.zip Glass.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glass.app-${{ github.sha }}
+          path: dist/Glass-app-${{ github.sha }}.zip
+          if-no-files-found: error
+          retention-days: 14

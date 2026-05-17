@@ -121,6 +121,18 @@ There are no pre-built binaries yet, so you'll need to build from source. The go
 
 Always use the release build — debug builds disassemble orders of magnitude slower.
 
+### Packaging a `.app` bundle
+
+To wrap the release binary in a Glass.app bundle for double-click launch from Finder:
+
+```sh
+cargo build --release -p glass-cli
+./packaging/make-app.sh
+open dist/Glass.app
+```
+
+The bundle is ad-hoc signed (not Developer-ID signed / notarized), so on first launch macOS will refuse to open it; right-click → **Open** to bypass Gatekeeper once. CI uploads a fresh `Glass.app.zip` artifact on every push to `main` — grab the latest from the Actions tab if you'd rather not build locally.
+
 ## Workspace
 
 | Crate              | Purpose                                                       |

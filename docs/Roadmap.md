@@ -11,7 +11,7 @@
 * References search, right click in any view ‘find references’ i.e. calls to current method / function or reference to data location (hex view). *(note: needs design — new XrefResults tab kind, scope decisions DEX↔native↔data, persistence; deferred from initial roadmap pass)*
 * ~~Goto address function - top bar (straight to section) - validates address as typing (red -> white) and then jump to appropriate view~~
 * ~~Overview bar cursor should go to nearest function start for disassembly views rather than actual address (might not be byte aligned otherwise)~~
-* Package as a MacOS app in a CI job (github action)
+* ~~Package as a MacOS app in a CI job (github action)~~
 * Extend search to search for instruction sequences with operands fuzzy e.g. adrp <reg>; add <reg>, <reg>, <anything>
 * script engine API over surface of all functionality
 * scripting setup e.g. scripts describe their function and add to menus
