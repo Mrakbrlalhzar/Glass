@@ -699,6 +699,7 @@ fn dump_string_comments(
     // Build a DataPeek from non-text non-debug non-zero-base sections.
     // See LoadedBundle::data_sections loader for matching filter.
     let mut data_sections = Vec::new();
+    let mut section_meta = Vec::new();
     for s in &bin.container.sections {
         if matches!(s.kind, armv8_encode::container::SectionKind::Text)
             || matches!(s.kind, armv8_encode::container::SectionKind::Debug)
@@ -708,8 +709,13 @@ fn dump_string_comments(
             continue;
         }
         data_sections.push((s.address, Arc::new(s.bytes.clone())));
+        section_meta.push(glass_ui::DataSectionMeta {
+            name: s.name.clone(),
+            base: s.address,
+            size: s.bytes.len() as u64,
+        });
     }
-    let data = glass_ui::DataPeek { sections: data_sections };
+    let data = glass_ui::DataPeek { sections: data_sections, section_meta };
     println!("# DataPeek has {} sections", data.sections.len());
     for (b, bytes) in &data.sections {
         println!("#   0x{:x}  ({} bytes)", b, bytes.len());

@@ -59,7 +59,7 @@ pub use xref::{PaletteScope, PaletteScopeSource, XrefIndexState, XrefProgress, X
 pub use hex::{build_hex_rows, hex_row_for_addr, HexRow};
 pub use listing_model::{
     build_listing_rows, listing_row_for_addr, ArrowDirection, ArrowRole, ArrowSegment, ArrowStyle,
-    DataPeek, ListingRow, ARROW_MAX_LANES,
+    DataPeek, DataSectionMeta, ListingRow, ARROW_MAX_LANES,
 };
 use listing_render::LISTING_ROW_HEIGHT;
 pub use manifest::{flatten_info_plist, flatten_manifest, ManifestRow};

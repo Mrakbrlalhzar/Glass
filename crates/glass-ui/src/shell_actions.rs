@@ -594,7 +594,8 @@ impl Shell {
                     // adrp+add comments. Sharing through Arc keeps it
                     // cheap on big binaries.
                     let mut data_sections = Vec::new();
-                    for ((aid, _name), ds) in bundle.data_sections.iter() {
+                    let mut section_meta = Vec::new();
+                    for ((aid, name), ds) in bundle.data_sections.iter() {
                         if aid != &artifact {
                             continue;
                         }
@@ -609,8 +610,33 @@ impl Shell {
                             continue;
                         }
                         data_sections.push((ds.base, ds.bytes.clone()));
+                        section_meta.push(crate::listing_model::DataSectionMeta {
+                            name: name.clone(),
+                            base: ds.base,
+                            size: ds.bytes.len() as u64,
+                        });
                     }
-                    let data_arc = Arc::new(DataPeek { sections: data_sections });
+                    // Also include every native section (text + data)
+                    // so ADRP targets that land in some other text
+                    // page can still resolve to a section name. Text
+                    // sections are not in `data_sections` because the
+                    // string-peek logic doesn't want them.
+                    if let Some(sections) = bundle.native_sections.get(&artifact) {
+                        for sec in sections.iter() {
+                            if section_meta.iter().any(|m| m.base == sec.address) {
+                                continue;
+                            }
+                            section_meta.push(crate::listing_model::DataSectionMeta {
+                                name: sec.name.to_string(),
+                                base: sec.address,
+                                size: sec.size,
+                            });
+                        }
+                    }
+                    let data_arc = Arc::new(DataPeek {
+                        sections: data_sections,
+                        section_meta,
+                    });
                     let n = text.instruction_count();
                     let progress = Arc::new(Mutex::new(Progress {
                         label: section.clone(),
