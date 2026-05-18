@@ -463,13 +463,23 @@ pub fn render_listing_row_with(
             } else {
                 None
             };
+            // Right-click on the symbol header should open the
+            // annotation menu for the symbol's entry address —
+            // resolved through the artifact's symbol map. Without
+            // this, the SymbolHeader row had no addr → no right-
+            // click handler, and clicks fell through to whatever
+            // was painted underneath.
+            let sym_addr = ctx.and_then(|c| {
+                let sm = c.bundle.symbol_maps.get(&c.artifact)?;
+                sm.iter().find(|s| s.display_name == *name).map(|s| s.address)
+            });
             h_shift_inner(
                 inner,
                 h_offset,
                 LISTING_ROW_HEIGHT,
                 row_index,
                 ctx,
-                None,
+                sym_addr,
                 true,
                 merged_colour,
                 dot_rgba,
