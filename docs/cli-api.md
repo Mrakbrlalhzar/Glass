@@ -244,13 +244,51 @@ glass strings ./libfoo.so --artifact libfoo.so --min 8 --limit 50
 ## Annotations & persistence
 
 Glass persists window state, open tabs, and user annotations in a
-content-addressed `redb` database. These verbs are read-only views
-of that store.
+content-addressed `redb` database. Annotations follow the artifact
+(blake3 hash of the bytes), so the same `libfoo.so` shipped in two
+different APKs shares analysis state.
+
+Each annotation slot — keyed by `(artifact, key)` — carries up to
+three independent facets: a **rename** (display name override), a
+**comment** (free-form note), and a **colour** (RGBA tint). Writes
+merge: setting a comment on a key that already has a rename leaves
+the rename intact.
 
 ### `annotations <path>`
-Reads user-set rename / comment / colour annotations for the artifact
-identified by content-hashing `<path>`. Keys are addresses, symbol
-names, class JNIs, or `class->method` strings.
+Read all annotations for the artifact identified by content-hashing
+`<path>`. Each entry shows the populated facets — `rename` /
+`comment` / `colour` (any combination).
+
+### `set-rename --path P --key-kind K --key V [--method M] --name N`
+Persist a display name. `--key-kind` is one of:
+- `address` — `V` is a hex VA, e.g. `0x1000058d4`. Most specific.
+- `symbol` — `V` is the symbol display name (`glass::main`).
+- `class` — `V` is a class JNI (`Lcom/example/Foo;`).
+- `method` — `V` is the class JNI; `--method` is the
+  `name(descriptor)return` part, e.g. `bar(Ljava/lang/String;)V`.
+
+```sh
+glass set-rename ./libfoo.so --key-kind address --key 0x1000058d4 --name decode_packet
+```
+
+### `set-comment --path P --key-kind K --key V [--method M] --body B`
+Free-form note on the same key. `--body` is multi-line OK.
+
+```sh
+glass set-comment ./libfoo.so --key-kind symbol --key "glass::main" \
+  --body "entrypoint after rustc demangle"
+```
+
+### `set-colour --path P --key-kind K --key V [--method M] --rgba HEX`
+RGBA hex (8 digits, with or without `0x`). UI renders this as a row /
+node tint.
+
+```sh
+glass set-colour ./libfoo.so --key-kind address --key 0x1000058d4 --rgba ff0000aa
+```
+
+### `clear-annotation --path P --key-kind K --key V [--method M]`
+Remove every facet hung off the key. No-op if nothing's stored.
 
 ### `db-dump <path>`
 Reads the bundle-level record for the file at `<path>`: label,

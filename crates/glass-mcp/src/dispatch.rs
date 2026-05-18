@@ -167,6 +167,57 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             let path = require_path(args)?;
             json_of(&glass_api::db_dump(&path)?)?
         }
+        "set-rename" => {
+            let path = require_path(args)?;
+            let key_kind = require_str(args, "key_kind")?;
+            let key = require_str(args, "key")?;
+            let method = opt_str(args, "method");
+            let name = require_str(args, "name")?;
+            let key_args = glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            };
+            json_of(&glass_api::set_rename(&path, key_args, &name)?)?
+        }
+        "set-comment" => {
+            let path = require_path(args)?;
+            let key_kind = require_str(args, "key_kind")?;
+            let key = require_str(args, "key")?;
+            let method = opt_str(args, "method");
+            let body = require_str(args, "body")?;
+            let key_args = glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            };
+            json_of(&glass_api::set_comment(&path, key_args, &body)?)?
+        }
+        "set-colour" => {
+            let path = require_path(args)?;
+            let key_kind = require_str(args, "key_kind")?;
+            let key = require_str(args, "key")?;
+            let method = opt_str(args, "method");
+            let rgba = require_str(args, "rgba")?;
+            let key_args = glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            };
+            json_of(&glass_api::set_colour(&path, key_args, &rgba)?)?
+        }
+        "clear-annotation" => {
+            let path = require_path(args)?;
+            let key_kind = require_str(args, "key_kind")?;
+            let key = require_str(args, "key")?;
+            let method = opt_str(args, "method");
+            let key_args = glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            };
+            json_of(&glass_api::clear_annotation(&path, key_args)?)?
+        }
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
     let duration_ms = start.elapsed().as_millis();

@@ -134,6 +134,37 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         )),
         Cmd::Annotations { path } => Some(verbs::annotations(path.clone(), format)),
         Cmd::DbDump { path } => Some(verbs::db_dump_v2(path.clone(), format)),
+        Cmd::SetRename { path, key_kind, key, method, name } => Some(verbs::set_rename(
+            path.clone(),
+            key_kind.clone(),
+            key.clone(),
+            method.clone(),
+            name.clone(),
+            format,
+        )),
+        Cmd::SetComment { path, key_kind, key, method, body } => Some(verbs::set_comment(
+            path.clone(),
+            key_kind.clone(),
+            key.clone(),
+            method.clone(),
+            body.clone(),
+            format,
+        )),
+        Cmd::SetColour { path, key_kind, key, method, rgba } => Some(verbs::set_colour(
+            path.clone(),
+            key_kind.clone(),
+            key.clone(),
+            method.clone(),
+            rgba.clone(),
+            format,
+        )),
+        Cmd::ClearAnnotation { path, key_kind, key, method } => Some(verbs::clear_annotation(
+            path.clone(),
+            key_kind.clone(),
+            key.clone(),
+            method.clone(),
+            format,
+        )),
         _ => None,
     }
 }
@@ -334,6 +365,59 @@ enum Cmd {
     /// Read user-set annotations (rename / comment / colour) for
     /// the artifact identified by content-hashing `path`.
     Annotations { path: PathBuf },
+    /// Persist a user-chosen display name for an address / symbol /
+    /// class / method. Re-using the same key overwrites.
+    SetRename {
+        path: PathBuf,
+        /// `address` | `symbol` | `class` | `method`.
+        #[arg(long = "key-kind")]
+        key_kind: String,
+        /// Kind-specific identifier (hex VA / display name / JNI).
+        #[arg(long)]
+        key: String,
+        /// Method name+descriptor; required when `--key-kind method`.
+        #[arg(long)]
+        method: Option<String>,
+        /// New display name.
+        #[arg(long)]
+        name: String,
+    },
+    /// Attach a free-text comment to an address / symbol / class / method.
+    SetComment {
+        path: PathBuf,
+        #[arg(long = "key-kind")]
+        key_kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        method: Option<String>,
+        /// Comment body. `--text` would clash with the global format
+        /// flag, so the body parameter is `--body`.
+        #[arg(long)]
+        body: String,
+    },
+    /// Tag with an RGBA hex colour (8 hex digits).
+    SetColour {
+        path: PathBuf,
+        #[arg(long = "key-kind")]
+        key_kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        rgba: String,
+    },
+    /// Remove any annotation hung off the given key.
+    ClearAnnotation {
+        path: PathBuf,
+        #[arg(long = "key-kind")]
+        key_kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        method: Option<String>,
+    },
     /// Print the skill catalog — one JSON object listing every
     /// automation verb, its description, input schema, and example
     /// invocation. Use this to generate prompts, docs, or to drive
@@ -520,7 +604,11 @@ fn main() -> Result<()> {
         | Cmd::Search { .. }
         | Cmd::Strings { .. }
         | Cmd::Annotations { .. }
-        | Cmd::DbDump { .. } => unreachable!("handled by automation_dispatch"),
+        | Cmd::DbDump { .. }
+        | Cmd::SetRename { .. }
+        | Cmd::SetComment { .. }
+        | Cmd::SetColour { .. }
+        | Cmd::ClearAnnotation { .. } => unreachable!("handled by automation_dispatch"),
         Cmd::Skills | Cmd::Mcp => unreachable!("handled above the verb-table dispatch"),
     }
 }

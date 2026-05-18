@@ -189,6 +189,92 @@ pub fn db_dump_v2(path: PathBuf, format: Format) -> Result<()> {
     output::emit(envelope, format, render_db_dump)
 }
 
+pub fn set_rename(
+    path: PathBuf,
+    key_kind: String,
+    key: String,
+    method: Option<String>,
+    name: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        glass_api::set_rename(
+            &path,
+            glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            },
+            &name,
+        )
+    })?;
+    output::emit(envelope, format, render_annotation_write)
+}
+
+pub fn set_comment(
+    path: PathBuf,
+    key_kind: String,
+    key: String,
+    method: Option<String>,
+    text: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        glass_api::set_comment(
+            &path,
+            glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            },
+            &text,
+        )
+    })?;
+    output::emit(envelope, format, render_annotation_write)
+}
+
+pub fn set_colour(
+    path: PathBuf,
+    key_kind: String,
+    key: String,
+    method: Option<String>,
+    rgba: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        glass_api::set_colour(
+            &path,
+            glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            },
+            &rgba,
+        )
+    })?;
+    output::emit(envelope, format, render_annotation_write)
+}
+
+pub fn clear_annotation(
+    path: PathBuf,
+    key_kind: String,
+    key: String,
+    method: Option<String>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        glass_api::clear_annotation(
+            &path,
+            glass_api::AnnotationKeyArgs {
+                kind: &key_kind,
+                key: &key,
+                method: method.as_deref(),
+            },
+        )
+    })?;
+    output::emit(envelope, format, render_annotation_clear)
+}
+
 pub fn search(
     path: PathBuf,
     query: String,
@@ -670,13 +756,32 @@ fn render_annotations(
 ) -> std::io::Result<()> {
     writeln!(out, "{}  ({} annotations)", data.artifact, data.total)?;
     for a in &data.annotations {
-        writeln!(
-            out,
-            "  [{:<8}]  {:<40}  {:<8}  {}",
-            a.key_kind, a.key, a.kind, a.value,
-        )?;
+        write_entry_line(a, out)?;
     }
     Ok(())
+}
+
+fn write_entry_line(
+    e: &glass_api::AnnotationEntry,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let mut facets: Vec<String> = Vec::new();
+    if let Some(r) = &e.rename {
+        facets.push(format!("rename={r}"));
+    }
+    if let Some(c) = &e.comment {
+        facets.push(format!("comment={c:?}"));
+    }
+    if let Some(col) = &e.colour {
+        facets.push(format!("colour={col}"));
+    }
+    writeln!(
+        out,
+        "  [{:<8}]  {:<40}  {}",
+        e.key_kind,
+        e.key,
+        facets.join("  "),
+    )
 }
 
 fn render_db_dump(
@@ -702,6 +807,25 @@ fn render_db_dump(
         }
     }
     Ok(())
+}
+
+fn render_annotation_write(
+    data: &glass_api::AnnotationWriteResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}", data.artifact)?;
+    write_entry_line(&data.entry, out)
+}
+
+fn render_annotation_clear(
+    data: &glass_api::AnnotationClearResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}  cleared  [{:<8}]  {}",
+        data.artifact, data.key_kind, data.key,
+    )
 }
 
 // Marker — `Envelope` referenced in the function signatures.

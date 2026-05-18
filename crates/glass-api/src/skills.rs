@@ -65,6 +65,28 @@ fn hex_addr_arg() -> Value {
     })
 }
 
+/// Shared `properties` object used by every annotation write verb.
+/// `key_kind` selects which AnnotationKey variant is built; `key`
+/// is the kind-specific identifier; `method` is required only when
+/// `key_kind == "method"`.
+fn annotation_key_props() -> Value {
+    json!({
+        "key_kind": {
+            "type": "string",
+            "enum": ["address", "symbol", "class", "method"],
+            "description": "Which kind of thing the annotation hangs off. `address` = native VA (most specific); `symbol` = native symbol name (synthesized or symtab); `class` = DEX class JNI; `method` = DEX method (pair with `method`)."
+        },
+        "key": {
+            "type": "string",
+            "description": "For `address`: hex VA (0x...). For `symbol`: display name or raw name. For `class` / `method`: JNI form (Lcom/example/Foo;)."
+        },
+        "method": {
+            "type": "string",
+            "description": "Method name + descriptor, e.g. 'bar(Ljava/lang/String;)V'. Only required when key_kind == 'method' — `key` is then the class JNI."
+        }
+    })
+}
+
 pub fn catalog() -> SkillCatalog {
     SkillCatalog {
         version: env!("CARGO_PKG_VERSION"),
@@ -450,6 +472,75 @@ pub fn catalog() -> SkillCatalog {
                 }),
                 output_shape: json!({ "type": "object" }),
                 example: "glass db-dump ./app.apk",
+            },
+
+            // ---- Annotation writes ----------------------------------
+            Skill {
+                name: "set-rename",
+                description: "Persist a user-chosen display name for an address / symbol / class / method. Merges with any existing comment / colour on the same key — they are not overwritten. Annotations follow the artifact (content-hash), so the same libfoo.so in two bundles shares names.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "key_kind", "key", "name"],
+                    "properties": {
+                        "path": path_arg(),
+                        "key_kind": annotation_key_props()["key_kind"].clone(),
+                        "key": annotation_key_props()["key"].clone(),
+                        "method": annotation_key_props()["method"].clone(),
+                        "name": { "type": "string", "description": "New display name (free text)." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass set-rename ./libfoo.so --key-kind address --key 0x1000058d4 --name decode_packet",
+            },
+            Skill {
+                name: "set-comment",
+                description: "Attach a free-text comment to an address / symbol / class / method. Merges with any existing rename / colour on the same key — they are not overwritten.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "key_kind", "key", "body"],
+                    "properties": {
+                        "path": path_arg(),
+                        "key_kind": annotation_key_props()["key_kind"].clone(),
+                        "key": annotation_key_props()["key"].clone(),
+                        "method": annotation_key_props()["method"].clone(),
+                        "body": { "type": "string", "description": "Comment body (free text, multi-line OK)." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass set-comment ./libfoo.so --key-kind symbol --key glass::main --body \"entrypoint after rustc demangle\"",
+            },
+            Skill {
+                name: "set-colour",
+                description: "Tag an address / symbol / class / method with an RGBA colour. UI uses this as a row / node tint. Merges with any existing rename / comment on the same key — they are not overwritten.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "key_kind", "key", "rgba"],
+                    "properties": {
+                        "path": path_arg(),
+                        "key_kind": annotation_key_props()["key_kind"].clone(),
+                        "key": annotation_key_props()["key"].clone(),
+                        "method": annotation_key_props()["method"].clone(),
+                        "rgba": { "type": "string", "description": "RGBA hex (8 digits, with or without 0x). E.g. 'ff0000aa' = semi-transparent red." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass set-colour ./libfoo.so --key-kind address --key 0x1000058d4 --rgba ff0000aa",
+            },
+            Skill {
+                name: "clear-annotation",
+                description: "Remove any annotation hung off a given key. No-op if no annotation exists.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "key_kind", "key"],
+                    "properties": {
+                        "path": path_arg(),
+                        "key_kind": annotation_key_props()["key_kind"].clone(),
+                        "key": annotation_key_props()["key"].clone(),
+                        "method": annotation_key_props()["method"].clone()
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass clear-annotation ./libfoo.so --key-kind address --key 0x1000058d4",
             },
         ],
     }

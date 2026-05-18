@@ -278,6 +278,7 @@ mod tests {
             }],
             active_tab: Some(0),
             expanded_paths: vec![],
+            source_path: None,
         };
         db.save_bundle(bid.clone(), rec.clone());
         db.flush()?;
@@ -308,6 +309,7 @@ mod tests {
                 open_tabs: vec![],
                 active_tab: None,
                 expanded_paths: vec![],
+                source_path: None,
             },
         );
         db.flush()?;
@@ -326,6 +328,7 @@ mod tests {
                 open_tabs: vec![],
                 active_tab: None,
                 expanded_paths: vec![],
+                source_path: None,
             },
         );
         fresh.flush()?;
@@ -345,12 +348,18 @@ mod tests {
         db.set_annotation(
             aid.clone(),
             AnnotationKey::Class("Lcom/example/Foo;".into()),
-            Annotation::Comment("the interesting one".into()),
+            Annotation {
+                comment: Some("the interesting one".into()),
+                ..Default::default()
+            },
         );
         db.set_annotation(
             aid.clone(),
             AnnotationKey::Address(0x1234),
-            Annotation::Colour(0xff0000ff),
+            Annotation {
+                colour: Some(0xff0000ff),
+                ..Default::default()
+            },
         );
         db.flush()?;
 

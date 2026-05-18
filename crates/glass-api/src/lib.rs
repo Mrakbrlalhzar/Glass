@@ -33,8 +33,9 @@ mod symbols;
 mod xref;
 
 pub use annotations::{
-    annotations, db_dump, AnnotationEntry, AnnotationsResult, BundleRecordView,
-    DbDumpResult,
+    annotations, clear_annotation, db_dump, set_colour, set_comment, set_rename,
+    AnnotationClearResult, AnnotationEntry, AnnotationKeyArgs, AnnotationWriteResult,
+    AnnotationsResult, BundleRecordView, DbDumpResult,
 };
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};

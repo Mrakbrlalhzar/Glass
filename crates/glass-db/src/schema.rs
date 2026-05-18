@@ -12,7 +12,11 @@ use crate::ids::ArtifactId;
 /// Records with a higher version than this binary supports are skipped
 /// on read; lower versions are dropped (we don't keep migration code
 /// in v1 — start fresh after a bump).
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2: `Annotation` became a struct of three optionals (rename /
+/// comment / colour) instead of an enum, so a single key can carry
+/// all three. Old v1 records with the enum shape fail to decode
+/// and are silently skipped — see `decode_versioned` in store.rs.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleRecord {
@@ -139,12 +143,25 @@ pub enum AnnotationKey {
     Method(String, String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Annotation {
+/// All three facets that can live on one annotation key. The
+/// renderer overlays whichever fields are `Some` — a row can carry
+/// a rename + comment + colour simultaneously. Writers merge into
+/// the existing record rather than replacing it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Annotation {
     /// User-chosen display name.
-    Rename(String),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<String>,
     /// Free-form note.
-    Comment(String),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     /// RGBA tag colour, e.g. `0xff0000ff` = opaque red.
-    Colour(u32),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u32>,
+}
+
+impl Annotation {
+    pub fn is_empty(&self) -> bool {
+        self.rename.is_none() && self.comment.is_none() && self.colour.is_none()
+    }
 }

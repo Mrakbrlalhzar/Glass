@@ -155,7 +155,7 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 - iOS entitlements and `embedded.mobileprovision` parsing.
 - Swift metadata pass — Swift Mach-O symbol stubs are sparse without it.
 - ObjC `__objc_classlist` extraction.
-- Renaming, commenting, persistent annotations on instructions.
+- GUI editor for renames / comments / colours (writes already work via `glass set-rename` / `set-comment` / `set-colour` and over MCP — the listing just doesn't render them yet).
 - Cross-references DEX ↔ native via JNI signatures.
 - QuickJS scripting host.
 - Drag-to-scroll on scrollbars (currently visual-only — use trackpad / wheel).
