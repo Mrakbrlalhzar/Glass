@@ -79,6 +79,7 @@ impl Shell {
             context_menu: None,
             about_open: false,
             annotations_pane_open: false,
+            annotations_pane_h_offset: px(0.),
             annotation_edit: None,
             colour_picker: None,
         }
@@ -1727,6 +1728,21 @@ impl Shell {
         if self.annotations_pane_open {
             self.annotations_pane_open = false;
             self.save_state();
+            cx.notify();
+        }
+    }
+
+    /// Scroll the annotations-pane horizontally by `dx` (positive
+    /// = scroll right). Clamps to [0, max_offset].
+    pub(crate) fn scroll_annotations_pane_h(
+        &mut self,
+        dx: Pixels,
+        max_offset: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let new = (self.annotations_pane_h_offset + dx).clamp(px(0.), max_offset);
+        if new != self.annotations_pane_h_offset {
+            self.annotations_pane_h_offset = new;
             cx.notify();
         }
     }

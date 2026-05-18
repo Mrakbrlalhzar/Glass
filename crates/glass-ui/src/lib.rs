@@ -901,6 +901,11 @@ pub(crate) struct Shell {
     /// to the bundle record; default false. Auto-opens on write or
     /// when the user clicks an edge-icon (Phase 4).
     pub(crate) annotations_pane_open: bool,
+    /// Horizontal scroll offset inside the annotations pane. Same
+    /// pattern as the listing's `h_offset` — the row's content area
+    /// shifts by -h_offset and a scrollbar at the bottom of the
+    /// pane shows position. Not persisted; resets on app restart.
+    pub(crate) annotations_pane_h_offset: Pixels,
     /// In-progress annotation edit. `Some` flips the palette into
     /// single-row editor mode (no result list, query == initial
     /// value, Enter commits the write).
