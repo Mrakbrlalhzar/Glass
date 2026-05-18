@@ -389,7 +389,21 @@ fn spawn_loader(shell: &gpui::Entity<Shell>, path: PathBuf, cx: &mut App) {
 
         let _ = weak.update(cx, |shell, cx| {
             match result {
-                Ok(bundle) => shell.state = ShellState::Ready(bundle),
+                Ok(mut bundle) => {
+                    // Hydrate user annotations from the DB before
+                    // handing the bundle to the rest of the Shell.
+                    // The loader runs without DB access; this is the
+                    // first point we have both the artifact list and
+                    // the DB handle in the same place.
+                    if let Some(db) = shell.db_ref() {
+                        let idx = crate::annotations::load_for_artifacts(
+                            db,
+                            &bundle.artifact_ids,
+                        );
+                        bundle.annotations = std::sync::Arc::new(idx);
+                    }
+                    shell.state = ShellState::Ready(bundle);
+                }
                 Err(e) => shell.state = ShellState::Error(format!("{e:#}")),
             }
             shell.progress = None;

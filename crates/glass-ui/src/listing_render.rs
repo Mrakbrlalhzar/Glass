@@ -17,7 +17,14 @@ use crate::palette::{
     chunk_colour, COLOUR_ADDR, COLOUR_BB_SEPARATOR, COLOUR_BYTES, COLOUR_COMMENT,
     COLOUR_MNEMONIC, COLOUR_ROW_SELECTED, COLOUR_SYMBOL_HEADER,
 };
-use crate::{LoadedBundle, Shell, TextTooltip};
+use crate::{AnnotationIndex, LoadedBundle, Shell, TextTooltip};
+
+/// Borrow the per-row annotation index, if any. Convenience: avoids
+/// repeating the `bundle.annotations.get(&artifact)` dance.
+fn annotation_index<'a>(ctx: Option<&'a RowCtx>) -> Option<&'a AnnotationIndex> {
+    let ctx = ctx?;
+    ctx.bundle.annotations.get(&ctx.artifact)
+}
 
 pub const LISTING_ROW_HEIGHT: f32 = 22.;
 pub const BB_SEPARATOR_HEIGHT: f32 = 8.;
@@ -69,7 +76,7 @@ pub fn h_shift(
     row_index: usize,
     ctx: Option<&RowCtx>,
 ) -> gpui::Stateful<gpui::Div> {
-    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, true)
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, true, None)
 }
 
 /// Like `h_shift` but the row is non-selectable (no click handler,
@@ -82,18 +89,22 @@ pub fn h_shift_unselectable(
     row_index: usize,
     ctx: Option<&RowCtx>,
 ) -> gpui::Stateful<gpui::Div> {
-    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, false)
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, None, false, None)
 }
 
-pub fn h_shift_with_addr(
+/// Variant that also tints the row background with a user-set
+/// RGBA colour. The alpha is dimmed to ~24% so the tint reads as
+/// a row highlight without overwhelming the syntax-coloured text.
+pub fn h_shift_with_addr_annotated(
     inner: gpui::Div,
     h_offset: Pixels,
     row_height: f32,
     row_index: usize,
     ctx: Option<&RowCtx>,
     row_addr: Option<u64>,
+    tint_rgba: Option<u32>,
 ) -> gpui::Stateful<gpui::Div> {
-    h_shift_inner(inner, h_offset, row_height, row_index, ctx, row_addr, true)
+    h_shift_inner(inner, h_offset, row_height, row_index, ctx, row_addr, true, tint_rgba)
 }
 
 fn h_shift_inner(
@@ -104,6 +115,7 @@ fn h_shift_inner(
     ctx: Option<&RowCtx>,
     row_addr: Option<u64>,
     selectable: bool,
+    tint_rgba: Option<u32>,
 ) -> gpui::Stateful<gpui::Div> {
     let is_selected = selectable
         && ctx.map(|c| c.selected_row == Some(row_index)).unwrap_or(false);
@@ -115,6 +127,12 @@ fn h_shift_inner(
         .relative();
     if is_selected {
         outer = outer.bg(rgb(COLOUR_ROW_SELECTED));
+    } else if let Some(rgba) = tint_rgba {
+        // Dim alpha to ~24% so the tint reads as a row highlight
+        // rather than overwhelming the syntax-coloured text. The
+        // low byte of `rgba` is alpha — we replace it.
+        let dimmed = (rgba & 0xffffff00) | 0x3c;
+        outer = outer.bg(gpui::rgba(dimmed));
     }
     if selectable {
         if let Some(ctx) = ctx {
@@ -351,8 +369,14 @@ pub fn render_listing_row_with(
     ctx: Option<&RowCtx>,
 ) -> gpui::Stateful<gpui::Div> {
     match row {
-        ListingRow::SymbolHeader { name } => h_shift(
-            div()
+        ListingRow::SymbolHeader { name } => {
+            // Symbol-keyed rename: the symbol header shows the user
+            // name in italics, and the original symbol name follows
+            // in parentheses so the row stays self-explanatory.
+            let annotation =
+                annotation_index(ctx).and_then(|idx| idx.at_symbol(name));
+            let renamed = annotation.and_then(|a| a.rename.as_ref());
+            let inner = div()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -361,16 +385,29 @@ pub fn render_listing_row_with(
                 .child(
                     div().w(px(LISTING_GUTTER_WIDTH)).h_full().flex_shrink_0(),
                 )
-                .child(
+                .child(if let Some(new_name) = renamed {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .italic()
+                                .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                                .child(format!("{new_name}:")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(COLOUR_COMMENT))
+                                .child(format!("({name})")),
+                        )
+                } else {
                     div()
                         .text_color(rgb(COLOUR_SYMBOL_HEADER))
-                        .child(format!("{name}:")),
-                ),
-            h_offset,
-            LISTING_ROW_HEIGHT,
-            row_index,
-            ctx,
-        ),
+                        .child(format!("{name}:"))
+                });
+            h_shift(inner, h_offset, LISTING_ROW_HEIGHT, row_index, ctx)
+        }
         ListingRow::BasicBlockSeparator { arrows } => h_shift_unselectable(
             div()
                 .flex()
@@ -542,21 +579,58 @@ pub fn render_listing_row_with(
                 ops_row = ops_row.child(cell);
             }
             row_div = row_div.child(ops_row);
-            if !comment.is_empty() {
+            // Per-row annotation: comment appended after any
+            // existing auto-comment, edge icon at row right.
+            let annotation = annotation_index(ctx).and_then(|idx| idx.at_address(*address));
+            let user_comment = annotation.and_then(|a| a.comment.as_deref());
+            let combined_comment = match (comment.is_empty(), user_comment) {
+                (true, Some(uc)) => Some(SharedString::from(format!("; {uc}"))),
+                (false, Some(uc)) => Some(SharedString::from(format!("{comment}  ; {uc}"))),
+                (false, None) => Some(comment.clone()),
+                (true, None) => None,
+            };
+            if let Some(c) = combined_comment {
                 row_div = row_div.child(
                     div()
                         .ml_4()
                         .text_color(rgb(COLOUR_COMMENT))
-                        .child(comment.clone()),
+                        .child(c),
                 );
             }
-            h_shift_with_addr(
+            // Edge icon: small dot at the row's far right when any
+            // annotation is set. Coloured to match the user's
+            // colour facet, else the symbol-header colour as a
+            // neutral default.
+            let row_div = if annotation.is_some() {
+                let dot_color: gpui::Background = match annotation.and_then(|a| a.colour) {
+                    Some(c) => gpui::rgba(c).into(),
+                    None => rgb(COLOUR_SYMBOL_HEADER).into(),
+                };
+                row_div.child(
+                    div()
+                        .ml_auto()
+                        .pr_3()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(dot_color),
+                        ),
+                )
+            } else {
+                row_div
+            };
+            h_shift_with_addr_annotated(
                 row_div,
                 h_offset,
                 LISTING_ROW_HEIGHT,
                 row_index,
                 ctx,
                 Some(*address),
+                annotation.and_then(|a| a.colour),
             )
         }
     }

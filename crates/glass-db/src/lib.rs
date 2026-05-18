@@ -279,6 +279,7 @@ mod tests {
             active_tab: Some(0),
             expanded_paths: vec![],
             source_path: None,
+            annotations_pane_open: false,
         };
         db.save_bundle(bid.clone(), rec.clone());
         db.flush()?;
@@ -310,6 +311,7 @@ mod tests {
                 active_tab: None,
                 expanded_paths: vec![],
                 source_path: None,
+            annotations_pane_open: false,
             },
         );
         db.flush()?;
@@ -329,6 +331,7 @@ mod tests {
                 active_tab: None,
                 expanded_paths: vec![],
                 source_path: None,
+            annotations_pane_open: false,
             },
         );
         fresh.flush()?;

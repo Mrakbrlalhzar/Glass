@@ -25,6 +25,13 @@ use crate::{
 };
 
 impl Shell {
+    /// Short-lived borrow of the persistence handle, if any. Lets
+    /// the load-complete path hydrate annotations without exposing
+    /// the field publicly.
+    pub(crate) fn db_ref(&self) -> Option<&glass_db::Database> {
+        self.db.as_ref()
+    }
+
     pub(crate) fn new(
         path: Option<PathBuf>,
         db: Option<glass_db::Database>,
@@ -71,6 +78,7 @@ impl Shell {
             palette_focused: false,
             context_menu: None,
             about_open: false,
+            annotations_pane_open: false,
         }
     }
 
@@ -237,6 +245,7 @@ impl Shell {
                 .source_path
                 .as_ref()
                 .and_then(|p| p.to_str().map(|s| s.to_string())),
+            annotations_pane_open: self.annotations_pane_open,
         };
         db.save_bundle(bundle_id, rec);
     }
@@ -254,6 +263,7 @@ impl Shell {
                 return;
             }
         };
+        self.annotations_pane_open = rec.annotations_pane_open;
         // Tabs.
         for state in &rec.open_tabs {
             // CFG tabs are persisted with their camera state; restore
@@ -1342,6 +1352,77 @@ impl Shell {
         if self.about_open {
             self.about_open = false;
             cx.notify();
+        }
+    }
+
+    pub(crate) fn close_annotations_pane(&mut self, cx: &mut Context<Self>) {
+        if self.annotations_pane_open {
+            self.annotations_pane_open = false;
+            self.save_state();
+            cx.notify();
+        }
+    }
+
+    // Used by Phase 4 (edge-icon click + write auto-open). Kept
+    // for that wiring even though no current caller exercises it.
+    #[allow(dead_code)]
+    pub(crate) fn open_annotations_pane(&mut self, cx: &mut Context<Self>) {
+        if !self.annotations_pane_open {
+            self.annotations_pane_open = true;
+            self.save_state();
+            cx.notify();
+        }
+    }
+
+    /// Click handler for an annotations-pane entry. Opens the
+    /// appropriate view for the key kind: address → listing, symbol
+    /// → resolve through the artifact's symbol map then listing,
+    /// class / method → smali tab.
+    pub(crate) fn navigate_to_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bundle) = self.bundle().cloned() else { return };
+        match key {
+            glass_db::AnnotationKey::Address(addr) => {
+                if let Some(section) =
+                    bundle.text_section_for_addr(&artifact, addr)
+                {
+                    let section = section.to_string();
+                    self.open_listing_at(artifact, section, addr, cx);
+                } else if let Some(section) =
+                    bundle.data_section_for_addr(&artifact, addr)
+                {
+                    let section = section.to_string();
+                    self.open_hex_in_new_tab(artifact, section, addr, cx);
+                }
+            }
+            glass_db::AnnotationKey::Symbol(name) => {
+                let Some(sm) = bundle.symbol_maps.get(&artifact) else { return };
+                let Some(sym) = sm.iter().find(|s| {
+                    s.display_name == name || s.name == name
+                }) else {
+                    return;
+                };
+                let addr = sym.address;
+                if let Some(section) =
+                    bundle.text_section_for_addr(&artifact, addr)
+                {
+                    let section = section.to_string();
+                    self.open_listing_at(artifact, section, addr, cx);
+                }
+            }
+            glass_db::AnnotationKey::Class(class_jni)
+            | glass_db::AnnotationKey::Method(class_jni, _) => {
+                let leaf = bundle.resolve(&glass_db::TabState::SmaliClass {
+                    class_jni: class_jni.clone(),
+                });
+                if let Some(leaf) = leaf {
+                    self.open_leaf(leaf, cx);
+                }
+            }
         }
     }
 

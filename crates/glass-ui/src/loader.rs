@@ -340,6 +340,9 @@ fn snapshot_apk_with_progress(
         method_calls: Arc::new(method_calls),
         manifest_rows: Arc::new(manifest_rows),
         xrefs: crate::xref::XrefStore::new(),
+        // Shell populates this from the persisted DB right after the
+        // loader returns; the loader itself doesn't carry the DB.
+        annotations: Arc::new(std::collections::HashMap::new()),
     })
 }
 
@@ -566,6 +569,9 @@ fn snapshot_ipa_with_progress(
         method_calls: Arc::new(method_calls),
         manifest_rows: Arc::new(info_rows),
         xrefs: crate::xref::XrefStore::new(),
+        // Shell populates this from the persisted DB right after the
+        // loader returns; the loader itself doesn't carry the DB.
+        annotations: Arc::new(std::collections::HashMap::new()),
     })
 }
 
@@ -784,6 +790,9 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         method_calls: Arc::new(std::collections::HashMap::new()),
         manifest_rows: Arc::new(Vec::new()),
         xrefs: crate::xref::XrefStore::new(),
+        // Shell populates this from the persisted DB right after the
+        // loader returns; the loader itself doesn't carry the DB.
+        annotations: Arc::new(std::collections::HashMap::new()),
     })
 }
 

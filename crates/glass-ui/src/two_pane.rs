@@ -763,12 +763,24 @@ pub fn render_two_pane(
             .child(body)
             .child(overflow_dropdown);
 
-        div()
+        let pane_open = shell.annotations_pane_open;
+        let pane = if pane_open {
+            Some(crate::annotations_pane::render_annotations_pane(
+                shell, &bundle, cx, panel, border, fg, dim,
+            ))
+        } else {
+            None
+        };
+
+        let mut outer = div()
             .flex_1()
             .flex()
             .flex_row()
             .overflow_hidden()
             .child(left)
-            .child(right)
-            .into_any_element()
+            .child(right);
+        if let Some(p) = pane {
+            outer = outer.child(p);
+        }
+        outer.into_any_element()
 }

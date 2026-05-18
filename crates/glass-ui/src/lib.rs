@@ -22,6 +22,8 @@ use gpui::{
 };
 
 mod about;
+mod annotations;
+mod annotations_pane;
 mod app;
 mod cfg_block;
 mod cfg_render;
@@ -45,6 +47,7 @@ mod smali;
 mod two_pane;
 mod xref;
 
+pub use annotations::AnnotationIndex;
 pub use app::launch;
 use context_menu::ContextMenuState;
 use dex_callgraph::DexCallGraphState;
@@ -180,6 +183,10 @@ pub struct LoadedBundle {
     /// click "References / Callers" menus consult this; while a
     /// given index is `Building` the menu shows a progress chip.
     pub xrefs: xref::XrefStore,
+    /// Per-artifact annotation index, loaded once at bundle open.
+    /// Empty for artifacts with no annotations on disk; the whole
+    /// map is empty for bundles that have never had any.
+    pub annotations: Arc<std::collections::HashMap<glass_db::ArtifactId, annotations::AnnotationIndex>>,
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
@@ -889,6 +896,10 @@ pub(crate) struct Shell {
     context_menu: Option<ContextMenuState>,
     /// Whether the About-Glass modal is currently shown.
     pub(crate) about_open: bool,
+    /// Whether the right-side annotations pane is visible. Persisted
+    /// to the bundle record; default false. Auto-opens on write or
+    /// when the user clicks an edge-icon (Phase 4).
+    pub(crate) annotations_pane_open: bool,
 }
 
 
@@ -963,6 +974,49 @@ impl Render for Shell {
                         }),
                     ),
             );
+        // Annotations toggle — same chip style as Search. Renders
+        // a small dot in the brand colour when the pane is open so
+        // the on/off state reads at a glance.
+        let header = if matches!(self.state, ShellState::Ready(_)) {
+            let pane_open = self.annotations_pane_open;
+            header.child(
+                div()
+                    .id("annotations-icon")
+                    .px_3()
+                    .h(px(24.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(fg)
+                    .border_1()
+                    .border_color(border)
+                    .hover(|s| s.bg(rgb(0x36363c)))
+                    .cursor_pointer()
+                    .child("Annotations")
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(if pane_open { rgb(0x4f7cff) } else { rgb(0x36363c) }),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            if this.annotations_pane_open {
+                                this.close_annotations_pane(cx);
+                            } else {
+                                this.open_annotations_pane(cx);
+                            }
+                        }),
+                    ),
+            )
+        } else {
+            header
+        };
 
         let body = match &self.state {
             ShellState::Ready(bundle) => {

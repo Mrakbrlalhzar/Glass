@@ -37,6 +37,11 @@ pub struct BundleRecord {
     /// pre-date this field.
     #[serde(default)]
     pub source_path: Option<String>,
+    /// Whether the user had the right-side annotations pane open
+    /// last time. Default false on first open; toggled in the UI.
+    /// `#[serde(default)]` so old v2 records keep loading.
+    #[serde(default)]
+    pub annotations_pane_open: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
