@@ -79,6 +79,8 @@ impl Shell {
             context_menu: None,
             about_open: false,
             annotations_pane_open: false,
+            annotation_edit: None,
+            colour_picker: None,
         }
     }
 
@@ -739,6 +741,9 @@ impl Shell {
             // Reset scope on close so the next cmd-F opens a clean
             // bundle-wide search.
             self.palette_scope = None;
+            // Closing the palette also bails any in-progress
+            // annotation edit — the editor lives inside it.
+            self.annotation_edit = None;
             cx.notify();
         }
     }
@@ -901,6 +906,7 @@ impl Shell {
             .get(&artifact)
             .and_then(|sm| sm.covering(addr));
         let mut items = Vec::new();
+        // 1) Function-level items when we know the covering symbol.
         if let Some(sym) = covering {
             let label = SharedString::from(sym.display_name.clone());
             let entry_addr = sym.address;
@@ -915,14 +921,74 @@ impl Shell {
                 label,
             });
         } else {
-            // No covering function — right-click on a synthesized
-            // `<name>@plt` stub, an orphan PLT entry, or any byte
-            // outside the symbol-map's range. Still useful to ask
-            // "who jumps here?".
             items.push(ContextMenuItem::XrefsToAddress {
                 artifact: artifact.clone(),
                 addr,
                 label: SharedString::from(format!("0x{addr:x}")),
+            });
+        }
+        // 2) Annotation items. Most-specific key wins (matches the
+        //    renderer's precedence): when right-clicking at the
+        //    entry of a covering symbol, rename targets the symbol
+        //    by name (so renames survive symbol-map churn between
+        //    builds); on a row inside a function or a row with no
+        //    covering symbol, annotations target the address.
+        let (annot_key, annot_label) = match covering {
+            Some(sym) if sym.address == addr => (
+                glass_db::AnnotationKey::Symbol(sym.display_name.clone()),
+                sym.display_name.clone(),
+            ),
+            _ => (
+                glass_db::AnnotationKey::Address(addr),
+                format!("0x{addr:x}"),
+            ),
+        };
+        let existing = bundle
+            .annotations
+            .get(&artifact)
+            .and_then(|idx| match &annot_key {
+                glass_db::AnnotationKey::Address(a) => idx.at_address(*a),
+                glass_db::AnnotationKey::Symbol(s) => idx.at_symbol(s),
+                glass_db::AnnotationKey::Class(c) => idx.at_class(c),
+                glass_db::AnnotationKey::Method(c, m) => {
+                    idx.at_method(&format!("{c}->{m}"))
+                }
+            })
+            .cloned()
+            .unwrap_or_default();
+        let rename_label = if existing.rename.is_some() {
+            "Edit rename…"
+        } else {
+            "Rename…"
+        };
+        let comment_label = if existing.comment.is_some() {
+            "Edit comment…"
+        } else {
+            "Add comment…"
+        };
+        items.push(ContextMenuItem::EditRename {
+            artifact: artifact.clone(),
+            key: annot_key.clone(),
+            current: existing.rename.clone().unwrap_or_default(),
+            label: SharedString::from(rename_label),
+        });
+        items.push(ContextMenuItem::EditComment {
+            artifact: artifact.clone(),
+            key: annot_key.clone(),
+            current: existing.comment.clone().unwrap_or_default(),
+            label: SharedString::from(comment_label),
+        });
+        items.push(ContextMenuItem::PickColour {
+            artifact: artifact.clone(),
+            key: annot_key.clone(),
+            current: existing.colour,
+            label: SharedString::from("Set colour…"),
+        });
+        if !existing.is_empty() {
+            items.push(ContextMenuItem::ClearAnnotation {
+                artifact,
+                key: annot_key,
+                label: SharedString::from(format!("Clear annotation ({annot_label})")),
             });
         }
         self.context_menu = Some(ContextMenuState { position, items });
@@ -1130,7 +1196,170 @@ impl Shell {
             ContextMenuItem::RefsToField { field_ref, label } => {
                 self.open_refs_to_field(field_ref, label, cx);
             }
+            ContextMenuItem::EditRename { artifact, key, current, .. } => {
+                self.begin_annotation_edit(
+                    artifact,
+                    key,
+                    crate::AnnotationFacet::Rename,
+                    current,
+                    cx,
+                );
+            }
+            ContextMenuItem::EditComment { artifact, key, current, .. } => {
+                self.begin_annotation_edit(
+                    artifact,
+                    key,
+                    crate::AnnotationFacet::Comment,
+                    current,
+                    cx,
+                );
+            }
+            ContextMenuItem::PickColour { artifact, key, current, .. } => {
+                self.open_colour_picker(artifact, key, current, cx);
+            }
+            ContextMenuItem::ClearAnnotation { artifact, key, .. } => {
+                self.clear_annotation_at(artifact, key, cx);
+            }
         }
+    }
+
+    /// Stash a pending annotation edit and open the palette in
+    /// editor mode. The palette's text input is reused as the
+    /// editor: query starts equal to `current`, Enter commits.
+    pub(crate) fn begin_annotation_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        facet: crate::AnnotationFacet,
+        current: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key_label = match &key {
+            glass_db::AnnotationKey::Address(a) => format!("0x{a:x}"),
+            glass_db::AnnotationKey::Symbol(s) => s.clone(),
+            glass_db::AnnotationKey::Class(c) => c.clone(),
+            glass_db::AnnotationKey::Method(c, m) => format!("{c}->{m}"),
+        };
+        let chip = match facet {
+            crate::AnnotationFacet::Rename => format!("Rename {key_label}"),
+            crate::AnnotationFacet::Comment => format!("Comment on {key_label}"),
+        };
+        self.annotation_edit = Some(crate::AnnotationEdit {
+            artifact,
+            key,
+            facet,
+            chip_label: SharedString::from(chip),
+        });
+        self.palette_open = true;
+        self.palette_query = current;
+        self.palette_selected = 0;
+        self.palette_list_len = 0;
+        self.palette_focused = true;
+        cx.notify();
+    }
+
+    /// Commit the in-progress annotation edit (called on Enter
+    /// while `annotation_edit` is set). Writes through glass-api,
+    /// refreshes the in-memory index, opens the pane on success.
+    pub(crate) fn commit_annotation_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.annotation_edit.take() else { return };
+        let value = std::mem::take(&mut self.palette_query);
+        self.palette_open = false;
+        self.palette_focused = false;
+        let result = match edit.facet {
+            crate::AnnotationFacet::Rename => {
+                self.write_annotation(edit.artifact.clone(), edit.key.clone(), |a| {
+                    if value.is_empty() {
+                        a.rename = None;
+                    } else {
+                        a.rename = Some(value.clone());
+                    }
+                })
+            }
+            crate::AnnotationFacet::Comment => {
+                self.write_annotation(edit.artifact.clone(), edit.key.clone(), |a| {
+                    if value.is_empty() {
+                        a.comment = None;
+                    } else {
+                        a.comment = Some(value.clone());
+                    }
+                })
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!("annotation edit failed: {e:#}");
+        }
+        cx.notify();
+    }
+
+    /// Bail out of an in-progress edit without writing.
+    pub(crate) fn cancel_annotation_edit(&mut self, cx: &mut Context<Self>) {
+        if self.annotation_edit.is_some() {
+            self.annotation_edit = None;
+            self.palette_open = false;
+            self.palette_focused = false;
+            self.palette_query.clear();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn open_colour_picker(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        current: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        // Anchor the popover near the previous context menu
+        // position so it appears under the user's mouse.
+        let position = self
+            .context_menu
+            .as_ref()
+            .map(|m| m.position)
+            .unwrap_or(gpui::Point {
+                x: gpui::px(200.),
+                y: gpui::px(200.),
+            });
+        self.colour_picker = Some(crate::ColourPickerState {
+            artifact,
+            key,
+            position,
+            current,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_colour_picker(&mut self, cx: &mut Context<Self>) {
+        if self.colour_picker.is_some() {
+            self.colour_picker = None;
+            cx.notify();
+        }
+    }
+
+    /// Activator for a swatch click in the colour picker. `rgba ==
+    /// None` means "clear the colour facet".
+    pub(crate) fn pick_colour(&mut self, rgba: Option<u32>, cx: &mut Context<Self>) {
+        let Some(picker) = self.colour_picker.take() else { return };
+        let result = self.write_annotation(picker.artifact, picker.key, |a| {
+            a.colour = rgba;
+        });
+        if let Err(e) = result {
+            tracing::warn!("colour pick failed: {e:#}");
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn clear_annotation_at(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.clear_annotation_full(artifact, key);
+        if let Err(e) = result {
+            tracing::warn!("clear annotation failed: {e:#}");
+        }
+        cx.notify();
     }
 
     /// Build a scoped palette for "References to address" / "Callers
@@ -1469,6 +1698,12 @@ impl Shell {
     }
 
     pub(crate) fn palette_activate(&mut self, cx: &mut Context<Self>) {
+        // Annotation edit hijacks Enter: commit the typed value as
+        // the new rename / comment.
+        if self.annotation_edit.is_some() {
+            self.commit_annotation_edit(cx);
+            return;
+        }
         let results = self.palette_visible_entries();
         let Some(entry) = results.get(self.palette_selected).cloned() else {
             return;
@@ -1831,6 +2066,96 @@ impl Shell {
         // Keep dropdown open only if there are still hidden tabs to show.
         cx.notify();
         self.save_state();
+    }
+
+    // ---- Annotation write helpers (Phase 4) -----------------------
+
+    /// Merge-mutate an annotation slot. Read whatever's currently
+    /// stored, apply `mutate`, persist via `set_annotation` (or
+    /// `clear_annotation` if the result has every facet unset),
+    /// then refresh the in-memory index on `LoadedBundle` so the
+    /// renderer + pane pick up the change immediately. Auto-opens
+    /// the annotations pane on a successful first-write.
+    pub(crate) fn write_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        mutate: impl FnOnce(&mut glass_db::Annotation),
+    ) -> anyhow::Result<()> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no glass-db handle"))?;
+        let mut current = db
+            .load_annotations(&artifact)?
+            .into_iter()
+            .find(|(k, _)| k == &key)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        mutate(&mut current);
+        if current.is_empty() {
+            db.clear_annotation(artifact.clone(), key.clone());
+        } else {
+            db.set_annotation(artifact.clone(), key.clone(), current.clone());
+        }
+        db.flush()?;
+        self.refresh_artifact_annotations(&artifact)?;
+        if !self.annotations_pane_open {
+            self.annotations_pane_open = true;
+            self.save_state();
+        }
+        Ok(())
+    }
+
+    /// Remove every facet at a key. Used by "Clear annotation".
+    pub(crate) fn clear_annotation_full(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+    ) -> anyhow::Result<()> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no glass-db handle"))?;
+        db.clear_annotation(artifact.clone(), key);
+        db.flush()?;
+        self.refresh_artifact_annotations(&artifact)?;
+        Ok(())
+    }
+
+    /// Rebuild the per-artifact AnnotationIndex from the DB and
+    /// splice it back into the LoadedBundle. The bundle's
+    /// `annotations` map is Arc-wrapped, so we make_mut the outer
+    /// and only the one artifact's entry is rebuilt.
+    fn refresh_artifact_annotations(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+    ) -> anyhow::Result<()> {
+        // Compute the new index while only the DB is borrowed,
+        // then drop that borrow before mutably grabbing the bundle.
+        let new_index = match self.db.as_ref() {
+            Some(db) => crate::annotations::load_for_artifacts(
+                db,
+                std::slice::from_ref(artifact),
+            ),
+            None => return Ok(()),
+        };
+        let Some(bundle) = self.bundle_mut() else { return Ok(()) };
+        let map = std::sync::Arc::make_mut(&mut bundle.annotations);
+        if let Some((aid, idx)) = new_index.into_iter().next() {
+            map.insert(aid, idx);
+        } else {
+            map.remove(artifact);
+        }
+        Ok(())
+    }
+
+    fn bundle_mut(&mut self) -> Option<&mut crate::LoadedBundle> {
+        if let crate::ShellState::Ready(b) = &mut self.state {
+            Some(b)
+        } else {
+            None
+        }
     }
 }
 

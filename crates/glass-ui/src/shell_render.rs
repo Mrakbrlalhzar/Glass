@@ -35,6 +35,37 @@ impl Shell {
         let len = self.palette_list_len;
         let weak = cx.entity().downgrade();
 
+        // Annotation-edit chip — shown above the input row when
+        // the palette is in edit mode. Takes precedence over the
+        // scope chip (they're mutually exclusive in practice).
+        let edit_chip: Option<gpui::Div> = self.annotation_edit.as_ref().map(|edit| {
+            div()
+                .flex_shrink_0()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(border)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().text_xs().text_color(rgb(0x66c2ff)).child("✎"))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(fg)
+                        .text_sm()
+                        .font_family("Courier New")
+                        .child(edit.chip_label.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(dim)
+                        .child(SharedString::from("Enter to save · Esc to cancel")),
+                )
+        });
+
         // Scope chip — shown above the input row when scoped.
         let scope_chip: Option<gpui::Div> = self.palette_scope.as_ref().map(|scope| {
             let progress = scope.progress.as_ref().map(|p| p.lock().clone());
@@ -234,10 +265,19 @@ impl Shell {
                             cx.stop_propagation();
                         },
                     );
-                if let Some(chip) = scope_chip {
+                if let Some(chip) = edit_chip {
+                    card = card.child(chip);
+                } else if let Some(chip) = scope_chip {
                     card = card.child(chip);
                 }
-                card.child(input_row).child(list_el)
+                card = card.child(input_row);
+                // In edit mode the result list is hidden — the
+                // palette body is just the input, plus the chip
+                // above explaining what we're editing.
+                if self.annotation_edit.is_none() {
+                    card = card.child(list_el);
+                }
+                card
             })
     }
 

@@ -27,6 +27,7 @@ mod annotations_pane;
 mod app;
 mod cfg_block;
 mod cfg_render;
+mod colour_picker;
 mod context_menu;
 mod dex_callgraph;
 mod dex_cg_render;
@@ -900,6 +901,40 @@ pub(crate) struct Shell {
     /// to the bundle record; default false. Auto-opens on write or
     /// when the user clicks an edge-icon (Phase 4).
     pub(crate) annotations_pane_open: bool,
+    /// In-progress annotation edit. `Some` flips the palette into
+    /// single-row editor mode (no result list, query == initial
+    /// value, Enter commits the write).
+    pub(crate) annotation_edit: Option<AnnotationEdit>,
+    /// In-progress colour pick. Renders a small swatch popover at
+    /// the saved position. `None` when closed.
+    pub(crate) colour_picker: Option<ColourPickerState>,
+}
+
+/// Active inline edit driven by the palette input. Set by an
+/// `EditRename` / `EditComment` context-menu activation and
+/// cleared on commit or Esc.
+#[derive(Clone, Debug)]
+pub(crate) struct AnnotationEdit {
+    pub artifact: glass_db::ArtifactId,
+    pub key: glass_db::AnnotationKey,
+    pub facet: AnnotationFacet,
+    /// Cached label for the palette chip ("Rename foo" / "Comment
+    /// on 0x…").
+    pub chip_label: SharedString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnnotationFacet {
+    Rename,
+    Comment,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ColourPickerState {
+    pub artifact: glass_db::ArtifactId,
+    pub key: glass_db::AnnotationKey,
+    pub position: gpui::Point<gpui::Pixels>,
+    pub current: Option<u32>,
 }
 
 
@@ -1060,6 +1095,12 @@ impl Render for Shell {
                     .into_any_element()
             });
 
+        let colour_picker_overlay: Option<gpui::AnyElement> =
+            self.colour_picker.as_ref().map(|state| {
+                colour_picker::render_colour_picker(state, panel, border, fg, cx)
+                    .into_any_element()
+            });
+
         let about_overlay: Option<gpui::AnyElement> = if self.about_open {
             Some(about::render_about(panel, border, fg, dim, cx))
         } else {
@@ -1082,6 +1123,14 @@ impl Render for Shell {
                 this.toggle_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
+                // Esc closes any annotation-edit cleanly first; the
+                // palette-as-editor case is unambiguous because the
+                // edit's chip is already showing in place of the
+                // normal results list.
+                if this.annotation_edit.is_some() {
+                    this.cancel_annotation_edit(cx);
+                    return;
+                }
                 // Esc on a scoped palette first clears the scope —
                 // back to bundle-wide search. Only a second Esc
                 // closes the palette outright.
@@ -1092,6 +1141,7 @@ impl Render for Shell {
                 this.close_palette(cx);
                 this.close_context_menu(cx);
                 this.close_about(cx);
+                this.close_colour_picker(cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteUp, _w, cx| {
                 if this.palette_open {
@@ -1145,6 +1195,9 @@ impl Render for Shell {
             root = root.child(o);
         }
         if let Some(o) = context_menu_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = colour_picker_overlay {
             root = root.child(o);
         }
         if let Some(o) = about_overlay {

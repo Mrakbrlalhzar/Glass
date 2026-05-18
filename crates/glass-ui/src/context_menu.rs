@@ -67,6 +67,44 @@ pub enum ContextMenuItem {
         field_ref: String,
         label: SharedString,
     },
+    /// "Rename…" / "Edit rename…" — opens the palette as an inline
+    /// editor pre-populated with the current value.
+    EditRename {
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        /// Existing value, or empty string for the "add" case.
+        current: String,
+        /// What's shown in the menu: "Rename…" when current is
+        /// empty, "Edit rename…" otherwise.
+        label: SharedString,
+    },
+    /// "Add comment…" / "Edit comment…" — same UX as EditRename
+    /// but writes into the comment facet.
+    EditComment {
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        current: String,
+        label: SharedString,
+    },
+    /// "Set colour ▸" — opens the swatch popover anchored on the
+    /// current row. The popover itself is a separate Shell state
+    /// (`colour_picker`), not a sub-menu element.
+    PickColour {
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        /// Existing colour, used to mark the currently-selected
+        /// swatch when the popover opens.
+        current: Option<u32>,
+        label: SharedString,
+    },
+    /// "Clear annotation" — removes every facet (rename / comment
+    /// / colour) hung off the key. Only shown when there's
+    /// something to clear.
+    ClearAnnotation {
+        artifact: glass_db::ArtifactId,
+        key: glass_db::AnnotationKey,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -152,6 +190,18 @@ pub fn render_context_menu(
             }
             ContextMenuItem::RefsToField { label, .. } => {
                 ("References to field".to_string(), label.clone())
+            }
+            ContextMenuItem::EditRename { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::EditComment { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::PickColour { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::ClearAnnotation { label, .. } => {
+                (label.to_string(), SharedString::from(""))
             }
         };
         let weak = weak.clone();
