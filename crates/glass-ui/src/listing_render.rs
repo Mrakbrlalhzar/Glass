@@ -26,6 +26,70 @@ fn annotation_index<'a>(ctx: Option<&'a RowCtx>) -> Option<&'a AnnotationIndex> 
     ctx.bundle.annotations.get(&ctx.artifact)
 }
 
+/// Resolve the `[start, end)` byte range of the data item that
+/// contains `addr`, when one is determinable. Two heuristics:
+///   1. A covering `SymbolKind::Object` with a non-zero size —
+///      use `[sym.address, sym.address + sym.size)`.
+///   2. The address lives in a "strings" section (name contains
+///      `cstring`, `__cfstring`, `__objc_methname`, etc.); scan
+///      from `addr` forward to the next NUL and back from `addr`
+///      to the previous NUL (or section start) so the highlight
+///      covers the whole string the user has selected.
+/// Returns `None` when neither heuristic applies — the renderer
+/// then draws no item highlight.
+fn item_extent_for(ctx: Option<&RowCtx>, addr: u64) -> Option<(u64, u64)> {
+    let ctx = ctx?;
+    // (1) Symbol-defined data item.
+    if let Some(sm) = ctx.bundle.symbol_maps.get(&ctx.artifact) {
+        if let Some(sym) = sm.covering(addr) {
+            if matches!(sym.kind, glass_arch_arm64::SymbolKind::Object) && sym.size > 0 {
+                return Some((sym.address, sym.address + sym.size));
+            }
+        }
+    }
+    // (2) String-section NUL scan.
+    let section_name = ctx.bundle.data_section_for_addr(&ctx.artifact, addr)?;
+    if !looks_like_strings_section(section_name) {
+        return None;
+    }
+    let section = ctx
+        .bundle
+        .data_sections
+        .get(&(ctx.artifact.clone(), section_name.to_string()))?;
+    let off = addr.checked_sub(section.base)? as usize;
+    if off >= section.bytes.len() {
+        return None;
+    }
+    // Scan back to start of string (previous NUL + 1, or section start).
+    let start_off = section.bytes[..off]
+        .iter()
+        .rposition(|&b| b == 0)
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    // Scan forward to end (next NUL exclusive).
+    let end_off = section.bytes[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| off + p)
+        .unwrap_or(section.bytes.len());
+    Some((section.base + start_off as u64, section.base + end_off as u64))
+}
+
+fn looks_like_strings_section(name: &str) -> bool {
+    // Mach-O: __cstring, __cfstring (CoreFoundation), __objc_methname,
+    // __objc_classname, __objc_methtype, __ustring. ELF: .rodata.str*,
+    // .strtab, .dynstr, .gnu.linkonce.r.str*. Substring match is fine
+    // since we're advising a heuristic, not enforcing.
+    let l = name.to_ascii_lowercase();
+    l.contains("cstring")
+        || l.contains("objc_methname")
+        || l.contains("objc_classname")
+        || l.contains("objc_methtype")
+        || l.contains(".str")
+        || l.contains("ustring")
+        || l.contains("__gcc_except_tab")
+}
+
 pub const LISTING_ROW_HEIGHT: f32 = 22.;
 pub const BB_SEPARATOR_HEIGHT: f32 = 8.;
 pub const LISTING_GUTTER_WIDTH: f32 = 56.;
@@ -313,6 +377,14 @@ pub fn render_hex_row(
                     idx.at_address(byte_addr).map(|a| (byte_addr, a))
                 })
             });
+            // Item-extent highlight: when a byte is selected and
+            // we can determine the bounds of the data item it
+            // belongs to (via symbol size or a NUL scan), paint
+            // the cells inside that range with a subtle accent
+            // in both the hex and ASCII columns. Lets the user
+            // see at a glance how long e.g. a C string is.
+            let item_extent: Option<(u64, u64)> =
+                selected_byte_addr.and_then(|sel| item_extent_for(ctx, sel));
             let mut hex_cells = div()
                 .w(px(HEX_BYTES_WIDTH))
                 .flex_shrink_0()
@@ -337,6 +409,9 @@ pub fn render_hex_row(
                     Some(_) => ".".to_string(),
                     None => " ".to_string(),
                 };
+                let in_item = item_extent
+                    .map(|(lo, hi)| cell_addr >= lo && cell_addr < hi)
+                    .unwrap_or(false);
                 let make_cell = |w: Pixels, text: String| {
                     let mut c = div()
                         .id(("hex-cell", row_index * 16 + i))
@@ -346,6 +421,10 @@ pub fn render_hex_row(
                         .child(text);
                     if is_selected_byte {
                         c = c.bg(rgb(COLOUR_BYTE_SELECTED)).text_color(rgb(0xffffff));
+                    } else if in_item {
+                        // ~14% white wash so the item span reads as
+                        // a subtle highlight rather than dominant.
+                        c = c.bg(gpui::rgba(0xffffff24));
                     }
                     if let Some(ctx) = ctx {
                         if byte.is_some() {

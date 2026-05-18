@@ -907,26 +907,43 @@ impl Shell {
             .get(&artifact)
             .and_then(|sm| sm.covering(addr));
         let mut items = Vec::new();
-        // 1) Function-level items when we know the covering symbol.
-        if let Some(sym) = covering {
-            let label = SharedString::from(sym.display_name.clone());
-            let entry_addr = sym.address;
-            items.push(ContextMenuItem::ShowCfg {
-                artifact: artifact.clone(),
-                entry_addr,
-                label: label.clone(),
-            });
-            items.push(ContextMenuItem::CallersOfFunction {
-                artifact: artifact.clone(),
-                entry_addr,
-                label,
-            });
-        } else {
-            items.push(ContextMenuItem::XrefsToAddress {
-                artifact: artifact.clone(),
-                addr,
-                label: SharedString::from(format!("0x{addr:x}")),
-            });
+        // 1) Top items depend on what kind of thing the click
+        //    landed on:
+        //    - Function symbol → Show CFG + Callers of function
+        //    - Object (data) symbol → References to <name>
+        //    - No covering symbol → References to 0x<addr>
+        match covering {
+            Some(sym) if matches!(sym.kind, glass_arch_arm64::SymbolKind::Function) => {
+                let label = SharedString::from(sym.display_name.clone());
+                let entry_addr = sym.address;
+                items.push(ContextMenuItem::ShowCfg {
+                    artifact: artifact.clone(),
+                    entry_addr,
+                    label: label.clone(),
+                });
+                items.push(ContextMenuItem::CallersOfFunction {
+                    artifact: artifact.clone(),
+                    entry_addr,
+                    label,
+                });
+            }
+            Some(sym) => {
+                // Data symbol — xrefs scoped to the symbol's
+                // entry address so e.g. ADRP+ADD pairs pointing
+                // at this string show up.
+                items.push(ContextMenuItem::XrefsToAddress {
+                    artifact: artifact.clone(),
+                    addr: sym.address,
+                    label: SharedString::from(sym.display_name.clone()),
+                });
+            }
+            None => {
+                items.push(ContextMenuItem::XrefsToAddress {
+                    artifact: artifact.clone(),
+                    addr,
+                    label: SharedString::from(format!("0x{addr:x}")),
+                });
+            }
         }
         // 2) Annotation items. Always address-keyed: the user
         //    right-clicked a specific row, so that row is the
