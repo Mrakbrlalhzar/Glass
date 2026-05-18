@@ -50,7 +50,22 @@ pub fn build_cfg_from_text_sections(
 
 /// Background fill for a normal block. Exits (`ret` / outside-fn
 /// branches) get a warm tint so they stand out at low zoom.
-pub fn cfg_block_bg(block: &glass_arch_arm64::BasicBlock) -> gpui::Rgba {
+///
+/// `function_tint` is the user's colour annotation on the
+/// function as a whole — if Some, it overrides the default with
+/// a heavy alpha-dimmed version so the block reads as "in this
+/// function" rather than the default neutral grey.
+pub fn cfg_block_bg(
+    block: &glass_arch_arm64::BasicBlock,
+    function_tint: Option<u32>,
+) -> gpui::Rgba {
+    if let Some(rgba) = function_tint {
+        // ~12% alpha for the whole-block tint — even gentler than
+        // the listing's per-row alpha because the CFG block is a
+        // bigger surface and reads as a flat wash.
+        let dimmed = (rgba & 0xffffff00) | 0x20;
+        return gpui::rgba(dimmed);
+    }
     if block.exits_function {
         gpui::rgba(0x3a2c2cff)
     } else {
@@ -88,12 +103,21 @@ pub struct CfgBlockRenderCtx {
     /// Block index — used by gpui's id() to keep stateful elements
     /// (per-row click handlers) distinct across blocks.
     pub block_idx: usize,
+    /// Snapshot of the per-artifact annotation index used to tint
+    /// individual instruction rows + the block background. Cloning
+    /// is cheap (all fields are `Arc`).
+    pub annotations: Option<crate::AnnotationIndex>,
+    /// If the function's entry address (or its covering symbol)
+    /// has a colour annotation, every block in the function gets
+    /// that tint as its background. Resolved once by `render_cfg`.
+    pub function_tint: Option<u32>,
 }
 
 pub fn render_cfg_block_pill(
     block: &glass_arch_arm64::BasicBlock,
     summary: &CfgBlockSummary,
     dim: gpui::Rgba,
+    function_tint: Option<u32>,
 ) -> gpui::AnyElement {
     let label = summary
         .symbol
@@ -101,7 +125,7 @@ pub fn render_cfg_block_pill(
         .unwrap_or_else(|| SharedString::from(format!("{:#x}", block.start_addr)));
     div()
         .size_full()
-        .bg(cfg_block_bg(block))
+        .bg(cfg_block_bg(block, function_tint))
         .border_2()
         .border_color(rgb(CFG_BLOCK_BORDER))
         .rounded_sm()
@@ -138,10 +162,20 @@ pub fn render_cfg_block_content(
         );
     }
     let total = block.instructions.len();
+    let annotation_at = |addr: u64| -> Option<glass_db::Annotation> {
+        let c = ctx?;
+        c.annotations.as_ref()?.at_address(addr).cloned()
+    };
     let render_insn = |insn: &glass_arch_arm64::InstructionEntry,
                        insn_idx: usize|
      -> gpui::AnyElement {
+        let annotation = annotation_at(insn.address);
         let mut row = div().flex().flex_row().gap_2().whitespace_nowrap();
+        // Per-row tint: same dim-alpha treatment as the listing.
+        if let Some(rgba) = annotation.as_ref().and_then(|a| a.colour) {
+            let dimmed = (rgba & 0xffffff00) | 0x3c;
+            row = row.bg(gpui::rgba(dimmed)).rounded_sm();
+        }
         row = row.child(
             div()
                 .text_color(rgb(COLOUR_ADDR))
@@ -202,20 +236,43 @@ pub fn render_cfg_block_content(
                     .child(SharedString::from(insn.operands.clone())),
             );
         }
+        if let Some(comment) = annotation.as_ref().and_then(|a| a.comment.as_deref()) {
+            row = row.child(
+                div()
+                    .text_color(rgb(crate::palette::COLOUR_COMMENT))
+                    .child(SharedString::from(format!("; {comment}"))),
+            );
+        }
         row.into_any_element()
     };
     for (i, insn) in block.instructions.iter().take(plan.preview).enumerate() {
         body = body.child(render_insn(insn, i));
     }
     if plan.show_ellipsis {
-        let skipped = total
-            .saturating_sub(plan.preview)
-            .saturating_sub(if plan.show_last { 1 } else { 0 });
+        let first_skipped = plan.preview;
+        let last_skipped =
+            total.saturating_sub(if plan.show_last { 1 } else { 0 });
+        let skipped = last_skipped.saturating_sub(first_skipped);
+        // Scan the skipped instructions for any address that has
+        // an annotation. If we find one, tint the ellipsis row
+        // with its colour so the user knows there's something
+        // they should expand to see.
+        let elided_colour: Option<u32> = ctx.and_then(|c| {
+            let idx = c.annotations.as_ref()?;
+            block
+                .instructions
+                .iter()
+                .skip(first_skipped)
+                .take(skipped)
+                .find_map(|insn| idx.at_address(insn.address).and_then(|a| a.colour))
+        });
+        let mut ellipsis_row = div().flex().flex_row().gap_2();
+        if let Some(rgba) = elided_colour {
+            let dimmed = (rgba & 0xffffff00) | 0x3c;
+            ellipsis_row = ellipsis_row.bg(gpui::rgba(dimmed)).rounded_sm();
+        }
         body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
+            ellipsis_row
                 .child(
                     div()
                         .text_color(rgb(COLOUR_PUNCT))
@@ -242,9 +299,10 @@ pub fn render_cfg_block_content(
         );
     }
 
+    let function_tint = ctx.and_then(|c| c.function_tint);
     div()
         .size_full()
-        .bg(cfg_block_bg(block))
+        .bg(cfg_block_bg(block, function_tint))
         .border_2()
         .border_color(rgb(CFG_BLOCK_BORDER))
         .rounded_sm()

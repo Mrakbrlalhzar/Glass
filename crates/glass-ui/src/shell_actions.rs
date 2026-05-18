@@ -1005,20 +1005,145 @@ impl Shell {
             .to_string();
         let label = SharedString::from(display);
         let method_key = format!("{class_jni}->{method_decl}");
-        self.context_menu = Some(ContextMenuState {
-            position,
-            items: vec![
-                ContextMenuItem::ShowDexCallGraph {
-                    class_jni,
-                    method_decl,
-                    label: label.clone(),
-                },
-                ContextMenuItem::CallersOfMethod {
-                    method_key,
-                    label,
-                },
-            ],
-        });
+        // For annotation lookup we need an artifact id. DEX
+        // artifacts share the bundle's first DEX artifact id; pick
+        // the first one in the bundle's artifact list as the
+        // canonical DEX target. (Annotations on DEX hang off the
+        // class / method JNI strings, not addresses, so the same
+        // (class, method) key works across DEXes.)
+        let dex_artifact = self
+            .bundle()
+            .and_then(|b| b.artifact_ids.first().cloned());
+        let mut items = vec![
+            ContextMenuItem::ShowDexCallGraph {
+                class_jni: class_jni.clone(),
+                method_decl: method_decl.clone(),
+                label: label.clone(),
+            },
+            ContextMenuItem::CallersOfMethod {
+                method_key: method_key.clone(),
+                label: label.clone(),
+            },
+        ];
+        if let Some(artifact) = dex_artifact {
+            let key = glass_db::AnnotationKey::Method(
+                class_jni.clone(),
+                method_decl.clone(),
+            );
+            let existing = self
+                .bundle()
+                .and_then(|b| b.annotations.get(&artifact))
+                .and_then(|idx| idx.at_method(&method_key))
+                .cloned()
+                .unwrap_or_default();
+            let rename_label = if existing.rename.is_some() {
+                "Edit rename…"
+            } else {
+                "Rename…"
+            };
+            let comment_label = if existing.comment.is_some() {
+                "Edit comment…"
+            } else {
+                "Add comment…"
+            };
+            items.push(ContextMenuItem::EditRename {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.rename.clone().unwrap_or_default(),
+                label: SharedString::from(rename_label),
+            });
+            items.push(ContextMenuItem::EditComment {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.comment.clone().unwrap_or_default(),
+                label: SharedString::from(comment_label),
+            });
+            items.push(ContextMenuItem::PickColour {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.colour,
+                label: SharedString::from("Set colour…"),
+            });
+            if !existing.is_empty() {
+                items.push(ContextMenuItem::ClearAnnotation {
+                    artifact,
+                    key,
+                    label: SharedString::from(format!("Clear annotation ({label})")),
+                });
+            }
+        }
+        self.context_menu = Some(ContextMenuState { position, items });
+        cx.notify();
+    }
+
+    /// Right-click on a `.class` header in the smali viewer. Same
+    /// annotation surface as `open_smali_context_menu`, keyed on
+    /// the class JNI rather than a method.
+    pub(crate) fn open_smali_class_context_menu(
+        &mut self,
+        class_jni: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let dex_artifact = self
+            .bundle()
+            .and_then(|b| b.artifact_ids.first().cloned());
+        let Some(artifact) = dex_artifact else {
+            return;
+        };
+        // Display name: dotted Java form for menu chip
+        // ("com.example.Foo") rather than the JNI form
+        // ("Lcom/example/Foo;").
+        let display = class_jni
+            .trim_start_matches('L')
+            .trim_end_matches(';')
+            .replace('/', ".");
+        let label = SharedString::from(display);
+        let key = glass_db::AnnotationKey::Class(class_jni.clone());
+        let existing = self
+            .bundle()
+            .and_then(|b| b.annotations.get(&artifact))
+            .and_then(|idx| idx.at_class(&class_jni))
+            .cloned()
+            .unwrap_or_default();
+        let rename_label = if existing.rename.is_some() {
+            "Edit rename…"
+        } else {
+            "Rename…"
+        };
+        let comment_label = if existing.comment.is_some() {
+            "Edit comment…"
+        } else {
+            "Add comment…"
+        };
+        let mut items = vec![
+            ContextMenuItem::EditRename {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.rename.clone().unwrap_or_default(),
+                label: SharedString::from(rename_label),
+            },
+            ContextMenuItem::EditComment {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.comment.clone().unwrap_or_default(),
+                label: SharedString::from(comment_label),
+            },
+            ContextMenuItem::PickColour {
+                artifact: artifact.clone(),
+                key: key.clone(),
+                current: existing.colour,
+                label: SharedString::from("Set colour…"),
+            },
+        ];
+        if !existing.is_empty() {
+            items.push(ContextMenuItem::ClearAnnotation {
+                artifact,
+                key,
+                label: SharedString::from(format!("Clear annotation ({label})")),
+            });
+        }
+        self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
     }
 

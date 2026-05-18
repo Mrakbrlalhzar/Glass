@@ -406,6 +406,7 @@ pub fn render_two_pane(
                                     let lines = right_lines.clone();
                                     let shell_weak = shell_weak.clone();
                                     let bundle = bundle.clone();
+                                    let active_class_jni = active_class_jni.clone();
                                     move |index, _window, _cx| {
                                         let text = lines
                                             .get(index)
@@ -413,6 +414,16 @@ pub fn render_two_pane(
                                             .unwrap_or_else(|| SharedString::from(""));
                                         let is_selected =
                                             selected_row == Some(index);
+                                        // Smali annotation lookup: class line
+                                        // hits the Class key; method header
+                                        // hits the Method key. Other lines
+                                        // get nothing. Same edge-dot + tint
+                                        // + comment treatment as listing.
+                                        let annotation = smali_annotation_for(
+                                            &bundle,
+                                            active_class_jni.as_deref(),
+                                            text.as_ref(),
+                                        );
                                         let mut row = div()
                                             .id(("smali-row", index))
                                             .h(px(22.))
@@ -421,6 +432,12 @@ pub fn render_two_pane(
                                             .relative();
                                         if is_selected {
                                             row = row.bg(rgb(COLOUR_ROW_SELECTED));
+                                        } else if let Some(rgba) =
+                                            annotation.as_ref().and_then(|a| a.colour)
+                                        {
+                                            // Dim alpha to ~24% like the listing.
+                                            let dimmed = (rgba & 0xffffff00) | 0x3c;
+                                            row = row.bg(gpui::rgba(dimmed));
                                         }
                                         let weak = shell_weak.clone();
                                         // Tokenise the line and build a
@@ -611,10 +628,28 @@ pub fn render_two_pane(
                                                     .child(SharedString::from(tok.text)),
                                             );
                                         }
+                                        // User comment hung off the smali
+                                        // class / method key is appended
+                                        // after the tokenised line so the
+                                        // syntax-coloured content stays
+                                        // unmolested.
+                                        if let Some(comment) =
+                                            annotation.as_ref().and_then(|a| a.comment.as_deref())
+                                        {
+                                            inner = inner.child(
+                                                div()
+                                                    .ml_4()
+                                                    .text_color(rgb(crate::palette::COLOUR_COMMENT))
+                                                    .whitespace_nowrap()
+                                                    .child(SharedString::from(
+                                                        format!("; {comment}"),
+                                                    )),
+                                            );
+                                        }
                                         let right_weak = weak.clone();
                                         let right_lines = lines.clone();
                                         let right_class = active_class_jni.clone();
-                                        row.on_mouse_down(
+                                        let row = row.on_mouse_down(
                                             gpui::MouseButton::Left,
                                             move |_ev, _w, cx: &mut App| {
                                                 if let Some(entity) = weak.upgrade() {
@@ -640,6 +675,29 @@ pub fn render_two_pane(
                                                     return;
                                                 };
                                                 let pos = ev.position;
+                                                // First: is this row itself a
+                                                // `.class` header? Annotate
+                                                // the class as a whole.
+                                                if let Some(row) = right_lines.get(index) {
+                                                    let trimmed = row.trim_start();
+                                                    if trimmed.starts_with(".class ") {
+                                                        if let Some(entity) =
+                                                            right_weak.upgrade()
+                                                        {
+                                                            cx.update_entity(
+                                                                &entity,
+                                                                |shell, cx| {
+                                                                    shell.open_smali_class_context_menu(
+                                                                        class_jni.clone(),
+                                                                        pos,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            );
+                                                        }
+                                                        return;
+                                                    }
+                                                }
                                                 // First: is this row itself a
                                                 // `.field` line? If so, show
                                                 // "References to field".
@@ -713,9 +771,33 @@ pub fn render_two_pane(
                                                     );
                                                 }
                                             },
-                                        )
-                                        .child(inner)
-                                        .into_any()
+                                        );
+                                        // Build the optional edge dot up
+                                        // front so we can finalize the row
+                                        // in one expression. The dot lives
+                                        // on `row` (the clipped outer) so
+                                        // it stays visible regardless of
+                                        // horizontal scroll.
+                                        let dot_child: Option<gpui::Div> =
+                                            annotation.as_ref().map(|ann| {
+                                                let dot_rgba =
+                                                    ann.colour.unwrap_or(0x4f7cffff);
+                                                div()
+                                                    .absolute()
+                                                    .top(px(7.))
+                                                    .right(px(8.))
+                                                    .w(px(8.))
+                                                    .h(px(8.))
+                                                    .rounded_full()
+                                                    .bg(gpui::rgba(dot_rgba))
+                                            });
+                                        let row = row.child(inner);
+                                        let row = if let Some(d) = dot_child {
+                                            row.child(d)
+                                        } else {
+                                            row
+                                        };
+                                        row.into_any()
                                     }
                                 })
                                 .size_full(),
@@ -783,4 +865,33 @@ pub fn render_two_pane(
             outer = outer.child(p);
         }
         outer.into_any_element()
+}
+
+/// Look up the annotation that should colour / comment / dot a
+/// single smali line. Only the `.class` header and `.method`
+/// declarations get annotation overlays — everything else
+/// returns `None`, leaving the row untouched.
+///
+/// The DEX artifact id is taken as the bundle's first artifact;
+/// annotations on DEX hang off JNI strings (class / method),
+/// not addresses, so the artifact id is mostly bookkeeping.
+fn smali_annotation_for(
+    bundle: &LoadedBundle,
+    active_class_jni: Option<&str>,
+    line: &str,
+) -> Option<glass_db::Annotation> {
+    let aid = bundle.artifact_ids.first()?;
+    let idx = bundle.annotations.get(aid)?;
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(".class ") {
+        let class_jni = active_class_jni?;
+        return idx.at_class(class_jni).cloned();
+    }
+    if let Some(after) = trimmed.strip_prefix(".method ") {
+        let class_jni = active_class_jni?;
+        let decl = after.split_whitespace().last()?;
+        let key = format!("{class_jni}->{decl}");
+        return idx.at_method(&key).cloned();
+    }
+    None
 }

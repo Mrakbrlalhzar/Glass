@@ -173,12 +173,27 @@ pub fn render_cfg(
     let blocks_arc: Arc<Vec<glass_arch_arm64::BasicBlock>> = Arc::new(cfg.blocks.clone());
     let artifact_arc = artifact.clone();
     let dim_for_content = dim;
+    // Resolve the per-artifact annotation index + the function's
+    // "background tint" colour once for the whole CFG render.
+    // Entry-address wins; falls back to the covering symbol's
+    // colour (so a Symbol-keyed colour also paints the CFG).
+    let annotations = bundle.annotations.get(artifact).cloned();
+    let function_tint = annotations.as_ref().and_then(|idx| {
+        let direct = idx.at_address(entry_addr).and_then(|a| a.colour);
+        if direct.is_some() {
+            return direct;
+        }
+        let sm = bundle.symbol_maps.get(artifact)?;
+        let sym = sm.at(entry_addr)?;
+        idx.at_symbol(&sym.display_name).and_then(|a| a.colour)
+    });
 
     let content: NodeContentFn = {
         let plans = plans_arc.clone();
         let summaries = summaries.clone();
         let blocks = blocks_arc.clone();
         let artifact = artifact_arc.clone();
+        let annotations = annotations.clone();
         Box::new(move |nid: NodeId, rect: NodeRect, weak| {
             let i = nid.0;
             let Some(block) = blocks.get(i) else {
@@ -186,12 +201,14 @@ pub fn render_cfg(
             };
             let summary = &summaries[i];
             if rect.w < LOD_PILL_MAX {
-                render_cfg_block_pill(block, summary, dim_for_content)
+                render_cfg_block_pill(block, summary, dim_for_content, function_tint)
             } else {
                 let ctx = CfgBlockRenderCtx {
                     shell: weak.clone(),
                     artifact: artifact.clone(),
                     block_idx: i,
+                    annotations: annotations.clone(),
+                    function_tint,
                 };
                 render_cfg_block_content(block, summary, plans[i], Some(&ctx))
             }
