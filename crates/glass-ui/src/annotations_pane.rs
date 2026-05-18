@@ -56,7 +56,11 @@ enum PaneRow {
 }
 
 pub fn render_annotations_pane(
-    _shell: &mut Shell,
+    // The pane renders inside Shell::render where the Shell entity
+    // is already mut-borrowed; reading via `cx.entity().read(cx)`
+    // from here would double-lease. Read pane state through
+    // `shell` directly instead.
+    shell: &Shell,
     bundle: &LoadedBundle,
     cx: &mut Context<Shell>,
     panel: gpui::Rgba,
@@ -92,7 +96,7 @@ pub fn render_annotations_pane(
                 ),
         );
 
-    let h_offset = cx.entity().read(cx).annotations_pane_h_offset;
+    let h_offset = shell.annotations_pane_h_offset;
 
     let body: gpui::AnyElement = if rows.is_empty() {
         div()

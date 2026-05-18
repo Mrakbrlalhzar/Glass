@@ -869,7 +869,7 @@ pub fn render_two_pane(
         let pane_open = shell.annotations_pane_open;
         let pane = if pane_open {
             Some(crate::annotations_pane::render_annotations_pane(
-                shell, &bundle, cx, panel, border, fg, dim,
+                &*shell, &bundle, cx, panel, border, fg, dim,
             ))
         } else {
             None
