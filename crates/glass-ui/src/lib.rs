@@ -887,10 +887,6 @@ pub(crate) struct Shell {
     palette_focused: bool,
     /// Right-click context menu state. `None` when no menu is open.
     context_menu: Option<ContextMenuState>,
-    /// Goto-address bar state. `goto_focused` swallows keystrokes
-    /// into `goto_query`; Enter parses + navigates, ESC closes.
-    pub(crate) goto_focused: bool,
-    pub(crate) goto_query: String,
     /// Whether the About-Glass modal is currently shown.
     pub(crate) about_open: bool,
 }
@@ -922,57 +918,7 @@ impl Render for Shell {
         // platform level, so calling it every render is fine.
         window.set_window_title(&header_text);
 
-        // Pre-build the goto-address widget (only when a bundle is
-        // loaded). Returns None otherwise so the header skips it.
-        let goto_widget = if matches!(self.state, ShellState::Ready(_)) {
-            let goto_focused = self.goto_focused;
-            let goto_query = self.goto_query.clone();
-            let parsed_ok =
-                self.goto_parse().is_some() || goto_query.trim().is_empty();
-            let border_col = if !parsed_ok {
-                rgb(0xff5050)
-            } else if goto_focused {
-                rgb(0x4f7cff)
-            } else {
-                border
-            };
-            let display = if goto_query.is_empty() {
-                SharedString::from("Goto 0x…")
-            } else if goto_focused {
-                SharedString::from(format!("{}|", goto_query))
-            } else {
-                SharedString::from(goto_query.clone())
-            };
-            let display_colour = if goto_query.is_empty() { dim } else { fg };
-            Some(
-                div()
-                    .id("goto-bar")
-                    .w(px(180.))
-                    .h(px(24.))
-                    .px_3()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .rounded_sm()
-                    .text_sm()
-                    .text_color(display_colour)
-                    .font_family("Courier New")
-                    .border_1()
-                    .border_color(border_col)
-                    .cursor_text()
-                    .child(display)
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _ev, _w, cx| {
-                            this.goto_open(cx);
-                        }),
-                    ),
-            )
-        } else {
-            None
-        };
-
-        let mut header = div()
+        let header = div()
             .h(px(28.))
             .flex_shrink_0()
             .px_3()
@@ -985,11 +931,7 @@ impl Render for Shell {
             .bg(panel)
             .text_sm()
             .text_color(dim)
-            .child(div().flex_1().child(header_text));
-        if let Some(w) = goto_widget {
-            header = header.child(w);
-        }
-        let header = header
+            .child(div().flex_1().child(header_text))
             // Search affordance — clicking is equivalent to ⌘F.
             .child(
                 div()
@@ -1081,11 +1023,8 @@ impl Render for Shell {
             .text_color(fg)
             .font_family("Menlo")
             // Cmd-F toggles. Bound globally so it works whatever pane
-            // has focus. Closes the goto-address bar on open so the
-            // palette's keystrokes don't get stolen by the goto
-            // capture in on_key_down below.
+            // has focus.
             .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
-                this.goto_close(cx);
                 this.toggle_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
@@ -1099,7 +1038,6 @@ impl Render for Shell {
                 this.close_palette(cx);
                 this.close_context_menu(cx);
                 this.close_about(cx);
-                this.goto_close(cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteUp, _w, cx| {
                 if this.palette_open {
@@ -1111,50 +1049,24 @@ impl Render for Shell {
                     this.palette_move(1, cx);
                 }
             }))
-            // Enter activates the goto bar when it's focused, else
-            // the palette when it's open. Bound globally because the
-            // action keymap consumes Enter before our on_key_down
-            // listener has a chance to see it.
+            // Enter activates the palette when it's open. Bound
+            // globally because the action keymap consumes Enter
+            // before our on_key_down listener has a chance to see it.
             .on_action(cx.listener(|this, _: &PaletteActivate, _w, cx| {
-                if this.goto_focused {
-                    this.goto_activate(cx);
-                } else if this.palette_open {
+                if this.palette_open {
                     this.palette_activate(cx);
                 }
             }))
-            // Capture printable keystrokes for the palette query when it's
-            // open, or for the goto-address bar when it's focused. gpui
-            // doesn't have a turnkey text input for arbitrary unicode in
-            // this revision — this is enough for our two text fields.
+            // Capture printable keystrokes for the palette query when
+            // it's open. gpui doesn't have a turnkey text input for
+            // arbitrary unicode in this revision — this is enough
+            // for the palette.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
                 let k = &ev.keystroke;
                 // Escape always closes the About modal first if it's
-                // up — beats palette / goto handling.
+                // up — beats palette handling.
                 if this.about_open && k.key == "escape" {
                     this.close_about(cx);
-                    return;
-                }
-                if this.goto_focused {
-                    if k.key == "escape" {
-                        this.goto_close(cx);
-                        return;
-                    }
-                    if k.key == "enter" {
-                        this.goto_activate(cx);
-                        return;
-                    }
-                    if k.key == "backspace" {
-                        this.goto_backspace(cx);
-                        return;
-                    }
-                    if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
-                        return;
-                    }
-                    let Some(s) = k.key_char.as_deref() else { return };
-                    if s.is_empty() {
-                        return;
-                    }
-                    this.goto_type(s, cx);
                     return;
                 }
                 if !this.palette_open {
