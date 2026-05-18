@@ -72,6 +72,8 @@ actions!(
         PaletteUp,
         PaletteDown,
         PaletteActivate,
+        PaletteModeText,
+        PaletteModeBinary,
         OpenFile,
         NewWindow,
         CloseWindow,
@@ -886,6 +888,20 @@ pub(crate) struct Shell {
     pub(crate) palette_selected: usize,
     pub(crate) palette_list_state: ListState,
     pub(crate) palette_list_len: usize,
+    /// Which mode the palette is in. The two modes share scaffolding
+    /// (modal panel, scroll, Enter / Esc) but have separate input
+    /// state and result renderers. State is preserved across mode
+    /// switches so toggling back doesn't lose what you were typing.
+    pub(crate) palette_mode: PaletteMode,
+    /// Binary-search mode state — query buffer, last result set,
+    /// parse / lookup error (rendered inline under the input row).
+    pub(crate) palette_bin_query: String,
+    pub(crate) palette_bin_results: Option<std::sync::Arc<glass_api::BinSearchResult>>,
+    pub(crate) palette_bin_error: Option<String>,
+    /// Which artifact bin-search runs against. Defaults to the
+    /// bundle's first artifact at open; can be cycled later when we
+    /// grow a dropdown.
+    pub(crate) palette_bin_artifact: Option<glass_db::ArtifactId>,
     /// When `Some`, the palette is showing a scoped result set
     /// (e.g. "Callers of foo") rather than the bundle-wide search.
     /// Esc clears the scope back to bundle-wide search rather than
@@ -933,6 +949,19 @@ pub(crate) struct AnnotationEdit {
 pub(crate) enum AnnotationFacet {
     Rename,
     Comment,
+}
+
+/// Which mode the palette is operating in. Each mode keeps its
+/// own input + result state so toggling back doesn't lose work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum PaletteMode {
+    /// Bundle-wide fuzzy text search: symbols, classes, fields,
+    /// methods, strings. Live-filtered as the user types.
+    #[default]
+    Text,
+    /// Byte-level pattern search (`bin-search`). Pattern compiles
+    /// + scans on Enter; results show as a table.
+    Binary,
 }
 
 #[derive(Clone, Debug)]
@@ -1157,6 +1186,19 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PaletteDown, _w, cx| {
                 if this.palette_open {
                     this.palette_move(1, cx);
+                }
+            }))
+            // ⌘1 / ⌘2 switch palette modes when the palette is
+            // open. Only the palette-open guard prevents the
+            // chord from firing in other contexts.
+            .on_action(cx.listener(|this, _: &PaletteModeText, _w, cx| {
+                if this.palette_open {
+                    this.palette_set_mode_text(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PaletteModeBinary, _w, cx| {
+                if this.palette_open {
+                    this.palette_set_mode_binary(cx);
                 }
             }))
             // Enter activates the palette when it's open. Bound

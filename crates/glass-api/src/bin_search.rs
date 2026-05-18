@@ -188,7 +188,13 @@ fn matches_at(atoms: &[Atom], bytes: &[u8]) -> Option<usize> {
 /// Scan `section_bytes` for every offset at which the pattern
 /// matches. When the first atom is a literal byte (mask 0xff)
 /// we use `memchr` to skip non-candidate starts cheaply.
-fn scan_section(atoms: &[Atom], section_bytes: &[u8]) -> Vec<(usize, usize)> {
+///
+/// Returned `(start, slice_end)` pairs are relative to
+/// `section_bytes`; `start + slice_end` is the absolute end
+/// within the section. Public so glass-ui can drive the same
+/// matcher against `LoadedBundle` byte sections without going
+/// through the file-loading path.
+pub fn scan_section(atoms: &[Atom], section_bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     if section_bytes.is_empty() {
         return out;
@@ -290,7 +296,9 @@ impl Bundle {
     }
 }
 
-fn build_preview(is_text: bool, addr: u64, bytes: &[u8]) -> String {
+/// Pre-formatted preview string for a match slice. Public for
+/// the same reason as `scan_section`.
+pub fn build_preview(is_text: bool, addr: u64, bytes: &[u8]) -> String {
     if is_text {
         // Two decoded instructions joined with ` ; `. Word
         // alignment matters; if the match starts mid-instruction

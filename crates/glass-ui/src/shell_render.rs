@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, Pixels,
+    div, list, prelude::*, px, rgb, App, Context, ListAlignment, ListState, Pixels,
     SharedString,
 };
 
@@ -17,6 +17,13 @@ use crate::context_menu::{self, ContextMenuState};
 use crate::{
     LeafId, LoadedBundle, Progress, SearchEntry, Shell, ShellState,
 };
+
+fn panel_active() -> gpui::Rgba {
+    rgb(0x2e2e34)
+}
+fn panel_inactive() -> gpui::Rgba {
+    rgb(0x1e1e22)
+}
 
 impl Shell {
     pub(crate) fn render_palette(
@@ -274,20 +281,265 @@ impl Shell {
                             cx.stop_propagation();
                         },
                     );
+                // Mode tab strip — first row of the card. Hidden
+                // when an annotation edit is active because the
+                // edit chip occupies that visual slot.
+                if self.annotation_edit.is_none() {
+                    card = card.child(self.render_palette_mode_tabs(border, fg, dim, accent, cx));
+                }
                 if let Some(chip) = edit_chip {
                     card = card.child(chip);
                 } else if let Some(chip) = scope_chip {
                     card = card.child(chip);
                 }
-                card = card.child(input_row);
-                // In edit mode the result list is hidden — the
-                // palette body is just the input, plus the chip
-                // above explaining what we're editing.
-                if self.annotation_edit.is_none() {
-                    card = card.child(list_el);
+                match self.palette_mode {
+                    crate::PaletteMode::Text => {
+                        card = card.child(input_row);
+                        if self.annotation_edit.is_none() {
+                            card = card.child(list_el);
+                        }
+                    }
+                    crate::PaletteMode::Binary => {
+                        card = card
+                            .child(self.render_palette_bin_input(border, fg, dim, cx));
+                        card = card
+                            .child(self.render_palette_bin_results(border, fg, dim, accent, cx));
+                    }
                 }
                 card
             })
+    }
+
+    /// Two-tab strip showing the current mode. Click switches.
+    /// Keyboard chords (⌘1 / ⌘2) are wired separately.
+    fn render_palette_mode_tabs(
+        &self,
+        border: gpui::Rgba,
+        fg: gpui::Rgba,
+        dim: gpui::Rgba,
+        accent: gpui::Rgba,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mode = self.palette_mode;
+        let tab = |label: &'static str,
+                   shortcut: &'static str,
+                   is_active: bool,
+                   id: &'static str,
+                   on_click: fn(&mut Shell, &mut Context<Shell>)| {
+            let bg = if is_active { panel_active() } else { panel_inactive() };
+            let text_col = if is_active { fg } else { dim };
+            div()
+                .id(id)
+                .px_4()
+                .h(px(28.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .bg(bg)
+                .text_sm()
+                .text_color(text_col)
+                .cursor_pointer()
+                .child(SharedString::from(label))
+                .child(div().text_xs().text_color(dim).child(SharedString::from(shortcut)))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, _w, cx| {
+                        on_click(this, cx);
+                    }),
+                )
+        };
+        let _ = accent; // reserved for future highlight; silence unused
+        div()
+            .h(px(28.))
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(border)
+            .child(tab(
+                "Symbols & strings",
+                "⌘1",
+                mode == crate::PaletteMode::Text,
+                "palette-mode-text",
+                |shell, cx| shell.palette_set_mode_text(cx),
+            ))
+            .child(tab(
+                "Binary",
+                "⌘2",
+                mode == crate::PaletteMode::Binary,
+                "palette-mode-binary",
+                |shell, cx| shell.palette_set_mode_binary(cx),
+            ))
+    }
+
+    fn render_palette_bin_input(
+        &self,
+        border: gpui::Rgba,
+        fg: gpui::Rgba,
+        dim: gpui::Rgba,
+        _cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let placeholder = "Byte pattern: c0 03 5f d6, e? ?? ff *(0..16) c0";
+        let display = if self.palette_bin_query.is_empty() {
+            SharedString::from(placeholder)
+        } else {
+            SharedString::from(self.palette_bin_query.clone())
+        };
+        let display_colour = if self.palette_bin_query.is_empty() { dim } else { fg };
+        let scope_chip = self.palette_bin_artifact.as_ref().map(|aid| {
+            SharedString::from(format!(
+                "artifact {}",
+                aid.to_string().chars().take(10).collect::<String>()
+            ))
+        });
+        let mut row = div()
+            .h(px(40.))
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .gap_3()
+            .border_b_1()
+            .border_color(border)
+            .child(div().text_color(dim).text_base().child("⌗"))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(display_colour)
+                    .text_base()
+                    .font_family("Courier New")
+                    .child(display),
+            );
+        if let Some(chip) = scope_chip {
+            row = row.child(div().text_xs().text_color(dim).child(chip));
+        }
+        if let Some(err) = self.palette_bin_error.as_ref() {
+            row = row.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xff6060))
+                    .child(SharedString::from(err.clone())),
+            );
+        }
+        row
+    }
+
+    fn render_palette_bin_results(
+        &self,
+        border: gpui::Rgba,
+        fg: gpui::Rgba,
+        dim: gpui::Rgba,
+        accent: gpui::Rgba,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let _ = border;
+        let _ = fg;
+        let weak = cx.entity().downgrade();
+        let selected = self.palette_selected;
+        match self.palette_bin_results.as_ref() {
+            None => div()
+                .flex_1()
+                .p_3()
+                .text_sm()
+                .text_color(dim)
+                .child(SharedString::from(
+                    "Enter to run. See docs/BinSearch.md for the pattern grammar.",
+                )),
+            Some(result) if result.matches.is_empty() => div()
+                .flex_1()
+                .p_3()
+                .text_sm()
+                .text_color(dim)
+                .child(SharedString::from(format!(
+                    "No matches for `{}`",
+                    result.pattern
+                ))),
+            Some(result) => {
+                let matches: Arc<Vec<glass_api::BinMatch>> = Arc::new(result.matches.clone());
+                let len = matches.len();
+                let state =
+                    ListState::new(len, ListAlignment::Top, px(2000.));
+                let header = SharedString::from(format!(
+                    "{} of {} matches",
+                    result.shown, result.total
+                ));
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(20.))
+                            .px_3()
+                            .pt_1()
+                            .text_xs()
+                            .text_color(dim)
+                            .child(header),
+                    )
+                    .child(
+                        list(state, {
+                            let matches = matches.clone();
+                            move |index, _w, _cx| {
+                                let Some(m) = matches.get(index) else {
+                                    return div().into_any();
+                                };
+                                let is_sel = index == selected;
+                                let bg = if is_sel {
+                                    accent
+                                } else {
+                                    rgb(0x00000000)
+                                };
+                                let weak = weak.clone();
+                                let section = SharedString::from(m.section.clone());
+                                let address = SharedString::from(m.address.clone());
+                                let preview = SharedString::from(m.preview.clone());
+                                div()
+                                    .id(("bin-row", index))
+                                    .h(px(22.))
+                                    .w_full()
+                                    .px_3()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_4()
+                                    .bg(bg)
+                                    .text_sm()
+                                    .font_family("Courier New")
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .w(px(140.))
+                                            .text_color(rgb(0xa0a0a8))
+                                            .child(section),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(160.))
+                                            .text_color(rgb(0xb0c8ff))
+                                            .child(address),
+                                    )
+                                    .child(
+                                        div().flex_1().text_color(rgb(0xd6d6d6)).child(preview),
+                                    )
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        move |_ev, _w, cx: &mut App| {
+                                            if let Some(entity) = weak.upgrade() {
+                                                cx.update_entity(&entity, |shell, cx| {
+                                                    shell.palette_selected = index;
+                                                    shell.palette_bin_activate(cx);
+                                                });
+                                            }
+                                        },
+                                    )
+                                    .into_any()
+                            }
+                        })
+                        .h_full(),
+                    )
+            }
+        }
     }
 
     /// Render the right-click context menu as a small floating panel

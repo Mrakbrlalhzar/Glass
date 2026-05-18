@@ -21,6 +21,8 @@ use crate::{
     About, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
     OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7, OpenRecent8, OpenRecent9,
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
+    PaletteModeBinary,
+    PaletteModeText,
     TogglePalette,
 };
 
@@ -66,6 +68,8 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
             KeyBinding::new("up", PaletteUp, None),
             KeyBinding::new("down", PaletteDown, None),
             KeyBinding::new("enter", PaletteActivate, None),
+            KeyBinding::new("cmd-1", PaletteModeText, None),
+            KeyBinding::new("cmd-2", PaletteModeBinary, None),
             KeyBinding::new("cmd-o", OpenFile, None),
             KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),

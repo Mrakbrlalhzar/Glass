@@ -74,6 +74,11 @@ impl Shell {
             palette_selected: 0,
             palette_list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
             palette_list_len: 0,
+            palette_mode: crate::PaletteMode::default(),
+            palette_bin_query: String::new(),
+            palette_bin_results: None,
+            palette_bin_error: None,
+            palette_bin_artifact: None,
             palette_scope: None,
             palette_focused: false,
             context_menu: None,
@@ -821,11 +826,39 @@ impl Shell {
             self.palette_focused = true;
             self.refresh_palette_list();
             self.spawn_search_index_build_if_needed(cx);
+            // Default the binary-search artifact to the bundle's
+            // first one if we don't have a selection yet. Most
+            // bundles have one artifact anyway.
+            if self.palette_bin_artifact.is_none() {
+                self.palette_bin_artifact = self
+                    .bundle()
+                    .and_then(|b| b.artifact_ids.first().cloned());
+            }
             // Pull keyboard focus onto our root so typing reaches the
             // palette without the user clicking it first.
             window.focus(&self.focus_handle, cx);
         }
         cx.notify();
+    }
+
+    /// Switch palette to text mode (⌘1). State for the other
+    /// mode is preserved so toggling back doesn't lose it.
+    pub(crate) fn palette_set_mode_text(&mut self, cx: &mut Context<Self>) {
+        if self.palette_mode != crate::PaletteMode::Text {
+            self.palette_mode = crate::PaletteMode::Text;
+            self.palette_selected = 0;
+            self.refresh_palette_list();
+            cx.notify();
+        }
+    }
+
+    /// Switch palette to binary mode (⌘2).
+    pub(crate) fn palette_set_mode_binary(&mut self, cx: &mut Context<Self>) {
+        if self.palette_mode != crate::PaletteMode::Binary {
+            self.palette_mode = crate::PaletteMode::Binary;
+            self.palette_selected = 0;
+            cx.notify();
+        }
     }
 
     pub(crate) fn close_palette(&mut self, cx: &mut Context<Self>) {
@@ -1791,29 +1824,177 @@ impl Shell {
     }
 
     pub(crate) fn palette_type(&mut self, s: &str, cx: &mut Context<Self>) {
-        self.palette_query.push_str(s);
-        self.palette_selected = 0;
-        self.refresh_palette_list();
+        match self.palette_mode {
+            crate::PaletteMode::Text => {
+                self.palette_query.push_str(s);
+                self.palette_selected = 0;
+                self.refresh_palette_list();
+            }
+            crate::PaletteMode::Binary => {
+                self.palette_bin_query.push_str(s);
+                // Clear stale error / result on next keystroke
+                // so the input doesn't lie about what's loaded.
+                self.palette_bin_error = None;
+            }
+        }
         cx.notify();
     }
 
     pub(crate) fn palette_backspace(&mut self, cx: &mut Context<Self>) {
-        self.palette_query.pop();
-        self.palette_selected = 0;
-        self.refresh_palette_list();
+        match self.palette_mode {
+            crate::PaletteMode::Text => {
+                self.palette_query.pop();
+                self.palette_selected = 0;
+                self.refresh_palette_list();
+            }
+            crate::PaletteMode::Binary => {
+                self.palette_bin_query.pop();
+                self.palette_bin_error = None;
+            }
+        }
         cx.notify();
     }
 
     pub(crate) fn palette_move(&mut self, delta: i32, cx: &mut Context<Self>) {
-        if self.palette_list_len == 0 {
+        let len = match self.palette_mode {
+            crate::PaletteMode::Text => self.palette_list_len,
+            crate::PaletteMode::Binary => self
+                .palette_bin_results
+                .as_ref()
+                .map(|r| r.matches.len())
+                .unwrap_or(0),
+        };
+        if len == 0 {
             return;
         }
-        let max = self.palette_list_len.saturating_sub(1);
+        let max = len.saturating_sub(1);
         let next = (self.palette_selected as i32 + delta).clamp(0, max as i32) as usize;
         if next != self.palette_selected {
             self.palette_selected = next;
-            self.palette_list_state.scroll_to_reveal_item(next);
+            if self.palette_mode == crate::PaletteMode::Text {
+                self.palette_list_state.scroll_to_reveal_item(next);
+            }
             cx.notify();
+        }
+    }
+
+    /// Run the binary-search pattern against the currently
+    /// selected artifact. Results land in `palette_bin_results`,
+    /// errors in `palette_bin_error`. Always called from the
+    /// foreground thread; the scan typically runs in milliseconds
+    /// for the kind of pattern a user types interactively.
+    pub(crate) fn run_palette_bin_search(&mut self, cx: &mut Context<Self>) {
+        use glass_arch_arm64::SymbolMap;
+        let _ = SymbolMap::default; // touch import for future use
+        self.palette_bin_error = None;
+        let pattern = std::mem::take(&mut self.palette_bin_query);
+        // Keep the query around for display + edit; restore it
+        // here after the take.
+        self.palette_bin_query = pattern.clone();
+        let atoms = match glass_api::parse_pattern(&pattern) {
+            Ok(a) => a,
+            Err(e) => {
+                self.palette_bin_error = Some(format!("{e:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(bundle) = self.bundle().cloned() else {
+            self.palette_bin_error = Some("no bundle loaded".to_string());
+            cx.notify();
+            return;
+        };
+        let Some(artifact) = self.palette_bin_artifact.clone() else {
+            self.palette_bin_error = Some("no artifact selected".to_string());
+            cx.notify();
+            return;
+        };
+        // Scan every text + data section of the artifact. Mirror
+        // the bin-search verb's filter so behaviour matches.
+        let mut matches: Vec<glass_api::BinMatch> = Vec::new();
+        // Text sections.
+        for ((aid, name), text) in bundle.text_sections.iter() {
+            if aid != &artifact {
+                continue;
+            }
+            let bytes: &[u8] = text.bytes.as_ref();
+            for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
+                let abs_end = start + slice_end;
+                let addr = text.base + start as u64;
+                let preview = glass_api::build_preview(
+                    true,
+                    addr,
+                    &bytes[start..abs_end.min(bytes.len())],
+                );
+                matches.push(glass_api::BinMatch {
+                    section: name.clone(),
+                    address: format!("0x{addr:x}"),
+                    length: slice_end,
+                    preview,
+                });
+            }
+        }
+        // Data sections (non-text, non-bss, non-debug, non-zero-base).
+        for ((aid, name), data) in bundle.data_sections.iter() {
+            if aid != &artifact {
+                continue;
+            }
+            if data.base == 0 || data.bytes.is_empty() {
+                continue;
+            }
+            if matches!(data.kind, crate::NativeSectionKind::Bss | crate::NativeSectionKind::Debug) {
+                continue;
+            }
+            let bytes: &[u8] = data.bytes.as_ref();
+            for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
+                let abs_end = start + slice_end;
+                let addr = data.base + start as u64;
+                let preview = glass_api::build_preview(
+                    false,
+                    addr,
+                    &bytes[start..abs_end.min(bytes.len())],
+                );
+                matches.push(glass_api::BinMatch {
+                    section: name.clone(),
+                    address: format!("0x{addr:x}"),
+                    length: slice_end,
+                    preview,
+                });
+            }
+        }
+        matches.sort_by(|a, b| a.section.cmp(&b.section).then(a.address.cmp(&b.address)));
+        let total = matches.len();
+        let result = glass_api::BinSearchResult {
+            artifact: artifact.to_string(),
+            pattern: pattern.clone(),
+            total,
+            shown: total,
+            matches,
+        };
+        self.palette_bin_results = Some(std::sync::Arc::new(result));
+        self.palette_selected = 0;
+        cx.notify();
+    }
+
+    /// Navigate to the currently-selected bin-search result.
+    /// Same dispatch as a SearchJump: text-section addresses
+    /// open the listing, data-section addresses open the hex
+    /// view.
+    pub(crate) fn palette_bin_activate(&mut self, cx: &mut Context<Self>) {
+        let Some(results) = self.palette_bin_results.clone() else { return };
+        let Some(m) = results.matches.get(self.palette_selected) else { return };
+        let Some(bundle) = self.bundle().cloned() else { return };
+        let Some(artifact) = self.palette_bin_artifact.clone() else { return };
+        let Ok(addr) = u64::from_str_radix(m.address.trim_start_matches("0x"), 16) else {
+            return;
+        };
+        let section = m.section.clone();
+        self.palette_open = false;
+        // Text vs data dispatch: ask the bundle which view it is.
+        if bundle.text_section_for_addr(&artifact, addr).is_some() {
+            self.open_listing_in_new_tab(artifact, section, addr, cx);
+        } else {
+            self.open_hex_in_new_tab(artifact, section, addr, cx);
         }
     }
 
@@ -1986,6 +2167,19 @@ impl Shell {
         // the new rename / comment.
         if self.annotation_edit.is_some() {
             self.commit_annotation_edit(cx);
+            return;
+        }
+        // Binary mode: Enter on the input row runs the scan;
+        // Enter on a result row navigates. The render closure
+        // calls palette_bin_activate directly on result clicks,
+        // so this branch only handles the input-row case (no
+        // results yet) by running the search.
+        if self.palette_mode == crate::PaletteMode::Binary {
+            if self.palette_bin_results.is_some() {
+                self.palette_bin_activate(cx);
+            } else {
+                self.run_palette_bin_search(cx);
+            }
             return;
         }
         let results = self.palette_visible_entries();

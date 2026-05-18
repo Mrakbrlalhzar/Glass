@@ -10,6 +10,7 @@ anyhow.workspace = true
 tracing.workspace = true
 glass-core.workspace = true
 glass-db.workspace = true
+glass-api.workspace = true
 glass-arch-arm64.workspace = true
 glass-arch-dex.workspace = true
 glass-mobile.workspace = true

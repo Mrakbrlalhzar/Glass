@@ -38,7 +38,10 @@ pub use annotations::{
     AnnotationClearResult, AnnotationEntry, AnnotationKeyArgs, AnnotationWriteResult,
     AnnotationsResult, BundleRecordView, DbDumpResult,
 };
-pub use bin_search::{Atom, BinMatch, BinSearchResult, DEFAULT_GAP_MAX};
+pub use bin_search::{
+    build_preview, parse_pattern, scan_section, Atom, BinMatch, BinSearchResult,
+    DEFAULT_GAP_MAX,
+};
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
 pub use dex::{
