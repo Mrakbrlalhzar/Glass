@@ -21,6 +21,7 @@
 //! parallel queries don't fight; cache fills are serialised.
 
 mod annotations;
+mod bin_search;
 mod bundle;
 mod cfg;
 mod dex;
@@ -37,6 +38,7 @@ pub use annotations::{
     AnnotationClearResult, AnnotationEntry, AnnotationKeyArgs, AnnotationWriteResult,
     AnnotationsResult, BundleRecordView, DbDumpResult,
 };
+pub use bin_search::{Atom, BinMatch, BinSearchResult, DEFAULT_GAP_MAX};
 pub use bundle::{open, Bundle, BundleKind};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
 pub use dex::{

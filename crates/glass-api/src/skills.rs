@@ -542,6 +542,28 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({ "type": "object" }),
                 example: "glass clear-annotation ./libfoo.so --key-kind address --key 0x1000058d4",
             },
+
+            // ---- Binary pattern search ------------------------------
+            Skill {
+                name: "bin-search",
+                description: "Scan a native artifact's text + data sections for a byte pattern. Atoms are space-separated; each is either a 2-char byte mask (`c0`, `0xc0`, `e?`, `?f`, `??`) or a gap (`*` = 0..=32 bytes, `*(min..max)` for explicit bounds). Matches don't span sections. Results carry a preview: two decoded AArch64 instructions joined with ` ; ` for text sections, first 8 bytes as hex for data. Use for finding code shapes (e.g. ADRP+ADD), well-known prologues, magic numbers, or any byte sequence.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "artifact", "pattern"],
+                    "properties": {
+                        "path": path_arg(),
+                        "artifact": artifact_arg(),
+                        "pattern": {
+                            "type": "string",
+                            "description": "Pattern grammar: `c0` (literal byte), `e?` / `?f` / `??` (nibble wildcards), `*` (default 0..=32 byte gap), `*(min..max)` (explicit gap range). AArch64 bytes are in file order (little-endian word), e.g. `mov w0, #1; ret` = `20 00 80 52 c0 03 5f d6`."
+                        },
+                        "section": { "type": "string", "description": "Optional: narrow to one section by name (e.g. `__text`)." },
+                        "limit": { "type": "integer", "minimum": 1, "description": "Cap on returned matches across all sections." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass bin-search ./libfoo.so --artifact libfoo.so --pattern '00 00 80 d2 c0 03 5f d6'",
+            },
         ],
     }
 }

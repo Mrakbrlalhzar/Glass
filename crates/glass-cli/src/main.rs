@@ -132,6 +132,14 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             *limit,
             format,
         )),
+        Cmd::BinSearch { path, artifact, pattern, section, limit } => Some(verbs::bin_search(
+            path.clone(),
+            artifact.clone(),
+            pattern.clone(),
+            section.clone(),
+            *limit,
+            format,
+        )),
         Cmd::Annotations { path } => Some(verbs::annotations(path.clone(), format)),
         Cmd::DbDump { path } => Some(verbs::db_dump_v2(path.clone(), format)),
         Cmd::SetRename { path, key_kind, key, method, name } => Some(verbs::set_rename(
@@ -359,6 +367,27 @@ enum Cmd {
         /// Minimum string length. Default 4.
         #[arg(long)]
         min: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Search native sections for a byte pattern. See
+    /// docs/BinSearch.md for the grammar. Examples:
+    ///   --pattern '20 00 80 d2 c0 03 5f d6'      # mov w0,#1 ; ret
+    ///   --pattern 'e? ?? ff * c0'                # nibble + gap
+    BinSearch {
+        path: PathBuf,
+        #[arg(long)]
+        artifact: String,
+        /// Pattern string: space-separated byte masks and gap
+        /// atoms. Wrap in single quotes to keep your shell from
+        /// expanding `?`.
+        #[arg(long)]
+        pattern: String,
+        /// Narrow to a single section by name (e.g. `__text`).
+        /// Otherwise scans every text + data section.
+        #[arg(long)]
+        section: Option<String>,
+        /// Cap on returned matches across all sections.
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -609,6 +638,7 @@ fn main() -> Result<()> {
         | Cmd::FieldRefs { .. }
         | Cmd::Search { .. }
         | Cmd::Strings { .. }
+        | Cmd::BinSearch { .. }
         | Cmd::Annotations { .. }
         | Cmd::DbDump { .. }
         | Cmd::SetRename { .. }
