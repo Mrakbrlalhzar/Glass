@@ -163,7 +163,7 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 
 ## Building
 
-Glass runs on **macOS** (the primary target, GPU-accelerated via Metal) and **Linux** (X11 or Wayland via `gpui_linux`). A Windows port is on the roadmap.
+Glass runs on **macOS 13+** (the primary target, GPU-accelerated via Metal — no extra SDK needed, the Metal framework ships with the OS) and **Linux** (X11 or Wayland via `gpui_linux`, Vulkan-backed). A Windows port is on the roadmap.
 
 There is a release prebuilt binary for macOS under Releases but if you need to build from source: the good news: it's two commands.
 
