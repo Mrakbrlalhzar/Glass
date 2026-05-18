@@ -392,30 +392,18 @@ pub fn render_listing_row_with(
 ) -> gpui::Stateful<gpui::Div> {
     match row {
         ListingRow::SymbolHeader { name } => {
-            // The SymbolHeader row merges two annotation slots:
-            //   - the Symbol-key (set via MCP / CLI's `--key-kind
-            //     symbol`); persists across symbol-map rebuilds.
-            //   - the Address-key at the symbol's entry address
-            //     (set by right-clicking the entry instruction in
-            //     the GUI). Per-facet, address wins if both set.
+            // SymbolHeader rows only show Symbol-keyed annotations
+            // (typically just a rename — those are set via MCP or
+            // `glass set-rename --key-kind symbol` and persist
+            // across symbol-map rebuilds). Address-keyed
+            // annotations show on the actual instruction row at
+            // the symbol's entry address instead — duplicating
+            // them on the header just gave us a stacked tint +
+            // double edge dot for the same logical entry.
             let symbol_annot = annotation_index(ctx).and_then(|idx| idx.at_symbol(name));
-            let addr_annot = ctx.and_then(|c| {
-                let idx = c.bundle.annotations.get(&c.artifact)?;
-                let sm = c.bundle.symbol_maps.get(&c.artifact)?;
-                let sym = sm.iter().find(|s| s.display_name == *name)?;
-                idx.at_address(sym.address)
-            });
-            // Borrow guard: keep both refs alive while we pick
-            // per-facet so the references stay valid.
-            let merged_rename = addr_annot
-                .and_then(|a| a.rename.as_deref())
-                .or_else(|| symbol_annot.and_then(|a| a.rename.as_deref()));
-            let merged_comment = addr_annot
-                .and_then(|a| a.comment.as_deref())
-                .or_else(|| symbol_annot.and_then(|a| a.comment.as_deref()));
-            let merged_colour = addr_annot
-                .and_then(|a| a.colour)
-                .or_else(|| symbol_annot.and_then(|a| a.colour));
+            let merged_rename = symbol_annot.and_then(|a| a.rename.as_deref());
+            let merged_comment = symbol_annot.and_then(|a| a.comment.as_deref());
+            let merged_colour = symbol_annot.and_then(|a| a.colour);
             let has_any = merged_rename.is_some()
                 || merged_comment.is_some()
                 || merged_colour.is_some();
