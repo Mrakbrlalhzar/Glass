@@ -129,7 +129,16 @@ impl Shell {
             )
         };
 
-        let placeholder = if self.palette_scope.is_some() {
+        // Placeholder reflects what the palette is being used for:
+        // an inline annotation edit (the edit chip is already
+        // visible above the input), a scoped result list, or
+        // bundle-wide search.
+        let placeholder = if let Some(edit) = self.annotation_edit.as_ref() {
+            match edit.facet {
+                crate::AnnotationFacet::Rename => "Type a new name, Enter to save…",
+                crate::AnnotationFacet::Comment => "Type a comment, Enter to save…",
+            }
+        } else if self.palette_scope.is_some() {
             "filter results…"
         } else {
             "search symbols, classes, strings…"
@@ -149,7 +158,7 @@ impl Shell {
                 div()
                     .text_color(dim)
                     .text_base()
-                    .child("⌕"),
+                    .child(if self.annotation_edit.is_some() { "✎" } else { "⌕" }),
             )
             .child(
                 div()

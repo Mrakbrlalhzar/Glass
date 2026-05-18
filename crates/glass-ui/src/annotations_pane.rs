@@ -41,11 +41,9 @@ const PANE_CONTENT_WIDTH: f32 = 900.;
 /// scroll.
 const PANE_DELETE_GUTTER: f32 = 28.;
 const PANE_ROW_HEIGHT: f32 = 40.;
-const PANE_HEADER_HEIGHT: f32 = 22.;
 
 #[derive(Clone)]
 enum PaneRow {
-    ArtifactHeader { label: SharedString },
     Entry {
         artifact: ArtifactId,
         key: AnnotationKey,
@@ -166,139 +164,131 @@ fn render_pane_row(
     handle: gpui::WeakEntity<Shell>,
     border: gpui::Rgba,
 ) -> gpui::AnyElement {
-    match row {
-        PaneRow::ArtifactHeader { label } => div()
-            .h(px(PANE_HEADER_HEIGHT))
-            .px_3()
-            .pt_2()
-            .text_xs()
-            .text_color(rgb(0x808088))
-            .child(label.clone())
-            .into_any_element(),
-        PaneRow::Entry {
-            artifact,
-            key,
-            primary,
-            facets,
-            dot_colour,
-        } => {
-            let dot: gpui::Background = match dot_colour {
-                Some(c) => gpui::rgba(*c).into(),
-                None => rgb(0x4f7cff).into(),
-            };
+    let PaneRow::Entry {
+        artifact,
+        key,
+        primary,
+        facets,
+        dot_colour,
+    } = row;
+    let dot: gpui::Background = match dot_colour {
+        Some(c) => gpui::rgba(*c).into(),
+        None => rgb(0x4f7cff).into(),
+    };
 
-            // Inner scrolling content area: dot + two-line text
-            // column. Sized at PANE_CONTENT_WIDTH and absolute-
-            // positioned with `left(-h_offset)` so it slides under
-            // the clipped outer row.
-            let inner = div()
-                .absolute()
-                .top_0()
-                .left(-h_offset)
-                .h(px(PANE_ROW_HEIGHT))
-                .w(px(PANE_CONTENT_WIDTH))
-                .px_3()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .flex_shrink_0()
-                        .bg(dot),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xd6d6d6))
-                                .whitespace_nowrap()
-                                .child(primary.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(COLOUR_COMMENT))
-                                .whitespace_nowrap()
-                                .child(facets.clone()),
-                        ),
-                );
-
-            // Outer clipped row: holds the scrolling inner +
-            // pinned delete icon + bottom divider.
-            let nav_handle = handle.clone();
-            let del_handle = handle;
-            let nav_artifact = artifact.clone();
-            let nav_key = key.clone();
-            let del_artifact = artifact.clone();
-            let del_key = key.clone();
-
-            let delete_icon = div()
-                .id(("annot-delete", index))
-                .absolute()
-                .top_0()
-                .right_0()
-                .h(px(PANE_ROW_HEIGHT))
-                .w(px(PANE_DELETE_GUTTER))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(rgb(0x808088))
-                .cursor_pointer()
-                .hover(|this| this.text_color(rgb(0xff8080)).bg(rgb(0x2e2e34)))
-                .child("×")
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    move |_ev, _w, cx: &mut App| {
-                        cx.stop_propagation();
-                        if let Some(entity) = del_handle.upgrade() {
-                            let artifact = del_artifact.clone();
-                            let key = del_key.clone();
-                            cx.update_entity(&entity, |shell, cx| {
-                                shell.clear_annotation_at(artifact, key, cx);
-                            });
-                        }
-                    },
-                );
-
+    // Inner scrolling content area: dot + two-line text column.
+    // Sized at PANE_CONTENT_WIDTH and absolute-positioned with
+    // `left(-h_offset)` so it slides under the clipped outer row.
+    let inner = div()
+        .absolute()
+        .top_0()
+        .left(-h_offset)
+        .h(px(PANE_ROW_HEIGHT))
+        .w(px(PANE_CONTENT_WIDTH))
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
             div()
-                .id(("annot-row", index))
-                .h(px(PANE_ROW_HEIGHT))
-                .w_full()
-                .relative()
-                .overflow_hidden()
-                .border_b_1()
-                .border_color(border)
-                .cursor_pointer()
-                .hover(|this| this.bg(rgb(0x2e2e34)))
-                .child(inner)
-                .child(delete_icon)
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    move |_ev, _w, cx: &mut App| {
-                        let Some(entity) = nav_handle.upgrade() else { return };
-                        let artifact = nav_artifact.clone();
-                        let key = nav_key.clone();
-                        cx.update_entity(&entity, |shell, cx| {
-                            shell.navigate_to_annotation(artifact, key, cx);
-                        });
-                    },
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(dot),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xd6d6d6))
+                        .whitespace_nowrap()
+                        .child(primary.clone()),
                 )
-                .into_any_element()
-        }
-    }
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(COLOUR_COMMENT))
+                        .whitespace_nowrap()
+                        .child(facets.clone()),
+                ),
+        );
+
+    // Outer clipped row: holds the scrolling inner + pinned
+    // delete icon + bottom divider.
+    let nav_handle = handle.clone();
+    let del_handle = handle;
+    let nav_artifact = artifact.clone();
+    let nav_key = key.clone();
+    let del_artifact = artifact.clone();
+    let del_key = key.clone();
+
+    let delete_icon = div()
+        .id(("annot-delete", index))
+        .absolute()
+        .top_0()
+        .right_0()
+        .h(px(PANE_ROW_HEIGHT))
+        .w(px(PANE_DELETE_GUTTER))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(rgb(0x808088))
+        .cursor_pointer()
+        .hover(|this| this.text_color(rgb(0xff8080)).bg(rgb(0x2e2e34)))
+        .child("×")
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |_ev, _w, cx: &mut App| {
+                cx.stop_propagation();
+                if let Some(entity) = del_handle.upgrade() {
+                    let artifact = del_artifact.clone();
+                    let key = del_key.clone();
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.clear_annotation_at(artifact, key, cx);
+                    });
+                }
+            },
+        );
+
+    div()
+        .id(("annot-row", index))
+        .h(px(PANE_ROW_HEIGHT))
+        .w_full()
+        .relative()
+        .overflow_hidden()
+        .border_b_1()
+        .border_color(border)
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(0x2e2e34)))
+        .child(inner)
+        .child(delete_icon)
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |_ev, _w, cx: &mut App| {
+                let Some(entity) = nav_handle.upgrade() else { return };
+                let artifact = nav_artifact.clone();
+                let key = nav_key.clone();
+                cx.update_entity(&entity, |shell, cx| {
+                    shell.navigate_to_annotation(artifact, key, cx);
+                });
+            },
+        )
+        .into_any_element()
 }
 
 fn build_rows(bundle: &LoadedBundle) -> Vec<PaneRow> {
+    // Drop the "Artifact <hash>" grouping headers — most bundles
+    // have one or two artifacts and the hash isn't useful at a
+    // glance. Just emit Entry rows; the artifact id is still
+    // carried per row so click handlers know which one to use.
     let mut out: Vec<PaneRow> = Vec::new();
     for aid in bundle.artifact_ids.iter() {
         let Some(idx) = bundle.annotations.get(aid) else {
@@ -307,11 +297,6 @@ fn build_rows(bundle: &LoadedBundle) -> Vec<PaneRow> {
         if idx.is_empty() {
             continue;
         }
-        let label = format!("{}", aid);
-        let short = label.chars().take(10).collect::<String>();
-        out.push(PaneRow::ArtifactHeader {
-            label: SharedString::from(format!("Artifact {short}")),
-        });
         let mut entries: Vec<_> = idx.iter().collect();
         entries.sort_by(|(a, _), (b, _)| sort_key(a).cmp(&sort_key(b)));
         for (k, v) in entries {
