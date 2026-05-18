@@ -927,22 +927,13 @@ impl Shell {
                 label: SharedString::from(format!("0x{addr:x}")),
             });
         }
-        // 2) Annotation items. Most-specific key wins (matches the
-        //    renderer's precedence): when right-clicking at the
-        //    entry of a covering symbol, rename targets the symbol
-        //    by name (so renames survive symbol-map churn between
-        //    builds); on a row inside a function or a row with no
-        //    covering symbol, annotations target the address.
-        let (annot_key, annot_label) = match covering {
-            Some(sym) if sym.address == addr => (
-                glass_db::AnnotationKey::Symbol(sym.display_name.clone()),
-                sym.display_name.clone(),
-            ),
-            _ => (
-                glass_db::AnnotationKey::Address(addr),
-                format!("0x{addr:x}"),
-            ),
-        };
+        // 2) Annotation items. Always address-keyed: the user
+        //    right-clicked a specific row, so that row is the
+        //    intent. Function-level tagging is still possible —
+        //    just right-click the function's entry row (its
+        //    address is the same one the SymbolHeader covers).
+        let (annot_key, annot_label) =
+            (glass_db::AnnotationKey::Address(addr), format!("0x{addr:x}"));
         let existing = bundle
             .annotations
             .get(&artifact)

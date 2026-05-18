@@ -392,13 +392,34 @@ pub fn render_listing_row_with(
 ) -> gpui::Stateful<gpui::Div> {
     match row {
         ListingRow::SymbolHeader { name } => {
-            // Symbol-keyed annotation: applies all three facets to
-            // the header row only (renames also rewrite the
-            // displayed name; comment + colour + edge dot read the
-            // same as on an instruction row).
-            let annotation =
-                annotation_index(ctx).and_then(|idx| idx.at_symbol(name));
-            let renamed = annotation.and_then(|a| a.rename.as_ref());
+            // The SymbolHeader row merges two annotation slots:
+            //   - the Symbol-key (set via MCP / CLI's `--key-kind
+            //     symbol`); persists across symbol-map rebuilds.
+            //   - the Address-key at the symbol's entry address
+            //     (set by right-clicking the entry instruction in
+            //     the GUI). Per-facet, address wins if both set.
+            let symbol_annot = annotation_index(ctx).and_then(|idx| idx.at_symbol(name));
+            let addr_annot = ctx.and_then(|c| {
+                let idx = c.bundle.annotations.get(&c.artifact)?;
+                let sm = c.bundle.symbol_maps.get(&c.artifact)?;
+                let sym = sm.iter().find(|s| s.display_name == *name)?;
+                idx.at_address(sym.address)
+            });
+            // Borrow guard: keep both refs alive while we pick
+            // per-facet so the references stay valid.
+            let merged_rename = addr_annot
+                .and_then(|a| a.rename.as_deref())
+                .or_else(|| symbol_annot.and_then(|a| a.rename.as_deref()));
+            let merged_comment = addr_annot
+                .and_then(|a| a.comment.as_deref())
+                .or_else(|| symbol_annot.and_then(|a| a.comment.as_deref()));
+            let merged_colour = addr_annot
+                .and_then(|a| a.colour)
+                .or_else(|| symbol_annot.and_then(|a| a.colour));
+            let has_any = merged_rename.is_some()
+                || merged_comment.is_some()
+                || merged_colour.is_some();
+            let renamed = merged_rename;
             let mut inner = div()
                 .flex()
                 .flex_row()
@@ -429,7 +450,7 @@ pub fn render_listing_row_with(
                         .text_color(rgb(COLOUR_SYMBOL_HEADER))
                         .child(format!("{name}:"))
                 });
-            if let Some(comment) = annotation.and_then(|a| a.comment.as_deref()) {
+            if let Some(comment) = merged_comment {
                 inner = inner.child(
                     div()
                         .ml_4()
@@ -437,8 +458,8 @@ pub fn render_listing_row_with(
                         .child(SharedString::from(format!("; {comment}"))),
                 );
             }
-            let dot_rgba = if annotation.is_some() {
-                Some(annotation.and_then(|a| a.colour).unwrap_or(0x4f7cffff))
+            let dot_rgba = if has_any {
+                Some(merged_colour.unwrap_or(0x4f7cffff))
             } else {
                 None
             };
@@ -450,7 +471,7 @@ pub fn render_listing_row_with(
                 ctx,
                 None,
                 true,
-                annotation.and_then(|a| a.colour),
+                merged_colour,
                 dot_rgba,
             )
         }
