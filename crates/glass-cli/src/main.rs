@@ -482,10 +482,16 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // Logs go to stderr so they never corrupt the JSON / NDJSON
+    // output on stdout (automation verbs + the MCP server both
+    // need stdout to be machine-clean). Default level is `warn`
+    // — set `RUST_LOG=info` (or any envfilter expression) to
+    // see the noisier per-load progress lines.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+                .unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
