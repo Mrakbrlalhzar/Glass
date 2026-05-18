@@ -775,7 +775,7 @@ fn db_inject_tab(path: PathBuf, class_jni: String) -> Result<()> {
         source_path: None,
         annotations_pane_open: false,
     });
-    rec.open_tabs.push(glass_db::TabState::SmaliClass { class_jni });
+    rec.open_tabs.push(glass_db::TabState::SmaliClass { class_jni, scroll_line: 0 });
     rec.active_tab = Some(rec.open_tabs.len() - 1);
     db.save_bundle(id, rec);
     db.flush()?;

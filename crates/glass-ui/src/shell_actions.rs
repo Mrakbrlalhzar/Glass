@@ -239,6 +239,57 @@ impl Shell {
                             zoom: view.zoom(),
                         };
                     }
+                    // Listing / Hex / Smali: capture the scroll
+                    // position so reopening returns to where the
+                    // user was reading rather than the top.
+                    let top_row = t.scroll.logical_scroll_top().item_ix;
+                    match &t.kind {
+                        TabKind::Listing { artifact, section } => {
+                            let scroll_top = t
+                                .listing_rows
+                                .as_ref()
+                                .and_then(|rows| {
+                                    rows.get(top_row).and_then(|r| match r {
+                                        crate::ListingRow::Instruction { address, .. } => {
+                                            Some(*address)
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                                .unwrap_or(0);
+                            return glass_db::TabState::Listing {
+                                artifact: artifact.clone(),
+                                section: section.clone(),
+                                scroll_top,
+                            };
+                        }
+                        TabKind::Hex { artifact, section } => {
+                            let scroll_top = t
+                                .hex_rows
+                                .as_ref()
+                                .and_then(|rows| {
+                                    rows.get(top_row).and_then(|r| match r {
+                                        crate::hex::HexRow::Bytes { address, .. } => {
+                                            Some(*address)
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                                .unwrap_or(0);
+                            return glass_db::TabState::Hex {
+                                artifact: artifact.clone(),
+                                section: section.clone(),
+                                scroll_top,
+                            };
+                        }
+                        TabKind::SmaliClass { class_jni } => {
+                            return glass_db::TabState::SmaliClass {
+                                class_jni: class_jni.clone(),
+                                scroll_line: top_row as u32,
+                            };
+                        }
+                        _ => {}
+                    }
                     t.kind.to_state()
                 })
                 .collect(),
@@ -305,32 +356,47 @@ impl Shell {
                 ));
                 continue;
             }
-            let kind = match state {
-                glass_db::TabState::SmaliClass { class_jni } => {
-                    TabKind::SmaliClass { class_jni: class_jni.clone() }
-                }
-                glass_db::TabState::Listing { artifact, section, .. } => {
+            // Capture both the kind and the persisted scroll
+            // anchor (address for listing/hex, line index for
+            // smali). Seed the new tab's pending_* field so the
+            // first paint scrolls to where the user left off.
+            let (kind, pending_addr, pending_line) = match state {
+                glass_db::TabState::SmaliClass { class_jni, scroll_line } => (
+                    TabKind::SmaliClass { class_jni: class_jni.clone() },
+                    None,
+                    if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
+                ),
+                glass_db::TabState::Listing { artifact, section, scroll_top } => (
                     TabKind::Listing {
                         artifact: artifact.clone(),
                         section: section.clone(),
-                    }
-                }
-                glass_db::TabState::Hex { artifact, section, .. } => {
+                    },
+                    if *scroll_top == 0 { None } else { Some(*scroll_top) },
+                    None,
+                ),
+                glass_db::TabState::Hex { artifact, section, scroll_top } => (
                     TabKind::Hex {
                         artifact: artifact.clone(),
                         section: section.clone(),
-                    }
-                }
-                glass_db::TabState::SectionMap { artifact } => {
-                    TabKind::SectionMap { artifact: artifact.clone() }
-                }
+                    },
+                    if *scroll_top == 0 { None } else { Some(*scroll_top) },
+                    None,
+                ),
+                glass_db::TabState::SectionMap { artifact } => (
+                    TabKind::SectionMap { artifact: artifact.clone() },
+                    None,
+                    None,
+                ),
                 // Unknown view kinds (Symbols, Strings, Manifest) are
                 // silently dropped until their runtime lands.
                 _ => continue,
             };
             // Only restore tabs whose target still exists in this bundle.
             if bundle.resolve(&kind.to_state()).is_some() {
-                self.tabs.push(Tab::new(kind));
+                let mut tab = Tab::new(kind);
+                tab.pending_scroll_addr = pending_addr;
+                tab.pending_smali_scroll_line = pending_line;
+                self.tabs.push(tab);
             }
         }
         if let Some(idx) = rec.active_tab {
@@ -1843,6 +1909,7 @@ impl Shell {
             | glass_db::AnnotationKey::Method(class_jni, _) => {
                 let leaf = bundle.resolve(&glass_db::TabState::SmaliClass {
                     class_jni: class_jni.clone(),
+                    scroll_line: 0,
                 });
                 if let Some(leaf) = leaf {
                     self.open_leaf(leaf, cx);
@@ -1860,6 +1927,7 @@ impl Shell {
                     // index may not have been built (e.g. native).
                     if let Some(leaf) = bundle.resolve(&glass_db::TabState::SmaliClass {
                         class_jni: class_jni.clone(),
+                        scroll_line: 0,
                     }) {
                         self.open_leaf(leaf, cx);
                     }
@@ -1939,6 +2007,7 @@ impl Shell {
                 let leaf = self.bundle().and_then(|b| {
                     b.resolve(&glass_db::TabState::SmaliClass {
                         class_jni: class_jni.clone(),
+                        scroll_line: 0,
                     })
                 });
                 if let Some(leaf) = leaf {
@@ -1950,6 +2019,7 @@ impl Shell {
                 let leaf = self.bundle().and_then(|b| {
                     b.resolve(&glass_db::TabState::SmaliClass {
                         class_jni: class_jni.clone(),
+                        scroll_line: 0,
                     })
                 });
                 if let Some(leaf) = leaf {

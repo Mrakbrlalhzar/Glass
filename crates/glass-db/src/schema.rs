@@ -71,6 +71,11 @@ pub enum TabState {
     /// (e.g. "Lcom/example/Foo;") — stable across DEX shuffles.
     SmaliClass {
         class_jni: String,
+        /// Line index the user was scrolled to when the tab was
+        /// last saved. 0 = top. `#[serde(default)]` so v2 records
+        /// that pre-date this field still load.
+        #[serde(default)]
+        scroll_line: u32,
     },
     /// Linear AArch64 listing over a section of a native artifact.
     Listing {

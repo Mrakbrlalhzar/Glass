@@ -553,6 +553,7 @@ pub fn render_two_pane(
                                                         .resolve(
                                                             &glass_db::TabState::SmaliClass {
                                                                 class_jni: jni.to_string(),
+                                                                scroll_line: 0,
                                                             },
                                                         )
                                                         .is_some();
@@ -597,6 +598,7 @@ pub fn render_two_pane(
                                                                                     b.resolve(
                                                                                         &glass_db::TabState::SmaliClass {
                                                                                             class_jni: jni.clone(),
+                                                                                            scroll_line: 0,
                                                                                         },
                                                                                     )
                                                                                 })

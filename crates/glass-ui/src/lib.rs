@@ -406,7 +406,7 @@ impl LoadedBundle {
     pub fn resolve(&self, state: &glass_db::TabState) -> Option<LeafId> {
         use glass_db::TabState as TS;
         match state {
-            TS::SmaliClass { class_jni } => self.kinds.iter().enumerate().find_map(|(i, k)| {
+            TS::SmaliClass { class_jni, .. } => self.kinds.iter().enumerate().find_map(|(i, k)| {
                 match k {
                     LeafKind::SmaliClass { class_jni: this } if this == class_jni => {
                         Some(LeafId(i))
@@ -710,6 +710,7 @@ impl TabKind {
         match self {
             TabKind::SmaliClass { class_jni } => glass_db::TabState::SmaliClass {
                 class_jni: class_jni.clone(),
+                scroll_line: 0,
             },
             TabKind::Listing { artifact, section } => glass_db::TabState::Listing {
                 artifact: artifact.clone(),
