@@ -308,7 +308,13 @@ pub fn build_listing_rows(
 
         // Resolve any Address chunks (branch/page targets) to a
         // friendlier label in-place. Preference order:
-        //   1. Covering symbol → "name" or "name+0xoff".
+        //   1. Covering symbol *whose section is the same as the
+        //      target*. A symbol with non-zero `size` from the
+        //      symtab can claim a range that overruns its real
+        //      extent — common for unwind tables like
+        //      `GCC_except_table0` — and ends up labelling
+        //      addresses in completely different sections. Reject
+        //      such cross-section "coverage".
         //   2. Containing section → "__sectname+0xoff". For ADRP
         //      operands especially, the operand is a page address
         //      that often has no covering symbol; the section it
@@ -324,15 +330,30 @@ pub fn build_listing_rows(
                 continue;
             }
             let Some(t) = op.target else { continue };
-            if let Some(sym) = symbols.covering(t) {
+            let target_section = data.section_containing(t);
+            let symbol_label = symbols.covering(t).and_then(|sym| {
+                let sym_section = data.section_containing(sym.address);
+                let same_section = match (target_section, sym_section) {
+                    (Some((tn, _)), Some((sn, _))) => tn == sn,
+                    // If we don't know either section, fall back to
+                    // trusting the symbol — better than always
+                    // dropping the label.
+                    _ => true,
+                };
+                if !same_section {
+                    return None;
+                }
                 let off = t - sym.address;
-                op.text = if off == 0 {
+                Some(if off == 0 {
                     sym.display_name.clone()
                 } else {
                     format!("{}+0x{off:x}", sym.display_name)
-                };
+                })
+            });
+            if let Some(label) = symbol_label {
+                op.text = label;
                 named_in_operand = true;
-            } else if let Some((sec_name, sec_base)) = data.section_containing(t) {
+            } else if let Some((sec_name, sec_base)) = target_section {
                 let off = t - sec_base;
                 op.text = if off == 0 {
                     sec_name.to_string()
@@ -346,21 +367,32 @@ pub fn build_listing_rows(
         // target. The operand-substitution above also applies a
         // section-name fallback, so a comment here would just
         // restate the section label — keep this branch for
-        // covering-symbol cases only.
+        // covering-symbol cases only, and apply the same
+        // same-section sanity check (a symbol from a different
+        // section is treating its size attribute as overrunning).
         let comment = if named_in_operand {
             SharedString::from("")
         } else {
-            match target_addr.and_then(|a| symbols.covering(a)) {
-                Some(s) => {
-                    let off = target_addr.unwrap() - s.address;
-                    if off == 0 {
-                        SharedString::from(format!("; {}", s.display_name))
-                    } else {
-                        SharedString::from(format!("; {} + 0x{off:x}", s.display_name))
+            target_addr
+                .and_then(|t| {
+                    let sym = symbols.covering(t)?;
+                    let target_section = data.section_containing(t);
+                    let sym_section = data.section_containing(sym.address);
+                    let same_section = match (target_section, sym_section) {
+                        (Some((tn, _)), Some((sn, _))) => tn == sn,
+                        _ => true,
+                    };
+                    if !same_section {
+                        return None;
                     }
-                }
-                None => SharedString::from(""),
-            }
+                    let off = t - sym.address;
+                    Some(if off == 0 {
+                        SharedString::from(format!("; {}", sym.display_name))
+                    } else {
+                        SharedString::from(format!("; {} + 0x{off:x}", sym.display_name))
+                    })
+                })
+                .unwrap_or_else(|| SharedString::from(""))
         };
 
         // Pair / direct-address comment. Cases (first match wins):
