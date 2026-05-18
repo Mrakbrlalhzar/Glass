@@ -303,6 +303,16 @@ pub fn render_hex_row(
             ctx,
         ),
         HexRow::Bytes { address, bytes } => {
+            // Scan the 16 byte addresses for any annotation so we
+            // can tint the row + show the edge dot. The first
+            // matching annotation wins (sorted by ascending byte
+            // index within the row).
+            let row_annotation = annotation_index(ctx).and_then(|idx| {
+                (0..16).find_map(|i| {
+                    let byte_addr = address + i as u64;
+                    idx.at_address(byte_addr).map(|a| (byte_addr, a))
+                })
+            });
             let mut hex_cells = div()
                 .w(px(HEX_BYTES_WIDTH))
                 .flex_shrink_0()
@@ -378,7 +388,29 @@ pub fn render_hex_row(
                 )
                 .child(hex_cells)
                 .child(ascii_cells);
-            h_shift(inner, h_offset, HEX_ROW_HEIGHT, row_index, ctx)
+            // Right-click on the row → annotation menu for the
+            // currently-selected byte, falling back to the row's
+            // leftmost byte. Tint + edge dot reflect whichever
+            // byte in the row has an annotation (first match).
+            let click_addr = selected_byte_addr
+                .filter(|a| *a >= *address && *a < *address + 16)
+                .unwrap_or(*address);
+            let tint_rgba = row_annotation.and_then(|(_, a)| a.colour);
+            let dot_rgba = if let Some((_, ann)) = row_annotation {
+                Some(ann.colour.unwrap_or(0x4f7cffff))
+            } else {
+                None
+            };
+            h_shift_with_addr_annotated(
+                inner,
+                h_offset,
+                HEX_ROW_HEIGHT,
+                row_index,
+                ctx,
+                Some(click_addr),
+                tint_rgba,
+                dot_rgba,
+            )
         }
     };
     row_div
