@@ -163,9 +163,9 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 
 ## Building
 
-Glass is currently **macOS-only** (the UI is built on `gpui` + Metal). Linux and Windows ports are possible and are on the near-term roadmap.
+Glass runs on **macOS** (the primary target, GPU-accelerated via Metal) and **Linux** (X11 or Wayland via `gpui_linux`). A Windows port is on the roadmap.
 
-There is a release prebuilt binary for MacOS under Releases but if you need to build from source: the good news: it's two commands.
+There is a release prebuilt binary for macOS under Releases but if you need to build from source: the good news: it's two commands.
 
 1. **Install Rust** (if you don't already have it):
 
@@ -173,7 +173,15 @@ There is a release prebuilt binary for MacOS under Releases but if you need to b
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
-2. **Clone and build**:
+2. **Linux only — install gpui's native dependencies.** The easiest way is to run Zed's setup script, which knows about apt / dnf / pacman / etc:
+
+   ```sh
+   curl -sSL https://raw.githubusercontent.com/zed-industries/zed/main/script/linux | bash
+   ```
+
+   This pulls in `libxkbcommon-dev`, the Wayland and XCB headers, Vulkan, ALSA, and the rest of the toolchain `gpui_linux` needs to link. Without these the build fails at link time with missing `xkbcommon` / `wayland-client` symbols.
+
+3. **Clone and build**:
 
    ```sh
    git clone https://github.com/azw413/Glass.git
@@ -184,7 +192,7 @@ There is a release prebuilt binary for MacOS under Releases but if you need to b
    
    The first build will compile `gpui` and friends and will take several minutes. Subsequent builds are fast.
    
-3. **Run it**:
+4. **Run it**:
 
    ```sh
    # Open the GUI on an Android APK or iOS IPA — no subcommand needed.
