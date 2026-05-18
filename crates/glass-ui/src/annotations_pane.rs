@@ -136,17 +136,31 @@ pub fn render_annotations_pane(
                                     .bg(dot),
                             )
                             .child(
+                                // Two-line label column. `overflow_x_scroll`
+                                // lets long renames / comments scroll
+                                // horizontally inside the pane rather
+                                // than truncating; `whitespace_nowrap`
+                                // on the text children keeps each line
+                                // on one row.
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
-                                    .overflow_hidden()
+                                    .id(("annot-row-inner", index))
+                                    .overflow_x_scroll()
                                     .flex()
                                     .flex_col()
-                                    .child(div().text_sm().text_color(rgb(0xd6d6d6)).child(primary))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0xd6d6d6))
+                                            .whitespace_nowrap()
+                                            .child(primary),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(COLOUR_COMMENT))
+                                            .whitespace_nowrap()
                                             .child(facets),
                                     ),
                             )
@@ -245,22 +259,8 @@ fn primary_label(k: &AnnotationKey, rename: Option<&str>) -> String {
 }
 
 fn facet_label(v: &glass_db::Annotation) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(c) = &v.comment {
-        // Truncate long comments so the pane stays scannable.
-        let snippet: String = if c.len() > 60 {
-            format!("{}…", &c[..60])
-        } else {
-            c.clone()
-        };
-        parts.push(snippet);
-    }
-    if let Some(col) = v.colour {
-        parts.push(format!("colour 0x{col:08x}"));
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        parts.join("  ·  ")
-    }
+    // Only the comment goes into the secondary line — the dot on
+    // the left already encodes the colour, and the primary line
+    // shows the rename. Wide rows get a horizontal scrollbar.
+    v.comment.clone().unwrap_or_default()
 }
