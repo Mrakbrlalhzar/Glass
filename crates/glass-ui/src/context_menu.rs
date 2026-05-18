@@ -68,14 +68,18 @@ pub enum ContextMenuItem {
         label: SharedString,
     },
     /// "Rename…" / "Edit rename…" — opens the palette as an inline
-    /// editor pre-populated with the current value.
+    /// editor pre-populated with the current value. Currently
+    /// unused: the context menu doesn't emit Rename items anymore
+    /// (we found they overlapped too much with comments in
+    /// practice). The variant + dispatch are kept so that CLI /
+    /// MCP `set-rename` writes still display correctly in the
+    /// listing and so we can resurrect the menu item cheaply if a
+    /// real use case appears.
+    #[allow(dead_code)]
     EditRename {
         artifact: glass_db::ArtifactId,
         key: glass_db::AnnotationKey,
-        /// Existing value, or empty string for the "add" case.
         current: String,
-        /// What's shown in the menu: "Rename…" when current is
-        /// empty, "Edit rename…" otherwise.
         label: SharedString,
     },
     /// "Add comment…" / "Edit comment…" — same UX as EditRename

@@ -951,22 +951,11 @@ impl Shell {
             })
             .cloned()
             .unwrap_or_default();
-        let rename_label = if existing.rename.is_some() {
-            "Edit rename…"
-        } else {
-            "Rename…"
-        };
         let comment_label = if existing.comment.is_some() {
             "Edit comment…"
         } else {
             "Add comment…"
         };
-        items.push(ContextMenuItem::EditRename {
-            artifact: artifact.clone(),
-            key: annot_key.clone(),
-            current: existing.rename.clone().unwrap_or_default(),
-            label: SharedString::from(rename_label),
-        });
         items.push(ContextMenuItem::EditComment {
             artifact: artifact.clone(),
             key: annot_key.clone(),
@@ -1044,11 +1033,6 @@ impl Shell {
                 .and_then(|idx| idx.at_method_line(&method_key, line_offset))
                 .cloned()
                 .unwrap_or_default();
-            let rename_label = if existing.rename.is_some() {
-                "Edit rename…"
-            } else {
-                "Rename…"
-            };
             let comment_label = if existing.comment.is_some() {
                 "Edit comment…"
             } else {
@@ -1062,12 +1046,6 @@ impl Shell {
             } else {
                 format!(" (line {line_offset})")
             };
-            items.push(ContextMenuItem::EditRename {
-                artifact: artifact.clone(),
-                key: key.clone(),
-                current: existing.rename.clone().unwrap_or_default(),
-                label: SharedString::from(format!("{rename_label}{line_chip}")),
-            });
             items.push(ContextMenuItem::EditComment {
                 artifact: artifact.clone(),
                 key: key.clone(),
@@ -1127,23 +1105,12 @@ impl Shell {
             .and_then(|idx| idx.at_class(&class_jni))
             .cloned()
             .unwrap_or_default();
-        let rename_label = if existing.rename.is_some() {
-            "Edit rename…"
-        } else {
-            "Rename…"
-        };
         let comment_label = if existing.comment.is_some() {
             "Edit comment…"
         } else {
             "Add comment…"
         };
         let mut items = vec![
-            ContextMenuItem::EditRename {
-                artifact: artifact.clone(),
-                key: key.clone(),
-                current: existing.rename.clone().unwrap_or_default(),
-                label: SharedString::from(rename_label),
-            },
             ContextMenuItem::EditComment {
                 artifact: artifact.clone(),
                 key: key.clone(),
