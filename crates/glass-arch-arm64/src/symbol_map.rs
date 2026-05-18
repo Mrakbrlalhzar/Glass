@@ -227,14 +227,29 @@ impl SymbolMap {
         self.by_address.range(start..end).map(|(_, s)| s)
     }
 
-    /// The symbol whose extent contains `addr`, if any. Falls back to the
-    /// nearest preceding symbol — useful in stripped binaries where
-    /// `size` is zero and the FDE just gives us start points.
+    /// The symbol whose extent contains `addr`, if any.
+    ///
+    /// Sized symbols: returned when `addr` falls inside `[address,
+    /// address + size)`. Size-0 *function* symbols (typically
+    /// stripped binaries where symtab entries lack size info)
+    /// fall back to the nearest preceding entry — useful for
+    /// labelling instructions inside such a function. Size-0
+    /// *data* symbols don't get that treatment: a zero-size
+    /// `GCC_except_table0` shouldn't claim coverage of every
+    /// address after it, which used to mislabel addresses in
+    /// later sections (e.g. `__cstring`) as
+    /// `GCC_except_table0+0x…`.
     pub fn covering(&self, addr: u64) -> Option<&Symbol> {
         if let Some((_, sym)) = self.by_address.range(..=addr).next_back() {
-            // If the symbol has a known size, only return it when the
-            // address really falls inside.
-            if sym.size == 0 || addr < sym.address + sym.size {
+            if sym.size > 0 {
+                if addr < sym.address + sym.size {
+                    return Some(sym);
+                }
+            } else if matches!(sym.kind, SymbolKind::Function) {
+                // Stripped-function fallback: only for code.
+                return Some(sym);
+            } else if sym.address == addr {
+                // Point coverage for size-0 data symbols.
                 return Some(sym);
             }
         }
