@@ -1832,9 +1832,13 @@ impl Shell {
             }
             crate::PaletteMode::Binary => {
                 self.palette_bin_query.push_str(s);
-                // Clear stale error / result on next keystroke
-                // so the input doesn't lie about what's loaded.
+                // Editing the pattern invalidates the displayed
+                // result set — drop it so the table doesn't show
+                // matches for a stale query while the user is
+                // still typing. Same for the error.
+                self.palette_bin_results = None;
                 self.palette_bin_error = None;
+                self.palette_selected = 0;
             }
         }
         cx.notify();
@@ -1849,7 +1853,9 @@ impl Shell {
             }
             crate::PaletteMode::Binary => {
                 self.palette_bin_query.pop();
+                self.palette_bin_results = None;
                 self.palette_bin_error = None;
+                self.palette_selected = 0;
             }
         }
         cx.notify();

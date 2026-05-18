@@ -464,13 +464,83 @@ impl Shell {
                     "{} of {} matches",
                     result.shown, result.total
                 ));
+                let row_renderer = {
+                    let matches = matches.clone();
+                    let weak = weak.clone();
+                    move |index: usize, _w: &mut gpui::Window, _cx: &mut gpui::App| {
+                        let Some(m) = matches.get(index) else {
+                            return div().into_any();
+                        };
+                        let is_sel = index == selected;
+                        let bg = if is_sel { accent } else { rgb(0x00000000) };
+                        let weak = weak.clone();
+                        let section = SharedString::from(m.section.clone());
+                        let address = SharedString::from(m.address.clone());
+                        let preview = SharedString::from(m.preview.clone());
+                        div()
+                            .id(("bin-row", index))
+                            .h(px(22.))
+                            .flex_shrink_0()
+                            .w_full()
+                            .px_3()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_4()
+                            .bg(bg)
+                            .text_sm()
+                            .font_family("Courier New")
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .w(px(140.))
+                                    .flex_shrink_0()
+                                    .text_color(rgb(0xa0a0a8))
+                                    .child(section),
+                            )
+                            .child(
+                                div()
+                                    .w(px(160.))
+                                    .flex_shrink_0()
+                                    .text_color(rgb(0xb0c8ff))
+                                    .child(address),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .text_color(rgb(0xd6d6d6))
+                                    .child(preview),
+                            )
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                move |_ev, _w, cx: &mut App| {
+                                    if let Some(entity) = weak.upgrade() {
+                                        cx.update_entity(&entity, |shell, cx| {
+                                            shell.palette_selected = index;
+                                            shell.palette_bin_activate(cx);
+                                        });
+                                    }
+                                },
+                            )
+                            .into_any()
+                    }
+                };
+                // Flex-1 + min-h-0 lets the list shrink inside
+                // the card's bounded height so its own internal
+                // virtualization runs against a finite viewport
+                // — without min_h_0 the list refuses to shrink
+                // below its preferred (content) height and the
+                // viewport ends up as tall as the row count.
                 div()
                     .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .h(px(20.))
+                            .flex_shrink_0()
                             .px_3()
                             .pt_1()
                             .text_xs()
@@ -478,65 +548,10 @@ impl Shell {
                             .child(header),
                     )
                     .child(
-                        list(state, {
-                            let matches = matches.clone();
-                            move |index, _w, _cx| {
-                                let Some(m) = matches.get(index) else {
-                                    return div().into_any();
-                                };
-                                let is_sel = index == selected;
-                                let bg = if is_sel {
-                                    accent
-                                } else {
-                                    rgb(0x00000000)
-                                };
-                                let weak = weak.clone();
-                                let section = SharedString::from(m.section.clone());
-                                let address = SharedString::from(m.address.clone());
-                                let preview = SharedString::from(m.preview.clone());
-                                div()
-                                    .id(("bin-row", index))
-                                    .h(px(22.))
-                                    .w_full()
-                                    .px_3()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_4()
-                                    .bg(bg)
-                                    .text_sm()
-                                    .font_family("Courier New")
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .w(px(140.))
-                                            .text_color(rgb(0xa0a0a8))
-                                            .child(section),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(160.))
-                                            .text_color(rgb(0xb0c8ff))
-                                            .child(address),
-                                    )
-                                    .child(
-                                        div().flex_1().text_color(rgb(0xd6d6d6)).child(preview),
-                                    )
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        move |_ev, _w, cx: &mut App| {
-                                            if let Some(entity) = weak.upgrade() {
-                                                cx.update_entity(&entity, |shell, cx| {
-                                                    shell.palette_selected = index;
-                                                    shell.palette_bin_activate(cx);
-                                                });
-                                            }
-                                        },
-                                    )
-                                    .into_any()
-                            }
-                        })
-                        .h_full(),
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(list(state, row_renderer).size_full()),
                     )
             }
         }
