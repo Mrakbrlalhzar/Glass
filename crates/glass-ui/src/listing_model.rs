@@ -223,6 +223,11 @@ pub fn build_listing_rows(
 ) -> Vec<ListingRow> {
     use glass_arch_arm64::format as fmt;
     let n = text.instruction_count();
+    // Parallel to x_page_bases: which row produced each page-base
+    // value. When a later ADD resolves an ADRP+ADD pair we use
+    // this to retro-label the ADRP row's operand with the resolved
+    // target (instead of leaving it as the raw page address).
+    let mut x_page_origin_row: [Option<usize>; 32] = [None; 32];
     if let Some(p) = progress {
         if let Ok(mut p) = p.lock() {
             p.phase = SharedString::from("Disassembling…");
@@ -324,9 +329,21 @@ pub fn build_listing_rows(
         //      → resolved = page + imm; peek string.
         //   2. ADR Xd, label     → resolved = label; peek string.
         let mut resolved_addr: Option<u64> = None;
+        let mut adrp_origin_to_retro: Option<(usize, u64)> = None;
         if let Some(insn) = decoded.as_ref() {
-            if let Some((_d, _s, target)) = extract_add_with_imm(insn, &x_page_bases) {
+            if let Some((_d, s, target)) = extract_add_with_imm(insn, &x_page_bases) {
                 resolved_addr = Some(target);
+                // Schedule retro-labelling of the ADRP row that
+                // supplied the page base for this ADD. Resolves the
+                // common compiler pattern where the ADRP operand is
+                // a page address that doesn't sit inside any data
+                // item by itself; the user-meaningful target is
+                // `page + imm`, which the ADD operand already
+                // names. Mirror that label onto the ADRP row so
+                // clicking either row navigates to the same place.
+                if let Some(row_idx) = x_page_origin_row.get(s as usize).copied().flatten() {
+                    adrp_origin_to_retro = Some((row_idx, target));
+                }
             } else if matches!(
                 insn.mnemonic,
                 armv8_encode::isa::aarch64::Aarch64Mnemonic::Adr
@@ -372,6 +389,39 @@ pub fn build_listing_rows(
             arrows: Arc::new(Vec::new()),
         });
 
+        // Retro-label the matching ADRP row's address chunk with
+        // the resolved ADRP+ADD target. The pre-existing chunk
+        // names the page address (often coverage-less or
+        // mislabelled as a nearby symbol); the resolved target is
+        // the user-meaningful destination.
+        if let Some((row_idx, target)) = adrp_origin_to_retro {
+            if let Some(ListingRow::Instruction { operands, .. }) = rows.get_mut(row_idx) {
+                let ops_mut = Arc::make_mut(operands);
+                for op in ops_mut.iter_mut() {
+                    if op.kind != glass_arch_arm64::ChunkKind::Address {
+                        continue;
+                    }
+                    // Build a label for the resolved target. Prefer
+                    // a covering symbol; fall back to raw hex
+                    // (which at least navigates somewhere closer to
+                    // the real destination than the page address).
+                    let label = if let Some(sym) = symbols.covering(target) {
+                        let off = target - sym.address;
+                        if off == 0 {
+                            sym.display_name.clone()
+                        } else {
+                            format!("{}+0x{off:x}", sym.display_name)
+                        }
+                    } else {
+                        format!("0x{target:x}")
+                    };
+                    op.target = Some(target);
+                    op.text = label;
+                    break;
+                }
+            }
+        }
+
         // Update per-register page-base state.
         //
         //   - ADRP Xd, page  → x_page_bases[d] = page.
@@ -381,10 +431,14 @@ pub fn build_listing_rows(
             if let Some((d, page)) = extract_adrp(insn) {
                 if (d as usize) < x_page_bases.len() {
                     x_page_bases[d as usize] = Some(page);
+                    // Record the row index of the just-pushed ADRP
+                    // so a later matching ADD can retro-label it.
+                    x_page_origin_row[d as usize] = Some(rows.len() - 1);
                 }
             } else if let Some(d) = dest_x_reg(insn) {
                 if (d as usize) < x_page_bases.len() {
                     x_page_bases[d as usize] = None;
+                    x_page_origin_row[d as usize] = None;
                 }
             }
         }
