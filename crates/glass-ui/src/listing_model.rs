@@ -247,6 +247,13 @@ pub fn build_listing_rows(
 ) -> Vec<ListingRow> {
     use glass_arch_arm64::format as fmt;
     let n = text.instruction_count();
+    // Tracks the row index of the ADRP that produced each
+    // x_page_bases entry. When a later ADD resolves an ADRP+ADD
+    // pair whose resolved target sits in a *different* section
+    // from the page address, we use this to retro-label the ADRP
+    // row with the destination section (negative offset) so the
+    // reader sees the destination at a glance.
+    let mut x_page_origin_row: [Option<usize>; 32] = [None; 32];
     if let Some(p) = progress {
         if let Ok(mut p) = p.lock() {
             p.phase = SharedString::from("Disassembling…");
@@ -400,9 +407,13 @@ pub fn build_listing_rows(
         //      → resolved = page + imm; peek string.
         //   2. ADR Xd, label     → resolved = label; peek string.
         let mut resolved_addr: Option<u64> = None;
+        // Source reg of a matched ADD — needed to find the ADRP
+        // row for the cross-section retro-label below.
+        let mut resolved_via_source: Option<u8> = None;
         if let Some(insn) = decoded.as_ref() {
-            if let Some((_d, _s, target)) = extract_add_with_imm(insn, &x_page_bases) {
+            if let Some((_d, s, target)) = extract_add_with_imm(insn, &x_page_bases) {
                 resolved_addr = Some(target);
+                resolved_via_source = Some(s);
             } else if matches!(
                 insn.mnemonic,
                 armv8_encode::isa::aarch64::Aarch64Mnemonic::Adr
@@ -448,6 +459,59 @@ pub fn build_listing_rows(
             arrows: Arc::new(Vec::new()),
         });
 
+        // Cross-section retro-label for the matching ADRP. When
+        // the resolved ADRP+ADD target sits in a *different*
+        // section from the ADRP's page address — the common case
+        // where a string lives just past the end of the unwind
+        // tables and the linker emitted ADRP at the last page of
+        // the previous section — the literal page label
+        // (`__gcc_except_tab+0x6300`) is misleading because the
+        // user reads the ADRP and naturally cares about where it
+        // ends up. Rewrite the ADRP operand as
+        // `<dest_section>-0x<imm>` so the reader sees the
+        // destination at a glance; the negative offset makes the
+        // arithmetic explicit (ADRP + ADD = dest, so ADRP =
+        // dest - ADD_imm).
+        if let (Some(target), Some(src), Some(insn)) =
+            (resolved_addr, resolved_via_source, decoded.as_ref())
+        {
+            let add_imm = first_imm_of(insn).unwrap_or(0);
+            if add_imm > 0 {
+                if let Some(row_idx) =
+                    x_page_origin_row.get(src as usize).copied().flatten()
+                {
+                    if let Some(ListingRow::Instruction { operands, .. }) =
+                        rows.get_mut(row_idx)
+                    {
+                        // Resolve target + page → section labels.
+                        let target_section = data.section_containing(target);
+                        let page = target.saturating_sub(add_imm as u64);
+                        let page_section = data.section_containing(page);
+                        let cross_section = match (target_section, page_section) {
+                            (Some((tn, _)), Some((pn, _))) => tn != pn,
+                            _ => false,
+                        };
+                        if cross_section {
+                            if let Some((tn, _)) = target_section {
+                                // tweak the ADRP's address chunk
+                                // (page) to read "<dest>-0x<imm>".
+                                let ops_mut = Arc::make_mut(operands);
+                                for op in ops_mut.iter_mut() {
+                                    if op.kind
+                                        != glass_arch_arm64::ChunkKind::Address
+                                    {
+                                        continue;
+                                    }
+                                    op.text = format!("{tn}-0x{add_imm:x}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Update per-register page-base state.
         //
         //   - ADRP Xd, page  → x_page_bases[d] = page.
@@ -457,10 +521,12 @@ pub fn build_listing_rows(
             if let Some((d, page)) = extract_adrp(insn) {
                 if (d as usize) < x_page_bases.len() {
                     x_page_bases[d as usize] = Some(page);
+                    x_page_origin_row[d as usize] = Some(rows.len() - 1);
                 }
             } else if let Some(d) = dest_x_reg(insn) {
                 if (d as usize) < x_page_bases.len() {
                     x_page_bases[d as usize] = None;
+                    x_page_origin_row[d as usize] = None;
                 }
             }
         }
