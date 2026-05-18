@@ -151,8 +151,28 @@ impl<'a> AnnotationKeyArgs<'a> {
                     .with_context(|| "method key requires `method` (name+descriptor)")?;
                 Ok(AnnotationKey::Method(self.key.to_string(), method.to_string()))
             }
+            "method-line" => {
+                // `method` is required and is "name+descriptor#line"
+                // — descriptor and line offset separated by '#'.
+                // This is a single-arg encoding so the existing
+                // CLI/MCP surface keeps the same three-field shape.
+                let method = self
+                    .method
+                    .with_context(|| "method-line key requires `method` ('name(descriptor)return#N')")?;
+                let (name_sig, line_str) = method
+                    .rsplit_once('#')
+                    .with_context(|| "method-line: `method` must end with #<line_offset>")?;
+                let line_offset: u32 = line_str
+                    .parse()
+                    .with_context(|| format!("method-line: bad line offset {line_str:?}"))?;
+                Ok(AnnotationKey::MethodLine(
+                    self.key.to_string(),
+                    name_sig.to_string(),
+                    line_offset,
+                ))
+            }
             other => anyhow::bail!(
-                "unknown key_kind {other:?}: expected one of address / symbol / class / method"
+                "unknown key_kind {other:?}: expected one of address / symbol / class / method / method-line"
             ),
         }
     }
@@ -262,6 +282,9 @@ fn stringify_key(key: &AnnotationKey) -> (&'static str, String) {
         AnnotationKey::Symbol(s) => ("symbol", s.clone()),
         AnnotationKey::Class(c) => ("class", c.clone()),
         AnnotationKey::Method(c, m) => ("method", format!("{c}->{m}")),
+        AnnotationKey::MethodLine(c, m, line) => {
+            ("method-line", format!("{c}->{m}#{line}"))
+        }
     }
 }
 

@@ -382,6 +382,19 @@ pub fn render_two_pane(
                     border,
                     dim,
                 );
+                // Pre-compute a per-row annotation snapshot for
+                // this smali leaf. The lookup walks lines once,
+                // tracks the current .method / .class state, and
+                // stores `Some(annotation)` for any row that
+                // matches a Class / Method / MethodLine key. All
+                // other rows hold `None`.
+                let row_annotations: Arc<Vec<Option<glass_db::Annotation>>> = Arc::new(
+                    build_smali_row_annotations(
+                        &bundle,
+                        active_class_jni.as_deref(),
+                        &right_lines,
+                    ),
+                );
                 let max_h = px(LISTING_ROW_MIN_WIDTH);
                 div()
                     .flex_1()
@@ -407,6 +420,7 @@ pub fn render_two_pane(
                                     let shell_weak = shell_weak.clone();
                                     let bundle = bundle.clone();
                                     let active_class_jni = active_class_jni.clone();
+                                    let row_annotations = row_annotations.clone();
                                     move |index, _window, _cx| {
                                         let text = lines
                                             .get(index)
@@ -414,16 +428,16 @@ pub fn render_two_pane(
                                             .unwrap_or_else(|| SharedString::from(""));
                                         let is_selected =
                                             selected_row == Some(index);
-                                        // Smali annotation lookup: class line
-                                        // hits the Class key; method header
-                                        // hits the Method key. Other lines
-                                        // get nothing. Same edge-dot + tint
-                                        // + comment treatment as listing.
-                                        let annotation = smali_annotation_for(
-                                            &bundle,
-                                            active_class_jni.as_deref(),
-                                            text.as_ref(),
-                                        );
+                                        // Per-row annotation pre-computed for
+                                        // this leaf (see build_smali_row_
+                                        // annotations below). Same edge-dot
+                                        // / tint / comment treatment as the
+                                        // listing — but keyed on the smali
+                                        // line offset, not address.
+                                        let annotation = row_annotations
+                                            .get(index)
+                                            .cloned()
+                                            .flatten();
                                         let mut row = div()
                                             .id(("smali-row", index))
                                             .h(px(22.))
@@ -735,9 +749,12 @@ pub fn render_two_pane(
                                                     }
                                                 }
                                                 // Otherwise: find the enclosing
-                                                // .method and use the method
-                                                // context menu.
+                                                // .method and pass its line
+                                                // index so the annotation key
+                                                // includes the row-relative
+                                                // line offset.
                                                 let mut method_decl: Option<String> = None;
+                                                let mut method_line_idx: usize = index;
                                                 for j in (0..=index).rev() {
                                                     let Some(line) = right_lines.get(j) else { continue };
                                                     let trimmed = line.trim_start();
@@ -749,6 +766,7 @@ pub fn render_two_pane(
                                                             .last()
                                                         {
                                                             method_decl = Some(decl.to_string());
+                                                            method_line_idx = j;
                                                         }
                                                         break;
                                                     }
@@ -757,6 +775,8 @@ pub fn render_two_pane(
                                                     }
                                                 }
                                                 let Some(method_decl) = method_decl else { return };
+                                                let line_offset =
+                                                    (index - method_line_idx) as u32;
                                                 if let Some(entity) = right_weak.upgrade() {
                                                     cx.update_entity(
                                                         &entity,
@@ -764,6 +784,7 @@ pub fn render_two_pane(
                                                             shell.open_smali_context_menu(
                                                                 class_jni,
                                                                 method_decl,
+                                                                line_offset,
                                                                 pos,
                                                                 cx,
                                                             );
@@ -867,31 +888,71 @@ pub fn render_two_pane(
         outer.into_any_element()
 }
 
-/// Look up the annotation that should colour / comment / dot a
-/// single smali line. Only the `.class` header and `.method`
-/// declarations get annotation overlays — everything else
-/// returns `None`, leaving the row untouched.
+/// Walk the smali leaf's lines once and produce a parallel vector
+/// where each index either holds the annotation that applies to
+/// that line or `None`. The lookup keeps the current `.method`
+/// state (key + header line index) so any row inside a method
+/// body resolves to a `MethodLine(class, name+sig, offset)`
+/// annotation. The `.class` header resolves to a `Class` key.
 ///
-/// The DEX artifact id is taken as the bundle's first artifact;
-/// annotations on DEX hang off JNI strings (class / method),
-/// not addresses, so the artifact id is mostly bookkeeping.
-fn smali_annotation_for(
+/// All other lines (directives, labels, blank lines) return
+/// `None`, leaving the row untouched.
+///
+/// `MethodLine(_, _, 0)` and the bare `Method(_, _)` key are
+/// treated as aliases: a v2 record set via MCP on `Method` still
+/// renders on the `.method` header. The newer GUI writes always
+/// use `MethodLine`.
+fn build_smali_row_annotations(
     bundle: &LoadedBundle,
     active_class_jni: Option<&str>,
-    line: &str,
-) -> Option<glass_db::Annotation> {
-    let aid = bundle.artifact_ids.first()?;
-    let idx = bundle.annotations.get(aid)?;
-    let trimmed = line.trim_start();
-    if trimmed.starts_with(".class ") {
-        let class_jni = active_class_jni?;
-        return idx.at_class(class_jni).cloned();
+    lines: &[SharedString],
+) -> Vec<Option<glass_db::Annotation>> {
+    let mut out: Vec<Option<glass_db::Annotation>> = vec![None; lines.len()];
+    let Some(aid) = bundle.artifact_ids.first() else { return out };
+    let Some(idx) = bundle.annotations.get(aid) else { return out };
+    // Current method state across the walk.
+    let mut current_method_key: Option<String> = None;
+    let mut current_method_line: usize = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(".class ") {
+            if let Some(class_jni) = active_class_jni {
+                out[i] = idx.at_class(class_jni).cloned();
+            }
+            continue;
+        }
+        if let Some(after) = trimmed.strip_prefix(".method ") {
+            if let Some(class_jni) = active_class_jni {
+                if let Some(decl) = after.split_whitespace().last() {
+                    let key = format!("{class_jni}->{decl}");
+                    current_method_key = Some(key.clone());
+                    current_method_line = i;
+                    // header line == method_line offset 0; the GUI
+                    // writes always go through MethodLine. Fall
+                    // back to the legacy Method key so MCP-set
+                    // entries still appear on the header.
+                    out[i] = idx
+                        .at_method_line(&key, 0)
+                        .cloned()
+                        .or_else(|| idx.at_method(&key).cloned());
+                    continue;
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with(".end method") {
+            current_method_key = None;
+            continue;
+        }
+        if let Some(key) = current_method_key.as_ref() {
+            let offset = (i - current_method_line) as u32;
+            if offset == 0 {
+                continue;
+            }
+            if let Some(a) = idx.at_method_line(key, offset) {
+                out[i] = Some(a.clone());
+            }
+        }
     }
-    if let Some(after) = trimmed.strip_prefix(".method ") {
-        let class_jni = active_class_jni?;
-        let decl = after.split_whitespace().last()?;
-        let key = format!("{class_jni}->{decl}");
-        return idx.at_method(&key).cloned();
-    }
-    None
+    out
 }

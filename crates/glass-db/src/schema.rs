@@ -146,6 +146,13 @@ pub enum AnnotationKey {
     Class(String),
     /// A DEX method: (class JNI, method name + descriptor).
     Method(String, String),
+    /// A specific line within a DEX method body. `line_offset` is
+    /// 0-indexed relative to the `.method` directive line itself
+    /// (so 0 is the header, 1 is the first body line). Stable as
+    /// long as the artifact's bytes don't change — and if they
+    /// did, the ArtifactId would change too and the annotation
+    /// lookup would miss anyway.
+    MethodLine(String, String, u32),
 }
 
 /// All three facets that can live on one annotation key. The

@@ -242,6 +242,7 @@ fn sort_key(k: &AnnotationKey) -> (u8, String) {
         AnnotationKey::Symbol(s) => (1, s.clone()),
         AnnotationKey::Class(c) => (2, c.clone()),
         AnnotationKey::Method(c, m) => (3, format!("{c}->{m}")),
+        AnnotationKey::MethodLine(c, m, line) => (4, format!("{c}->{m}#{line:08}")),
     }
 }
 
@@ -251,6 +252,23 @@ fn primary_label(k: &AnnotationKey, rename: Option<&str>) -> String {
         AnnotationKey::Symbol(s) => s.clone(),
         AnnotationKey::Class(c) => c.clone(),
         AnnotationKey::Method(c, m) => format!("{c}->{m}"),
+        AnnotationKey::MethodLine(c, m, line) => {
+            // Compact, scannable: just the method short name + line.
+            // Pulling out the class is harmless redundancy when the
+            // pane is grouped by artifact already.
+            let short = m.split('(').next().unwrap_or(m);
+            let cls = c
+                .trim_start_matches('L')
+                .trim_end_matches(';')
+                .rsplit('/')
+                .next()
+                .unwrap_or(c);
+            if *line == 0 {
+                format!("{cls}.{short}")
+            } else {
+                format!("{cls}.{short}:{line}")
+            }
+        }
     };
     match rename {
         Some(n) if !n.is_empty() => format!("{n}  ({raw})"),

@@ -24,6 +24,9 @@ pub struct AnnotationIndex {
     /// Keyed by `Class;->name+descriptor` (the same key form the
     /// CLI uses in `set-rename --key-kind method`).
     by_method: Arc<HashMap<String, Annotation>>,
+    /// Keyed by `(Class;->name+descriptor, line_offset)` — the
+    /// line offset is 0-indexed from the `.method` line itself.
+    by_method_line: Arc<HashMap<(String, u32), Annotation>>,
 }
 
 impl AnnotationIndex {
@@ -35,6 +38,7 @@ impl AnnotationIndex {
             && self.by_symbol.is_empty()
             && self.by_class.is_empty()
             && self.by_method.is_empty()
+            && self.by_method_line.is_empty()
     }
 
     /// Address-keyed annotation, if any.
@@ -54,6 +58,13 @@ impl AnnotationIndex {
 
     pub fn at_method(&self, key: &str) -> Option<&Annotation> {
         self.by_method.get(key)
+    }
+
+    /// Method-line lookup: `(key, line_offset)` where `key` is the
+    /// `Class;->name+descriptor` form and `line_offset == 0`
+    /// targets the `.method` directive itself.
+    pub fn at_method_line(&self, key: &str, line_offset: u32) -> Option<&Annotation> {
+        self.by_method_line.get(&(key.to_string(), line_offset))
     }
 
     /// Resolve a listing row by precedence: address beats symbol.
@@ -88,7 +99,18 @@ impl AnnotationIndex {
                 v,
             ))
         });
-        addrs.chain(syms).chain(classes).chain(methods)
+        let method_lines = self.by_method_line.iter().filter_map(|((k, line), v)| {
+            let (class, name_sig) = k.split_once("->")?;
+            Some((
+                AnnotationKey::MethodLine(
+                    class.to_string(),
+                    name_sig.to_string(),
+                    *line,
+                ),
+                v,
+            ))
+        });
+        addrs.chain(syms).chain(classes).chain(methods).chain(method_lines)
     }
 
     /// Total entry count across all key kinds.
@@ -97,6 +119,7 @@ impl AnnotationIndex {
             + self.by_symbol.len()
             + self.by_class.len()
             + self.by_method.len()
+            + self.by_method_line.len()
     }
 }
 
@@ -128,6 +151,7 @@ pub fn load_for_artifacts(
         let mut by_symbol = HashMap::new();
         let mut by_class = HashMap::new();
         let mut by_method = HashMap::new();
+        let mut by_method_line = HashMap::new();
         for (k, v) in entries {
             match k {
                 AnnotationKey::Address(a) => {
@@ -142,6 +166,9 @@ pub fn load_for_artifacts(
                 AnnotationKey::Method(c, m) => {
                     by_method.insert(format!("{c}->{m}"), v);
                 }
+                AnnotationKey::MethodLine(c, m, line) => {
+                    by_method_line.insert((format!("{c}->{m}"), line), v);
+                }
             }
         }
         out.insert(
@@ -151,6 +178,7 @@ pub fn load_for_artifacts(
                 by_symbol: Arc::new(by_symbol),
                 by_class: Arc::new(by_class),
                 by_method: Arc::new(by_method),
+                by_method_line: Arc::new(by_method_line),
             },
         );
     }

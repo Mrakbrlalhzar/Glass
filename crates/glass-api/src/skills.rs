@@ -73,16 +73,16 @@ fn annotation_key_props() -> Value {
     json!({
         "key_kind": {
             "type": "string",
-            "enum": ["address", "symbol", "class", "method"],
-            "description": "Which kind of thing the annotation hangs off. `address` = native VA (most specific); `symbol` = native symbol name (synthesized or symtab); `class` = DEX class JNI; `method` = DEX method (pair with `method`)."
+            "enum": ["address", "symbol", "class", "method", "method-line"],
+            "description": "Which kind of thing the annotation hangs off. `address` = native VA; `symbol` = native symbol name; `class` = DEX class JNI; `method` = whole DEX method (pair with `method`); `method-line` = a specific line within a DEX method body (pair `method` with 'name(descriptor)return#<line_offset>')."
         },
         "key": {
             "type": "string",
-            "description": "For `address`: hex VA (0x...). For `symbol`: display name or raw name. For `class` / `method`: JNI form (Lcom/example/Foo;)."
+            "description": "For `address`: hex VA (0x...). For `symbol`: display name or raw name. For `class`, `method`, `method-line`: class JNI (Lcom/example/Foo;)."
         },
         "method": {
             "type": "string",
-            "description": "Method name + descriptor, e.g. 'bar(Ljava/lang/String;)V'. Only required when key_kind == 'method' — `key` is then the class JNI."
+            "description": "For `method`: 'name(descriptor)return' (e.g. 'bar(Ljava/lang/String;)V'). For `method-line`: same form with '#<line_offset>' appended (e.g. 'bar(Ljava/lang/String;)V#7' for line 7 inside the method body; 0 targets the .method header itself)."
         }
     })
 }

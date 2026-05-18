@@ -944,6 +944,9 @@ impl Shell {
                 glass_db::AnnotationKey::Method(c, m) => {
                     idx.at_method(&format!("{c}->{m}"))
                 }
+                glass_db::AnnotationKey::MethodLine(c, m, line) => {
+                    idx.at_method_line(&format!("{c}->{m}"), *line)
+                }
             })
             .cloned()
             .unwrap_or_default();
@@ -993,6 +996,7 @@ impl Shell {
         &mut self,
         class_jni: String,
         method_decl: String,
+        line_offset: u32,
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
@@ -1003,14 +1007,12 @@ impl Shell {
             .next()
             .unwrap_or(&method_decl)
             .to_string();
-        let label = SharedString::from(display);
+        let label = SharedString::from(display.clone());
         let method_key = format!("{class_jni}->{method_decl}");
         // For annotation lookup we need an artifact id. DEX
         // artifacts share the bundle's first DEX artifact id; pick
         // the first one in the bundle's artifact list as the
-        // canonical DEX target. (Annotations on DEX hang off the
-        // class / method JNI strings, not addresses, so the same
-        // (class, method) key works across DEXes.)
+        // canonical DEX target.
         let dex_artifact = self
             .bundle()
             .and_then(|b| b.artifact_ids.first().cloned());
@@ -1026,14 +1028,19 @@ impl Shell {
             },
         ];
         if let Some(artifact) = dex_artifact {
-            let key = glass_db::AnnotationKey::Method(
+            // MethodLine keys carry the line offset relative to
+            // the `.method` line — line_offset == 0 targets the
+            // header itself (the natural fallback for native
+            // methods, which have no body).
+            let key = glass_db::AnnotationKey::MethodLine(
                 class_jni.clone(),
                 method_decl.clone(),
+                line_offset,
             );
             let existing = self
                 .bundle()
                 .and_then(|b| b.annotations.get(&artifact))
-                .and_then(|idx| idx.at_method(&method_key))
+                .and_then(|idx| idx.at_method_line(&method_key, line_offset))
                 .cloned()
                 .unwrap_or_default();
             let rename_label = if existing.rename.is_some() {
@@ -1046,29 +1053,42 @@ impl Shell {
             } else {
                 "Add comment…"
             };
+            // Disambiguate the menu label so a user with several
+            // annotations in the same method can see which line
+            // they're editing.
+            let line_chip = if line_offset == 0 {
+                String::new()
+            } else {
+                format!(" (line {line_offset})")
+            };
             items.push(ContextMenuItem::EditRename {
                 artifact: artifact.clone(),
                 key: key.clone(),
                 current: existing.rename.clone().unwrap_or_default(),
-                label: SharedString::from(rename_label),
+                label: SharedString::from(format!("{rename_label}{line_chip}")),
             });
             items.push(ContextMenuItem::EditComment {
                 artifact: artifact.clone(),
                 key: key.clone(),
                 current: existing.comment.clone().unwrap_or_default(),
-                label: SharedString::from(comment_label),
+                label: SharedString::from(format!("{comment_label}{line_chip}")),
             });
             items.push(ContextMenuItem::PickColour {
                 artifact: artifact.clone(),
                 key: key.clone(),
                 current: existing.colour,
-                label: SharedString::from("Set colour…"),
+                label: SharedString::from(format!("Set colour…{line_chip}")),
             });
             if !existing.is_empty() {
+                let clear_label = if line_offset == 0 {
+                    format!("Clear annotation ({display})")
+                } else {
+                    format!("Clear annotation ({display} line {line_offset})")
+                };
                 items.push(ContextMenuItem::ClearAnnotation {
                     artifact,
                     key,
-                    label: SharedString::from(format!("Clear annotation ({label})")),
+                    label: SharedString::from(clear_label),
                 });
             }
         }
@@ -1355,6 +1375,9 @@ impl Shell {
             glass_db::AnnotationKey::Symbol(s) => s.clone(),
             glass_db::AnnotationKey::Class(c) => c.clone(),
             glass_db::AnnotationKey::Method(c, m) => format!("{c}->{m}"),
+            glass_db::AnnotationKey::MethodLine(c, m, line) => {
+                format!("{c}->{m}#{line}")
+            }
         };
         let chip = match facet {
             crate::AnnotationFacet::Rename => format!("Rename {key_label}"),
@@ -1767,6 +1790,26 @@ impl Shell {
                 if let Some(leaf) = leaf {
                     self.open_leaf(leaf, cx);
                 }
+            }
+            glass_db::AnnotationKey::MethodLine(class_jni, method_decl, line_offset) => {
+                // Look up the `.method` line in the smali body
+                // through the pre-built method-line index, then
+                // scroll the smali tab to header + line_offset.
+                let method_key = format!("{class_jni}->{method_decl}");
+                let Some((leaf, header_line)) =
+                    bundle.method_lines.get(&method_key).copied()
+                else {
+                    // Fall back to opening the class — method
+                    // index may not have been built (e.g. native).
+                    if let Some(leaf) = bundle.resolve(&glass_db::TabState::SmaliClass {
+                        class_jni: class_jni.clone(),
+                    }) {
+                        self.open_leaf(leaf, cx);
+                    }
+                    return;
+                };
+                let target_line = header_line + line_offset as usize;
+                self.goto_smali_method(leaf, target_line, cx);
             }
         }
     }
