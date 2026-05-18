@@ -241,6 +241,35 @@ non-text non-debug sections. Default `--min` is 4.
 glass strings ./libfoo.so --artifact libfoo.so --min 8 --limit 50
 ```
 
+## Binary pattern search
+
+### `bin-search --path P --artifact A --pattern '...' [--section S] [--limit N]`
+Scan every text + data section of one artifact for a byte
+pattern. Atoms are whitespace-separated; each is either a
+2-character byte mask (`c0`, `0xc0`, `e?`, `?f`, `??`) or a
+bounded gap (`*` = 0..=32 bytes default, `*(min..max)` to
+override).
+
+```sh
+# `mov w0, #1 ; ret`  (returning-true stub finder)
+glass bin-search ./libfoo.so --artifact libfoo.so \
+  --pattern '20 00 80 52 c0 03 5f d6'
+
+# any ADRP+ADD pair with no intervening bytes
+glass bin-search ./libfoo.so --artifact libfoo.so \
+  --pattern '?? ?? ?? 9? ?? ?? 4? 91'
+
+# raw data: find embedded magic
+glass bin-search ./libfoo.so --artifact libfoo.so --pattern 'de ad be ef'
+```
+
+Matches don't span sections. Each result carries a `preview`
+column: two decoded AArch64 instructions joined with ` ; ` for
+text sections (e.g. `mov x0, #0 ; ret x30`), or the first 8
+bytes as space-separated hex for data sections.
+
+Full pattern reference + worked examples: [`docs/BinSearch.md`](BinSearch.md).
+
 ## Annotations & persistence
 
 Glass persists window state, open tabs, and user annotations in a
@@ -266,6 +295,12 @@ Persist a display name. `--key-kind` is one of:
 - `class` — `V` is a class JNI (`Lcom/example/Foo;`).
 - `method` — `V` is the class JNI; `--method` is the
   `name(descriptor)return` part, e.g. `bar(Ljava/lang/String;)V`.
+- `method-line` — `V` is the class JNI; `--method` is
+  `name(descriptor)return#<line_offset>` (line offset is
+  0-indexed from the `.method` directive, so `0` targets the
+  header itself, `1`+ targets a body line). This is the key
+  the GUI writes when you right-click a specific line inside
+  a smali method body.
 
 ```sh
 glass set-rename ./libfoo.so --key-kind address --key 0x1000058d4 --name decode_packet
