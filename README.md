@@ -23,6 +23,7 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Full project search for symbols or string literals across DEX, code and data sections
 * Native binary layout overview with section data
 * Xref search of callers, references to data
+* Binary search of sequences of bytes with masking and gaps across code and data
 * Annotate any line (code or data) with a colour and/or comment so you can easily find it again later. 
 
 
