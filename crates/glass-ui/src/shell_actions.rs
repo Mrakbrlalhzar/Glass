@@ -1888,6 +1888,17 @@ impl Shell {
                     self.open_leaf(leaf, cx);
                 }
             }
+            SearchJump::SmaliMethodLine { class_jni, line } => {
+                // Open the class then scroll to the absolute line.
+                let leaf = self.bundle().and_then(|b| {
+                    b.resolve(&glass_db::TabState::SmaliClass {
+                        class_jni: class_jni.clone(),
+                    })
+                });
+                if let Some(leaf) = leaf {
+                    self.goto_smali_method(leaf, line, cx);
+                }
+            }
             SearchJump::SectionMap { artifact } => {
                 let leaf = self.bundle().and_then(|b| {
                     b.resolve(&glass_db::TabState::SectionMap {
@@ -2368,30 +2379,33 @@ fn build_dex_caller_entries(
     let Some(callers) = idx.get(callee_key) else { return Vec::new() };
     callers
         .iter()
-        .filter_map(|caller_key| {
-            // method_lines tells us where to scroll. Use the class
-            // JNI as the SmaliClass jump target.
+        .filter_map(|(caller_key, line_offset)| {
             let class_jni = caller_key.split("->").next()?.to_string();
-            let _line = bundle.method_lines.get(caller_key).map(|&(_, l)| l).unwrap_or(0);
-            let display = caller_key
+            // Resolve absolute line within the smali leaf:
+            // .method header line + line_offset.
+            let header_line = bundle
+                .method_lines
+                .get(caller_key)
+                .map(|&(_, l)| l)
+                .unwrap_or(0);
+            let line = header_line + *line_offset as usize;
+            let cls = class_jni
+                .trim_start_matches('L')
+                .trim_end_matches(';')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&class_jni);
+            let method_name = caller_key
                 .split("->")
                 .nth(1)
                 .and_then(|m| m.split('(').next())
-                .map(|n| {
-                    let cls = class_jni
-                        .trim_start_matches('L')
-                        .trim_end_matches(';')
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&class_jni);
-                    format!("{cls}.{n}")
-                })
-                .unwrap_or_else(|| caller_key.clone());
+                .unwrap_or("?");
+            let display = format!("{cls}.{method_name}:{line_offset}");
             Some(SearchEntry {
                 display,
                 chip: "method".to_string(),
                 kind_glyph: "ƒ",
-                jump: SearchJump::SmaliClass { class_jni },
+                jump: SearchJump::SmaliMethodLine { class_jni, line },
             })
         })
         .collect()
@@ -2402,31 +2416,34 @@ fn build_dex_field_entries(
     field_ref: &str,
     idx: &crate::xref::DexFieldRefs,
 ) -> Vec<SearchEntry> {
-    let _ = bundle;
     let Some(touchers) = idx.get(field_ref) else { return Vec::new() };
     touchers
         .iter()
-        .filter_map(|method_key| {
+        .filter_map(|(method_key, line_offset)| {
             let class_jni = method_key.split("->").next()?.to_string();
-            let display = method_key
+            let header_line = bundle
+                .method_lines
+                .get(method_key)
+                .map(|&(_, l)| l)
+                .unwrap_or(0);
+            let line = header_line + *line_offset as usize;
+            let cls = class_jni
+                .trim_start_matches('L')
+                .trim_end_matches(';')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&class_jni);
+            let method_name = method_key
                 .split("->")
                 .nth(1)
                 .and_then(|m| m.split('(').next())
-                .map(|n| {
-                    let cls = class_jni
-                        .trim_start_matches('L')
-                        .trim_end_matches(';')
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&class_jni);
-                    format!("{cls}.{n}")
-                })
-                .unwrap_or_else(|| method_key.clone());
+                .unwrap_or("?");
+            let display = format!("{cls}.{method_name}:{line_offset}");
             Some(SearchEntry {
                 display,
-                chip: "method".to_string(),
-                kind_glyph: "ƒ",
-                jump: SearchJump::SmaliClass { class_jni },
+                chip: "field-ref".to_string(),
+                kind_glyph: "ᕀ",
+                jump: SearchJump::SmaliMethodLine { class_jni, line },
             })
         })
         .collect()

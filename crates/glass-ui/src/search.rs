@@ -11,6 +11,10 @@ pub enum SearchJump {
     Listing { artifact: glass_db::ArtifactId, section: String, addr: u64 },
     Hex { artifact: glass_db::ArtifactId, section: String, addr: u64 },
     SmaliClass { class_jni: String },
+    /// Jump to a specific line within a SmaliClass leaf — used by
+    /// the line-precise DEX xref entries. The line is absolute
+    /// (0-indexed within the leaf body), not method-relative.
+    SmaliMethodLine { class_jni: String, line: usize },
     SectionMap { artifact: glass_db::ArtifactId },
 }
 

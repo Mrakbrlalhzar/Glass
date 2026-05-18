@@ -70,12 +70,16 @@ pub type NativeXrefMap = HashMap<u64, Vec<u64>>;
 /// Per-artifact native xref maps. Same keying as `LoadedBundle.symbol_maps`.
 pub type NativeXrefs = HashMap<glass_db::ArtifactId, NativeXrefMap>;
 
-/// `caller_key` for each `callee_key`. Inverse of `bundle.method_calls`.
-pub type DexCallers = HashMap<String, Vec<String>>;
+/// `caller_key` + the line offset within that method body where
+/// the `invoke-*` lives, for each `callee_key`. Multiple entries
+/// per caller when one method invokes the same callee on several
+/// lines. Sorted on `(caller_key, line_offset)` for stable order.
+pub type DexCallers = HashMap<String, Vec<(String, u32)>>;
 
 /// For each smali field reference (`Lcom/Foo;->name:Ltype;`), the
-/// list of method keys that touch it.
-pub type DexFieldRefs = HashMap<String, Vec<String>>;
+/// `(method_key, line_offset)` pairs that touch it. Same sort
+/// shape as `DexCallers`.
+pub type DexFieldRefs = HashMap<String, Vec<(String, u32)>>;
 
 /// What an in-flight scoped palette is querying. Stored on the
 /// scope so the poller can rebuild entries deterministically when
@@ -315,12 +319,17 @@ pub fn build_dex_field_refs(
         let crate::LeafKind::SmaliClass { class_jni } = k else { continue };
         processed += 1;
         let Some(body) = bodies.get(i) else { continue };
+        // Track current `.method` so we can record the line offset
+        // relative to its header (matches the MethodLine annotation
+        // key convention).
         let mut current_method: Option<String> = None;
-        for raw in body.lines() {
+        let mut method_line_idx: usize = 0;
+        for (line_no, raw) in body.lines().enumerate() {
             let trimmed = raw.trim_start();
             if let Some(after) = trimmed.strip_prefix(".method ") {
                 if let Some(decl) = after.split_whitespace().last() {
                     current_method = Some(format!("{class_jni}->{decl}"));
+                    method_line_idx = line_no;
                 }
                 continue;
             }
@@ -345,9 +354,71 @@ pub fn build_dex_field_refs(
             if !field_ref.contains("->") || !field_ref.contains(':') {
                 continue;
             }
+            let offset = (line_no - method_line_idx) as u32;
             out.entry(field_ref.to_string())
                 .or_default()
-                .push(method_key.clone());
+                .push((method_key.clone(), offset));
+        }
+        if processed % 64 == 0 {
+            let mut p = progress.lock();
+            p.current = processed;
+        }
+    }
+    for sites in out.values_mut() {
+        sites.sort_unstable();
+        sites.dedup();
+    }
+    let mut p = progress.lock();
+    p.current = processed;
+    out
+}
+
+/// Build the DEX callers index by scanning smali bodies. Captures
+/// the line offset of each `invoke-*` so the palette entry can
+/// jump to the exact call site. Replaces the cheaper-but-line-
+/// less inverse-of-method_calls path that lived in app.rs.
+pub fn build_dex_callers(
+    bodies: &[gpui::SharedString],
+    kinds: &[crate::LeafKind],
+    progress: &Arc<parking_lot::Mutex<XrefProgress>>,
+) -> DexCallers {
+    let mut out: DexCallers = HashMap::new();
+    let mut processed = 0usize;
+    for (i, k) in kinds.iter().enumerate() {
+        let crate::LeafKind::SmaliClass { class_jni } = k else { continue };
+        processed += 1;
+        let Some(body) = bodies.get(i) else { continue };
+        let mut current_method: Option<String> = None;
+        let mut method_line_idx: usize = 0;
+        for (line_no, raw) in body.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            if let Some(after) = trimmed.strip_prefix(".method ") {
+                if let Some(decl) = after.split_whitespace().last() {
+                    current_method = Some(format!("{class_jni}->{decl}"));
+                    method_line_idx = line_no;
+                }
+                continue;
+            }
+            if trimmed.starts_with(".end method") {
+                current_method = None;
+                continue;
+            }
+            if !trimmed.starts_with("invoke-") {
+                continue;
+            }
+            let Some(caller_key) = current_method.as_ref() else { continue };
+            // Smali invoke syntax: `invoke-... {regs}, Callee;->name(sig)ret`.
+            // The callee is the last whitespace-separated token.
+            let Some(callee_key) = trimmed.split_whitespace().last() else {
+                continue;
+            };
+            if !callee_key.contains("->") {
+                continue;
+            }
+            let offset = (line_no - method_line_idx) as u32;
+            out.entry(callee_key.to_string())
+                .or_default()
+                .push((caller_key.clone(), offset));
         }
         if processed % 64 == 0 {
             let mut p = progress.lock();

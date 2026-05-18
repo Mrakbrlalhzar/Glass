@@ -444,30 +444,26 @@ fn spawn_xref_builders(bundle: &crate::LoadedBundle, cx: &mut App) {
     use crate::xref::{XrefIndexState, XrefProgress};
     use parking_lot::Mutex;
 
-    // ---- DEX callers (inverse method_calls) ---------------------
-    // Cheap — milliseconds even on huge DEX. Still on a background
-    // task for uniformity.
+    // ---- DEX callers ---------------------------------------------
+    // Scans every smali body to capture the line offset of each
+    // `invoke-*` so palette entries can jump to the exact call
+    // site. A few milliseconds even on huge DEX; runs on a
+    // background task to match the field-refs cadence.
     {
         let slot = bundle.xrefs.dex_callers.clone();
-        let method_calls = bundle.method_calls.clone();
+        let bodies = bundle.bodies.clone();
+        let kinds = bundle.kinds.clone();
         let progress = Arc::new(Mutex::new(XrefProgress {
             label: "DEX callers".to_string(),
             current: 0,
-            total: method_calls.len(),
+            total: kinds.iter().filter(|k| matches!(k, crate::LeafKind::SmaliClass { .. })).count(),
         }));
         *slot.write() = XrefIndexState::Building(progress.clone());
         cx.background_executor()
             .spawn(async move {
-                let mut inv: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                for (caller, callees) in method_calls.iter() {
-                    for callee in callees {
-                        inv.entry(callee.clone()).or_default().push(caller.clone());
-                    }
-                    let mut p = progress.lock();
-                    p.current += 1;
-                }
-                *slot.write() = XrefIndexState::Ready(Arc::new(inv));
+                let result =
+                    crate::xref::build_dex_callers(&bodies, &kinds, &progress);
+                *slot.write() = XrefIndexState::Ready(Arc::new(result));
             })
             .detach();
     }
