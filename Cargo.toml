@@ -60,7 +60,13 @@ smali = { git = "https://github.com/azw413/smali" }
 # UI framework. gpui is publish=false so git-dep only. Pinned to a Zed
 # commit known to compile cleanly — bump deliberately, not on a whim.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f", features = ["font-kit"] }
+# `font-kit` makes gpui_macos render text correctly (see memory:
+# feedback-gpui-font-kit). `wayland` + `x11` only forward into
+# gpui_linux, which is target-gated to Linux/FreeBSD inside
+# gpui_platform — they're inert on macOS. Without one of them the
+# Linux build panics with `unreachable!()` in `current_platform`
+# at first window creation.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f", features = ["font-kit", "wayland", "x11"] }
 
 # Errors / logging / serde used across crates
 anyhow = "1"
