@@ -938,10 +938,41 @@ impl Shell {
                 });
             }
             None => {
+                // No covering symbol — but if the click landed
+                // inside a recognisable data item (e.g. a C string
+                // in `__cstring` with no symtab entry), use the
+                // item's start address so the xref query matches
+                // the address recorded by ADRP+ADD resolution.
+                let (query_addr, label) = match crate::listing_render::item_extent_for(
+                    bundle,
+                    &artifact,
+                    addr,
+                ) {
+                    Some((start, _end)) if start != addr => {
+                        // Show a short string preview when it's a
+                        // strings-section item the user clicked
+                        // into the middle of.
+                        let preview = preview_string_at(bundle, &artifact, start);
+                        let label_text = match preview {
+                            Some(s) => format!("\"{s}\""),
+                            None => format!("0x{start:x}"),
+                        };
+                        (start, SharedString::from(label_text))
+                    }
+                    Some((start, _end)) => {
+                        let preview = preview_string_at(bundle, &artifact, start);
+                        let label_text = match preview {
+                            Some(s) => format!("\"{s}\""),
+                            None => format!("0x{start:x}"),
+                        };
+                        (start, SharedString::from(label_text))
+                    }
+                    None => (addr, SharedString::from(format!("0x{addr:x}"))),
+                };
                 items.push(ContextMenuItem::XrefsToAddress {
                     artifact: artifact.clone(),
-                    addr,
-                    label: SharedString::from(format!("0x{addr:x}")),
+                    addr: query_addr,
+                    label,
                 });
             }
         }
@@ -2327,6 +2358,42 @@ impl Shell {
             None
         }
     }
+}
+
+/// Best-effort short ASCII preview of the string at `addr`, used
+/// as the chip label for "References to ..." menu items pointing
+/// at strings-section addresses. Returns `None` when the address
+/// isn't in a strings section, when the byte before the address
+/// isn't a NUL (i.e. it's mid-string), or when the string is
+/// non-printable.
+fn preview_string_at(
+    bundle: &LoadedBundle,
+    artifact: &glass_db::ArtifactId,
+    addr: u64,
+) -> Option<String> {
+    let section_name = bundle.data_section_for_addr(artifact, addr)?;
+    let section = bundle
+        .data_sections
+        .get(&(artifact.clone(), section_name.to_string()))?;
+    let off = addr.checked_sub(section.base)? as usize;
+    if off >= section.bytes.len() {
+        return None;
+    }
+    let end = section.bytes[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| off + p)
+        .unwrap_or(section.bytes.len());
+    let raw = &section.bytes[off..end];
+    if raw.is_empty() || !raw.iter().all(|&b| (0x20..=0x7e).contains(&b)) {
+        return None;
+    }
+    let s = std::str::from_utf8(raw).ok()?;
+    Some(if s.len() > 40 {
+        format!("{}…", &s[..40])
+    } else {
+        s.to_string()
+    })
 }
 
 // ---- Xref → SearchEntry adapters ------------------------------------------

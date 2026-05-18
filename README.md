@@ -23,6 +23,7 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Full project search for symbols or string literals across DEX, code and data sections
 * Native binary layout overview with section data
 * Xref search of callers, references to data
+* Annotate any line (code or data) with a colour and/or comment so you can easily find it again later. 
 
 
 ## Screenshots
@@ -249,8 +250,7 @@ Two ways to grab a prebuilt zip without building locally:
 
 ## Roadmap
 
-- **Next** — Persistent comments and renames on instructions; cross-references between DEX call sites and JNI-bound native symbols.
 - **iOS deeper** — Entitlements, `embedded.mobileprovision`, ObjC `__objc_classlist`, Swift metadata pass.
 - **armv7** — 32-bit ARM disassembly for older `.so` variants.
 - **Internal Scripting** — QuickJS plugin host with a stable API for analysis passes.
-- **Advanced** — Signed APK rebuilding, control-flow graph view.
+- **Advanced** — Signed APK rebuilding.

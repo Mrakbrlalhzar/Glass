@@ -37,10 +37,13 @@ fn annotation_index<'a>(ctx: Option<&'a RowCtx>) -> Option<&'a AnnotationIndex> 
 ///      covers the whole string the user has selected.
 /// Returns `None` when neither heuristic applies — the renderer
 /// then draws no item highlight.
-fn item_extent_for(ctx: Option<&RowCtx>, addr: u64) -> Option<(u64, u64)> {
-    let ctx = ctx?;
+pub(crate) fn item_extent_for(
+    bundle: &LoadedBundle,
+    artifact: &glass_db::ArtifactId,
+    addr: u64,
+) -> Option<(u64, u64)> {
     // (1) Symbol-defined data item.
-    if let Some(sm) = ctx.bundle.symbol_maps.get(&ctx.artifact) {
+    if let Some(sm) = bundle.symbol_maps.get(artifact) {
         if let Some(sym) = sm.covering(addr) {
             if matches!(sym.kind, glass_arch_arm64::SymbolKind::Object) && sym.size > 0 {
                 return Some((sym.address, sym.address + sym.size));
@@ -48,25 +51,22 @@ fn item_extent_for(ctx: Option<&RowCtx>, addr: u64) -> Option<(u64, u64)> {
         }
     }
     // (2) String-section NUL scan.
-    let section_name = ctx.bundle.data_section_for_addr(&ctx.artifact, addr)?;
+    let section_name = bundle.data_section_for_addr(artifact, addr)?;
     if !looks_like_strings_section(section_name) {
         return None;
     }
-    let section = ctx
-        .bundle
+    let section = bundle
         .data_sections
-        .get(&(ctx.artifact.clone(), section_name.to_string()))?;
+        .get(&(artifact.clone(), section_name.to_string()))?;
     let off = addr.checked_sub(section.base)? as usize;
     if off >= section.bytes.len() {
         return None;
     }
-    // Scan back to start of string (previous NUL + 1, or section start).
     let start_off = section.bytes[..off]
         .iter()
         .rposition(|&b| b == 0)
         .map(|p| p + 1)
         .unwrap_or(0);
-    // Scan forward to end (next NUL exclusive).
     let end_off = section.bytes[off..]
         .iter()
         .position(|&b| b == 0)
@@ -383,8 +383,10 @@ pub fn render_hex_row(
             // the cells inside that range with a subtle accent
             // in both the hex and ASCII columns. Lets the user
             // see at a glance how long e.g. a C string is.
-            let item_extent: Option<(u64, u64)> =
-                selected_byte_addr.and_then(|sel| item_extent_for(ctx, sel));
+            let item_extent: Option<(u64, u64)> = ctx.and_then(|c| {
+                let sel = selected_byte_addr?;
+                item_extent_for(&c.bundle, &c.artifact, sel)
+            });
             let mut hex_cells = div()
                 .w(px(HEX_BYTES_WIDTH))
                 .flex_shrink_0()
