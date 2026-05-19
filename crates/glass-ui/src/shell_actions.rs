@@ -2469,6 +2469,259 @@ impl Shell {
         .detach();
     }
 
+    /// Move the active listing tab's selection by `delta`
+    /// (typically -1 / +1 from Up/Down). Clamps to the valid
+    /// row range. Driven by the global Up/Down action handlers
+    /// when no edit / palette / dialog is active.
+    /// Move the selected byte one position left/right on the
+    /// active hex tab. Wraps across row boundaries — going left
+    /// off the start of a row lands on the last byte of the
+    /// previous row; going right off the end lands on the
+    /// first byte of the next row.
+    pub(crate) fn hex_move_byte(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(active) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get_mut(active) else { return };
+        if !matches!(tab.kind, crate::TabKind::Hex { .. }) {
+            return;
+        }
+        let Some(rows) = tab.hex_rows.as_ref() else { return };
+        // Find the (row_index, byte_addr) of the currently
+        // selected byte. If there's no selection, start at
+        // the first byte of the first Bytes row.
+        let (mut row_idx, mut addr) = match tab.selected_byte_addr {
+            Some(a) => {
+                let row = rows.iter().position(|r| match r {
+                    crate::HexRow::Bytes { address, .. }
+                        if a >= *address && a < *address + 16 =>
+                    {
+                        true
+                    }
+                    _ => false,
+                });
+                match row {
+                    Some(i) => (i, a),
+                    None => return,
+                }
+            }
+            None => {
+                let row = rows.iter().enumerate().find_map(|(i, r)| {
+                    matches!(r, crate::HexRow::Bytes { .. }).then_some(i)
+                });
+                let Some(i) = row else { return };
+                let crate::HexRow::Bytes { address, .. } = &rows[i] else {
+                    return;
+                };
+                (i, *address)
+            }
+        };
+        let step: i64 = delta.signum() as i64;
+        let new_addr = (addr as i64 + step) as u64;
+        // Stay inside the current row if we can.
+        if let crate::HexRow::Bytes { address, .. } = &rows[row_idx] {
+            if new_addr >= *address && new_addr < *address + 16 {
+                addr = new_addr;
+            } else {
+                // Cross to the prev/next Bytes row.
+                let next_row_idx = if step > 0 {
+                    rows.iter()
+                        .enumerate()
+                        .skip(row_idx + 1)
+                        .find_map(|(i, r)| matches!(r, crate::HexRow::Bytes { .. }).then_some(i))
+                } else if row_idx == 0 {
+                    None
+                } else {
+                    rows.iter()
+                        .enumerate()
+                        .take(row_idx)
+                        .rev()
+                        .find_map(|(i, r)| matches!(r, crate::HexRow::Bytes { .. }).then_some(i))
+                };
+                let Some(ni) = next_row_idx else { return };
+                let crate::HexRow::Bytes { address, .. } = &rows[ni] else {
+                    return;
+                };
+                row_idx = ni;
+                addr = if step > 0 { *address } else { *address + 15 };
+            }
+        }
+        tab.selected_row = Some(row_idx);
+        tab.selected_byte_addr = Some(addr);
+        tab.scroll.scroll_to_reveal_item(row_idx);
+        cx.notify();
+    }
+
+    /// Enter on a hex tab: open the edit at the selected byte
+    /// (string popover if it's inside a recognised string item,
+    /// single-byte edit otherwise). Returns true if it acted on
+    /// the active tab — caller can chain further fallbacks if
+    /// false.
+    pub(crate) fn hex_open_edit_at_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        let artifact = match &tab.kind {
+            crate::TabKind::Hex { artifact, .. } => artifact.clone(),
+            _ => return false,
+        };
+        let Some(addr) = tab.selected_byte_addr else { return false };
+        // Prefer string edit when the click lands inside a
+        // recognised string item, same heuristic the
+        // double-click handler uses.
+        let bundle = match self.bundle() {
+            Some(b) => b.clone(),
+            None => return false,
+        };
+        let in_string = bundle
+            .data_section_for_addr(&artifact, addr)
+            .map(|name| {
+                name.contains("cstring")
+                    || name.contains("__cfstring")
+                    || name.contains("__objc_methname")
+            })
+            .unwrap_or(false)
+            && crate::listing_render::item_extent_for(&bundle, &artifact, addr).is_some();
+        if in_string {
+            self.begin_hex_string_edit(artifact, addr, cx);
+        } else {
+            self.begin_hex_byte_edit(artifact, addr, cx);
+        }
+        true
+    }
+
+    /// Animated scroll by ~one viewport in the active tab.
+    /// Works on any tab kind that uses the standard `ListState`
+    /// (listing, hex, smali). Selection cursor stays in place.
+    /// Tick at 60 fps over ~150 ms (≈9 frames).
+    pub(crate) fn listing_page_scroll(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let Some(active) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get(active) else { return };
+        let viewport_h = tab.scroll.viewport_bounds().size.height;
+        if viewport_h <= gpui::px(0.) {
+            return;
+        }
+        // 90% of a viewport so the row at the boundary stays
+        // visible — same rule most editors use.
+        let total_px = viewport_h * 0.9;
+        const FRAMES: usize = 9;
+        let per_frame = if direction > 0 {
+            total_px / FRAMES as f32
+        } else {
+            -total_px / FRAMES as f32
+        };
+        let scroll = tab.scroll.clone();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..FRAMES {
+                scroll.scroll_by(per_frame);
+                let _ = this.update(cx, |_s, cx| cx.notify());
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Move the row selection on whichever tab kind is active.
+    /// Listing tabs skip past non-Instruction rows (separators,
+    /// symbol headers); hex / smali tabs just clamp to row count.
+    pub(crate) fn move_listing_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(active) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get_mut(active) else { return };
+        let step: i32 = if delta >= 0 { 1 } else { -1 };
+        // Dispatch by tab kind: each one owns a different row
+        // collection.
+        let (row_count, only_instructions) = match &tab.kind {
+            crate::TabKind::Listing { .. } => match tab.listing_rows.as_ref() {
+                Some(rows) => (rows.len(), true),
+                None => return,
+            },
+            crate::TabKind::Hex { .. } => match tab.hex_rows.as_ref() {
+                Some(rows) => (rows.len(), false),
+                None => return,
+            },
+            crate::TabKind::SmaliClass { .. } => match tab.lines.as_ref() {
+                Some(lines) => (lines.len(), false),
+                None => return,
+            },
+            _ => return,
+        };
+        if row_count == 0 {
+            return;
+        }
+        let max = row_count as i32 - 1;
+        let mut pos = tab.selected_row.unwrap_or(0) as i32;
+        if only_instructions {
+            // Listing: walk past non-Instruction rows.
+            let rows = tab.listing_rows.as_ref().unwrap().clone();
+            loop {
+                let next = pos + step;
+                if next < 0 || next > max {
+                    return;
+                }
+                pos = next;
+                if matches!(rows[pos as usize], crate::ListingRow::Instruction { .. }) {
+                    break;
+                }
+            }
+        } else {
+            let next = (pos + step).clamp(0, max);
+            if next == pos {
+                return;
+            }
+            pos = next;
+        }
+        let next = pos as usize;
+        if tab.selected_row != Some(next) {
+            tab.selected_row = Some(next);
+            // Hex tabs also drive `selected_byte_addr` so the
+            // byte cursor moves with the row.
+            if matches!(tab.kind, crate::TabKind::Hex { .. }) {
+                if let Some(rows) = tab.hex_rows.as_ref() {
+                    if let Some(crate::HexRow::Bytes { address, .. }) = rows.get(next) {
+                        // Preserve the column offset within the
+                        // row so vertical movement keeps the
+                        // byte cursor under the same column.
+                        let column = tab
+                            .selected_byte_addr
+                            .and_then(|a| {
+                                rows.iter().find_map(|r| match r {
+                                    crate::HexRow::Bytes { address, .. }
+                                        if a >= *address && a < *address + 16 =>
+                                    {
+                                        Some(a - *address)
+                                    }
+                                    _ => None,
+                                })
+                            })
+                            .unwrap_or(0);
+                        tab.selected_byte_addr = Some(*address + column);
+                    }
+                }
+            }
+            tab.scroll.scroll_to_reveal_item(next);
+            cx.notify();
+        }
+    }
+
+    /// If the active listing tab has a selected instruction row,
+    /// open it for editing. Bound to Enter when no other context
+    /// (palette / dialog / in-flight edit) is consuming Enter.
+    pub(crate) fn edit_selected_listing_row(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get(active) else { return };
+        let Some(selected) = tab.selected_row else { return };
+        let Some(rows) = tab.listing_rows.as_ref() else { return };
+        let Some(row) = rows.get(selected) else { return };
+        let crate::ListingRow::Instruction { address, .. } = row else {
+            return;
+        };
+        let address = *address;
+        let artifact = match &tab.kind {
+            crate::TabKind::Listing { artifact, .. } => artifact.clone(),
+            _ => return,
+        };
+        self.begin_disasm_edit_at_address(artifact, address, cx);
+    }
+
     pub(crate) fn select_active_row(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(active) = self.active_tab else { return };
         let Some(tab) = self.tabs.get_mut(active) else { return };
@@ -2887,12 +3140,20 @@ impl Shell {
         initial_text: String,
         cx: &mut Context<Self>,
     ) {
+        let mut input = crate::text_input::TextInput::from_text(initial_text);
+        // Select the whole pre-populated text so the first
+        // keystroke replaces it — this is the common case for
+        // editing a disasm row (overtype rather than amend).
+        input.select_all_pub();
         self.disasm_edit = Some(crate::DisasmEditState {
             artifact,
             address,
-            input: crate::text_input::TextInput::from_text(initial_text),
+            input,
             error: None,
+            suggestions: Vec::new(),
+            suggestion_selected: 0,
         });
+        self.refresh_disasm_edit_suggestions();
         cx.notify();
     }
 
@@ -2905,6 +3166,21 @@ impl Shell {
         k: &gpui::Keystroke,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Up/Down navigate the suggestion list when one is showing.
+        // Tab commits the highlighted suggestion. Other keys
+        // forward to the TextInput.
+        if k.key == "up" {
+            self.move_disasm_suggestion(-1, cx);
+            return true;
+        }
+        if k.key == "down" {
+            self.move_disasm_suggestion(1, cx);
+            return true;
+        }
+        if k.key == "tab" {
+            self.commit_disasm_suggestion(cx);
+            return true;
+        }
         let Some(edit) = self.disasm_edit.as_mut() else {
             return false;
         };
@@ -2917,8 +3193,163 @@ impl Shell {
             .input
             .handle_key(&k.key, shift, cmd, alt, key_char, app);
         edit.error = None;
+        self.refresh_disasm_edit_suggestions();
         cx.notify();
         true
+    }
+
+    /// Mouse-click handler for a suggestion row. Highlights the
+    /// clicked index and commits it. Used by the suggestion
+    /// overlay's per-row click handlers.
+    pub(crate) fn click_disasm_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(e) = self.disasm_edit.as_mut() {
+            if index < e.suggestions.len() {
+                e.suggestion_selected = index;
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+        self.commit_disasm_suggestion(cx);
+    }
+
+    pub(crate) fn move_disasm_suggestion_pub(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.move_disasm_suggestion(delta, cx);
+    }
+
+    fn move_disasm_suggestion(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if let Some(e) = self.disasm_edit.as_mut() {
+            if e.suggestions.is_empty() {
+                return;
+            }
+            let max = e.suggestions.len() - 1;
+            let next = (e.suggestion_selected as i32 + delta).clamp(0, max as i32) as usize;
+            if next != e.suggestion_selected {
+                e.suggestion_selected = next;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn commit_disasm_suggestion_pub(&mut self, cx: &mut Context<Self>) {
+        self.commit_disasm_suggestion(cx);
+    }
+
+    /// Replace the partial word at the cursor with the
+    /// highlighted suggestion's `commit_text`. Cursor lands at
+    /// the end of the inserted text. The dropdown is dismissed
+    /// until the next keystroke so the user gets a clear path
+    /// to "Enter commits the whole edit" — if we re-classified
+    /// immediately, suggestions for the *next* slot would pop
+    /// up and Enter would never reach `commit_disasm_edit`.
+    fn commit_disasm_suggestion(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.disasm_edit.as_mut() else { return };
+        let Some(sugg) = edit.suggestions.get(edit.suggestion_selected).cloned()
+        else {
+            return;
+        };
+        let text = edit.input.text().to_string();
+        let cursor = edit.input.cursor();
+        let ctx = glass_api::classify_insn_cursor(&text, cursor);
+        let mut new_text = String::with_capacity(text.len() + sugg.commit_text.len());
+        new_text.push_str(&text[..ctx.word_range.start]);
+        new_text.push_str(&sugg.commit_text);
+        new_text.push_str(&text[ctx.word_range.end..]);
+        edit.input.set_text(new_text);
+        edit.suggestions.clear();
+        edit.suggestion_selected = 0;
+        cx.notify();
+    }
+
+    /// Rebuild the suggestion list based on the current input +
+    /// cursor. Cheap — symbol scans are linear over the
+    /// artifact's symbol map (typically a few thousand entries).
+    pub(crate) fn refresh_disasm_edit_suggestions(&mut self) {
+        // Pull input + artifact before grabbing the mutable
+        // borrow so we can still read `self.bundle()` while
+        // building the suggestion list.
+        let (text, artifact) = match self.disasm_edit.as_ref() {
+            Some(e) => (e.input.text().to_string(), e.artifact.clone()),
+            None => return,
+        };
+        let cursor = self
+            .disasm_edit
+            .as_ref()
+            .map(|e| e.input.cursor())
+            .unwrap_or(text.len());
+        let ctx = glass_api::classify_insn_cursor(&text, cursor);
+        let mut out: Vec<crate::EditSuggestion> = Vec::new();
+        match ctx.kind {
+            glass_api::CursorKind::Mnemonic => {
+                let variants = glass_api::match_insn_variants(&ctx.partial, 12);
+                for cand in variants {
+                    out.push(crate::EditSuggestion {
+                        label: cand.variant.template.clone().into(),
+                        commit_text: cand.variant.mnemonic.to_string(),
+                        detail: "asm".into(),
+                        kind: crate::EditSuggestionKind::Mnemonic,
+                    });
+                }
+            }
+            glass_api::CursorKind::BranchTargetSlot => {
+                if let Some(bundle) = self.bundle() {
+                    if let Some(map) = bundle.symbol_maps.get(&artifact) {
+                        let needle = ctx.partial.as_str();
+                        let mut hits: Vec<(usize, _)> = Vec::new();
+                        for sym in map.iter() {
+                            let display_lower = sym.display_name.to_ascii_lowercase();
+                            let raw_lower = sym.name.to_ascii_lowercase();
+                            let score = if display_lower.starts_with(needle) {
+                                0
+                            } else if raw_lower.starts_with(needle) {
+                                1
+                            } else if display_lower.contains(needle) {
+                                2
+                            } else if raw_lower.contains(needle) {
+                                3
+                            } else {
+                                continue;
+                            };
+                            hits.push((score, sym));
+                        }
+                        hits.sort_by_key(|(s, _)| *s);
+                        hits.truncate(20);
+                        for (_, sym) in hits {
+                            out.push(crate::EditSuggestion {
+                                label: sym.display_name.clone().into(),
+                                commit_text: sym.display_name.clone(),
+                                detail: format!("0x{:x}", sym.address).into(),
+                                kind: crate::EditSuggestionKind::Symbol,
+                            });
+                        }
+                    }
+                }
+            }
+            glass_api::CursorKind::RegisterSlot => {
+                let needle = ctx.partial.as_str();
+                for &name in REGISTER_NAMES {
+                    if name.starts_with(needle) {
+                        out.push(crate::EditSuggestion {
+                            label: name.into(),
+                            commit_text: name.to_string(),
+                            detail: "reg".into(),
+                            kind: crate::EditSuggestionKind::Register,
+                        });
+                        if out.len() >= 20 {
+                            break;
+                        }
+                    }
+                }
+            }
+            glass_api::CursorKind::ImmediateSlot | glass_api::CursorKind::MemorySlot => {
+                // No suggestions; raw input.
+            }
+        }
+        if let Some(edit) = self.disasm_edit.as_mut() {
+            edit.suggestions = out;
+            edit.suggestion_selected = 0;
+        }
     }
 
     /// Try to compile + stage the in-progress edit. On success the
@@ -2938,9 +3369,24 @@ impl Shell {
             cx.notify();
             return;
         };
-        // Compile via the same concrete-only path the CLI uses.
-        // Reject any wildcards — patching needs fixed bytes.
-        let new_bytes = match glass_api::compile_insn_pattern(&source_text) {
+        // Compile with the row's address (so PC-relative
+        // encodings come out correctly) and a symbol resolver
+        // backed by the artifact's symbol map (so `bl foo`
+        // works).
+        let sym_map = bundle.symbol_maps.get(&edit.artifact).cloned();
+        let lookup: Box<dyn Fn(&str) -> Option<u64>> = match sym_map {
+            Some(map) => Box::new(move |needle: &str| {
+                map.iter()
+                    .find(|s| s.display_name == needle || s.name == needle)
+                    .map(|s| s.address)
+            }),
+            None => Box::new(|_| None),
+        };
+        let new_bytes = match glass_api::compile_insn_at(
+            &source_text,
+            edit.address,
+            Some(lookup.as_ref()),
+        ) {
             Ok(b) if b.len() == 4 => [b[0], b[1], b[2], b[3]],
             Ok(_) => {
                 if let Some(e) = self.disasm_edit.as_mut() {
@@ -2957,8 +3403,20 @@ impl Shell {
                 return;
             }
         };
-        // Decode the new bytes for the cached pretty-print.
-        let new_disasm = decode_insn_pretty(&new_bytes, edit.address);
+        // Decode the new bytes for the cached pretty-print,
+        // resolving address operands to symbol names so the
+        // modified row + Changes dialog show `bl decode_packet`
+        // instead of `bl 0x...`.
+        let sym_map_for_display = bundle.symbol_maps.get(&edit.artifact).cloned();
+        let new_disasm = decode_insn_pretty_with_symbols(
+            &new_bytes,
+            edit.address,
+            |addr: u64| {
+                sym_map_for_display
+                    .as_ref()
+                    .and_then(|m| m.at(addr).map(|s| s.display_name.clone()))
+            },
+        );
         let staged = crate::edits::Edit {
             artifact: edit.artifact.clone(),
             vaddr: edit.address,
@@ -3530,11 +3988,25 @@ fn build_dex_field_entries(
 /// paint. PC-relative operands are resolved against `addr` so
 /// branches show their real target.
 pub(crate) fn decode_insn_pretty(bytes: &[u8; 4], addr: u64) -> String {
+    decode_insn_pretty_with_symbols(bytes, addr, |_| None)
+}
+
+/// Variant that resolves address operands to symbol names via
+/// the supplied closure. Used after staging an edit so the
+/// "modified" row shows `bl decode_packet` instead of `bl 0x…`.
+pub(crate) fn decode_insn_pretty_with_symbols<F>(
+    bytes: &[u8; 4],
+    addr: u64,
+    symbol_for_address: F,
+) -> String
+where
+    F: Fn(u64) -> Option<String>,
+{
     let word = u32::from_le_bytes(*bytes);
     match armv8_encode::isa::aarch64::decode_instruction(addr, word) {
         Ok(insn) => {
             let mnem = insn.format_mnemonic();
-            let ops = insn.format_operands();
+            let ops = insn.format_operands_with_symbols(symbol_for_address);
             if ops.is_empty() {
                 mnem
             } else {
@@ -3561,3 +4033,17 @@ fn patched_filename(source: &std::path::Path) -> String {
         format!("{stem}-patched.{ext}")
     }
 }
+
+/// Register names offered by the edit-mode autocomplete when
+/// the cursor sits in a register slot. Order: zero registers,
+/// stack pointers, then numeric W/X in ascending order. The
+/// dropdown shows a prefix-filtered, capped subset.
+const REGISTER_NAMES: &[&str] = &[
+    "wzr", "xzr", "wsp", "sp",
+    "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9",
+    "w10", "w11", "w12", "w13", "w14", "w15", "w16", "w17", "w18", "w19",
+    "w20", "w21", "w22", "w23", "w24", "w25", "w26", "w27", "w28", "w29", "w30",
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+    "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", "x19",
+    "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "x30",
+];

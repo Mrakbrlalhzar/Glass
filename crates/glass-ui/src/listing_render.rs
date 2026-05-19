@@ -734,9 +734,7 @@ pub fn render_listing_row_with(
                 use gpui::rgb;
                 let edit_bg = gpui::rgba(0x3a2f1080);
                 // Display bytes in the live edit reflect any
-                // already-staged edit at this address — the user
-                // is editing the current encoding, not the
-                // file's original.
+                // already-staged edit at this address.
                 let live_bytes = ctx
                     .and_then(|c| c.bundle.edits.get(&c.artifact, *address))
                     .filter(|e| e.new_bytes.len() == 4)
@@ -793,6 +791,12 @@ pub fn render_listing_row_with(
                             .child(SharedString::from(err.clone())),
                     );
                 }
+                // The row container has `overflow_hidden` + a
+                // fixed height set by `h_shift_with_addr_annotated`,
+                // so any dropdown rendered inside it would be
+                // clipped. The actual suggestion list lives at
+                // the Shell level (see render_disasm_edit_suggestions
+                // in lib.rs); we just render the input row here.
                 return h_shift_with_addr_annotated(
                     row,
                     h_offset,

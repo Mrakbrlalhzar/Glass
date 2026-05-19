@@ -372,6 +372,75 @@ schema version, last-opened time, artifact count, open tabs,
 expanded paths, and the source path. Returns `record: null` when
 the bundle has never been opened.
 
+## Patching & re-serialisation
+
+Glass can edit instructions and bytes inside a loaded artifact and
+re-pack the whole bundle. The CLI/MCP path uses a JSON **patch
+file** that accumulates edits across calls, mirroring the GUI's
+in-memory edit registry.
+
+### `patch <path> --artifact A --addr 0x... (--insn '...' | --bytes 'aa bb cc dd') --patches FILE`
+
+Stage one edit. `--insn` compiles AArch64 assembly with PC-relative
+encoding at `--addr` (no symbol lookup yet — pass hex for branch
+targets). `--bytes` writes raw hex pairs of the same length as the
+original at the address. Same `(artifact, addr)` appearing twice
+replaces the earlier edit.
+
+```sh
+# Replace `svc #0` at 0x100000f7c with `nop`.
+glass patch ./libfoo.so --artifact libfoo.so \
+  --addr 0x100000f7c --insn 'nop' --patches /tmp/p.json
+
+# Set the first 4 bytes at 0x100001000 to a NOP.
+glass patch ./libfoo.so --artifact libfoo.so \
+  --addr 0x100001000 --bytes '1f 20 03 d5' --patches /tmp/p.json
+```
+
+### `export-patched <path> --patches FILE --out OUT`
+
+Apply the patch file to the bundle. Mach-O / ELF / `.so`
+standalone binaries are written directly; APK/AAB get re-packed via
+the smali zip writer; IPA gets re-streamed via the `zip` crate.
+Empty patch files are rejected.
+
+```sh
+glass export-patched ./libfoo.so --patches /tmp/p.json --out ./libfoo-patched.so
+```
+
+### `patch-schema`
+
+Print the JSON Schema (draft 2020-12) describing the patch file
+format. Useful when consuming the file from another tool.
+
+```sh
+glass patch-schema | jq .
+```
+
+### Patch file format
+
+```json
+{
+  "version": 1,
+  "source_path": "/abs/path/to/bundle.so",
+  "edits": [
+    {
+      "artifact": "<64-char hex artifact id from `glass inspect`>",
+      "vaddr": 4294971260,
+      "kind": "Instruction",
+      "new_bytes": [31, 32, 3, 213],
+      "original_bytes": [],
+      "source_text": "nop"
+    }
+  ]
+}
+```
+
+`kind` is display-only (one of `Instruction`, `Bytes`, `String`);
+the splice writes `new_bytes` regardless. `original_bytes` and
+`source_text` are optional and informational. See `glass
+patch-schema` for the authoritative description.
+
 ## Piping & composition
 
 The JSON shape is stable and addresses-as-strings are safe for

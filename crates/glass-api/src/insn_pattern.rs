@@ -95,6 +95,25 @@ fn atoms_to_hex(atoms: &[Atom]) -> String {
         .join(" ")
 }
 
+/// Per-call options threaded through the compiler. The defaults
+/// match the historical search-only path: address 0, no symbol
+/// resolver. The GUI's per-line edit path overrides both so
+/// PC-relative encodings come out correct and bare identifiers
+/// resolve to absolute addresses.
+#[derive(Default)]
+pub struct CompileOptions<'a> {
+    /// Address the *first* compiled instruction is being placed
+    /// at. Drives the encoder's PC-relative delta calculation.
+    /// Subsequent instructions in a `;`-separated sequence get
+    /// `address + 4 * index`. Defaults to 0.
+    pub address: u64,
+    /// Optional symbol resolver. When set, an unrecognised
+    /// identifier in operand position is looked up via this
+    /// closure and treated as the absolute address it returns.
+    /// When `None`, identifiers fail to parse.
+    pub symbol_lookup: Option<&'a dyn Fn(&str) -> Option<u64>>,
+}
+
 /// Compile a pattern to concrete bytes (no wildcards). Errors
 /// if the pattern contains any wildcard tokens. Kept for the
 /// existing tests and any caller that needs raw bytes for
@@ -111,18 +130,27 @@ pub fn compile(pattern: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Compile a pattern to byte atoms. Each `;`-separated instruction
-/// produces exactly 4 atoms. Wildcarded operand bits are cleared in
-/// both mask and value so the byte engine matches any value in
-/// those positions.
+/// Compile a pattern to byte atoms with default options (address
+/// = 0, no symbol resolver). The search path uses this.
 pub fn compile_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
+    compile_to_atoms_with(pattern, &CompileOptions::default())
+}
+
+/// Compile-with-options variant. `;`-separated instructions
+/// land at `options.address + 4 * i`. Wildcarded bits flow
+/// through unchanged.
+pub fn compile_to_atoms_with(
+    pattern: &str,
+    options: &CompileOptions,
+) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
     for (i, raw) in pattern.split(';').enumerate() {
         let s = raw.trim();
         if s.is_empty() {
             continue;
         }
-        let (word, mask) = compile_one(s)
+        let addr = options.address + (i as u64) * 4;
+        let (word, mask) = compile_one(s, addr, options.symbol_lookup)
             .with_context(|| format!("instruction {} ({s:?})", i + 1))?;
         // Emit four LE byte atoms.
         let word_bytes = word.to_le_bytes();
@@ -132,6 +160,31 @@ pub fn compile_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
                 mask: mask_bytes[k],
                 value: word_bytes[k] & mask_bytes[k],
             });
+        }
+    }
+    Ok(out)
+}
+
+/// Concrete-bytes-only variant of `compile_to_atoms_with`. The
+/// GUI's instruction editor calls this with the row's address
+/// and the bundle's symbol resolver.
+pub fn compile_at(
+    pattern: &str,
+    address: u64,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<u8>> {
+    let atoms = compile_to_atoms_with(
+        pattern,
+        &CompileOptions {
+            address,
+            symbol_lookup,
+        },
+    )?;
+    let mut out = Vec::with_capacity(atoms.len());
+    for a in &atoms {
+        match a {
+            Atom::Mask { mask: 0xff, value } => out.push(*value),
+            _ => anyhow::bail!("pattern contains wildcards"),
         }
     }
     Ok(out)
@@ -150,12 +203,38 @@ pub fn compile_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
 /// first successful encoding wins. We then know exactly which
 /// opcode we're dealing with and use `operand_bit_ranges()` to
 /// build the byte mask without a second lookup.
-fn compile_one(s: &str) -> Result<(u32, u32)> {
+fn compile_one(
+    s: &str,
+    address: u64,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<(u32, u32)> {
     use armv8_encode::isa::aarch64::Aarch64Opnd;
 
     let (mnem_str, rest) = split_mnemonic(s);
     let mnemonic = parse_mnemonic(mnem_str)?;
     let mut tokens = parse_operand_tokens(rest)?;
+    // Resolve any Symbol tokens up-front. Failure here aborts
+    // the whole instruction — we don't fall through to "maybe
+    // some other opcode form takes this as something else".
+    for tok in tokens.iter_mut() {
+        if let OperandToken::Symbol(name) = tok {
+            let Some(lookup) = symbol_lookup else {
+                anyhow::bail!(
+                    "operand {name:?} looks like a symbol but no resolver was provided"
+                );
+            };
+            let abs = lookup(name).ok_or_else(|| {
+                anyhow!("unknown symbol {name:?}")
+            })?;
+            // The exact operand kind (BranchTarget vs PageTarget
+            // vs plain Immediate) depends on the opcode slot we
+            // land in — we don't know it yet. Stash the absolute
+            // address as an Immediate; placeholder_for_kind /
+            // the opcode-matching loop below will repackage it
+            // when we know which slot it fills.
+            *tok = OperandToken::ResolvedSymbol(abs);
+        }
+    }
 
     // Sugar: `ret` with no operands → `ret x30`.
     if matches!(mnemonic, Aarch64Mnemonic::Ret) && tokens.is_empty() {
@@ -186,10 +265,25 @@ fn compile_one(s: &str) -> Result<(u32, u32)> {
         }
         let mut score = 0i32;
         for (tok, kind) in tokens.iter().zip(slot_kinds.iter()) {
-            if let OperandToken::Wildcard(w) = tok {
-                if wildcard_prefers_kind(*w, *kind) {
-                    score += 1;
+            match tok {
+                OperandToken::Wildcard(w) => {
+                    if wildcard_prefers_kind(*w, *kind) {
+                        score += 1;
+                    }
                 }
+                OperandToken::ResolvedSymbol(_) => {
+                    // Symbols on a branch / PC-relative / ADRP
+                    // slot are exactly what we want; reward.
+                    use armv8_encode::isa::aarch64::Aarch64Opnd::*;
+                    if matches!(
+                        kind,
+                        AddrPcrel14 | AddrPcrel19 | AddrPcrel21 | AddrPcrel26
+                            | AddrAdrp
+                    ) {
+                        score += 2;
+                    }
+                }
+                _ => {}
             }
         }
         candidates.push((score, *op));
@@ -206,13 +300,23 @@ fn compile_one(s: &str) -> Result<(u32, u32)> {
         }
 
         // Build operands: concrete tokens pass through;
-        // wildcards become slot-kind-specific placeholders.
+        // wildcards become slot-kind-specific placeholders;
+        // resolved symbols become the operand kind that matches
+        // the slot (BranchTarget / PageTarget / Immediate).
         let operands_result: Result<Vec<DecodedOperand>, &'static str> = tokens
             .iter()
             .zip(slot_kinds.iter())
             .map(|(tok, kind)| match tok {
                 OperandToken::Concrete(op) => Ok(op.clone()),
                 OperandToken::Wildcard(_) => placeholder_for_kind(*kind),
+                OperandToken::Symbol(_) => {
+                    // Should've been resolved up-front; treat as
+                    // a compile error if we still see one.
+                    Err("unresolved-symbol")
+                }
+                OperandToken::ResolvedSymbol(abs) => {
+                    Ok(resolved_symbol_operand(*kind, *abs))
+                }
             })
             .collect();
         let operands = match operands_result {
@@ -224,7 +328,7 @@ fn compile_one(s: &str) -> Result<(u32, u32)> {
         };
 
         let template = InstructionTemplate {
-            address: 0,
+            address,
             mnemonic,
             operands,
         };
@@ -360,6 +464,35 @@ enum WildcardKind {
 enum OperandToken {
     Concrete(DecodedOperand),
     Wildcard(WildcardKind),
+    /// Bare identifier — looks like a symbol name (`foo`,
+    /// `decode_packet`, `glass::main`). Resolved up-front in
+    /// `compile_one`; the parsed token only carries the name.
+    Symbol(String),
+    /// Symbol that's been resolved to an absolute address. The
+    /// opcode-matching loop wraps it as a BranchTarget,
+    /// PageTarget, or Immediate depending on the slot kind it
+    /// lands in.
+    ResolvedSymbol(u64),
+}
+
+/// Wrap a resolved-symbol absolute address into the right
+/// `DecodedOperand` variant for the opcode slot it's landing
+/// in. Branch / PC-relative slots want `BranchTarget`; ADRP
+/// wants `PageTarget`; anything else (e.g. an immediate slot
+/// the user typed a label into for whatever reason) gets a
+/// plain `Immediate` and the encoder validates from there.
+fn resolved_symbol_operand(
+    kind: armv8_encode::isa::aarch64::Aarch64Opnd,
+    abs: u64,
+) -> DecodedOperand {
+    use armv8_encode::isa::aarch64::Aarch64Opnd::*;
+    match kind {
+        AddrPcrel14 | AddrPcrel19 | AddrPcrel21 | AddrPcrel26 => {
+            DecodedOperand::BranchTarget(abs)
+        }
+        AddrAdrp => DecodedOperand::PageTarget(abs),
+        _ => DecodedOperand::Immediate(abs as i64),
+    }
 }
 
 #[allow(dead_code)]
@@ -520,7 +653,31 @@ fn parse_operand_token(s: &str) -> Result<OperandToken> {
     if let Some(n) = try_parse_immediate(s) {
         return Ok(OperandToken::Concrete(DecodedOperand::Immediate(n)));
     }
+    // Last-chance: an identifier that looks like a symbol name.
+    // The compile_one pass will try to resolve it via the
+    // caller-supplied lookup and fail if there's no resolver.
+    if looks_like_symbol(s) {
+        return Ok(OperandToken::Symbol(s.to_string()));
+    }
     anyhow::bail!("can't parse operand {s:?}")
+}
+
+/// Heuristic for "this looks like a symbol name, not a typo":
+/// starts with a letter / underscore, body chars limited to the
+/// alphabet of typical symbol names (alphanumeric, `_`, `:`,
+/// `$`, `.`, `@` — wide enough for mangled C++ / Rust / Swift,
+/// DEX, and Obj-C selectors). Stricter than `is_alphanumeric`
+/// so a random number-only typo doesn't pretend to be a symbol.
+fn looks_like_symbol(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | ':' | '$' | '.' | '@')
+    })
 }
 
 fn classify_wildcard(hint: &str) -> WildcardKind {
@@ -803,5 +960,40 @@ mod tests {
             }
             _ => panic!("expected Mask atom"),
         }
+    }
+
+    #[test]
+    fn bl_resolves_symbol_to_pc_relative() {
+        // `bl decode_packet` at address 0x100000000, with
+        // decode_packet at 0x100000010 → 4-byte instruction
+        // delta of +16 (4 instructions forward).
+        let lookup = |name: &str| -> Option<u64> {
+            (name == "decode_packet").then_some(0x100000010)
+        };
+        let bytes = compile_at(
+            "bl decode_packet",
+            0x100000000,
+            Some(&lookup),
+        )
+        .expect("compile bl symbol");
+        // BL encoding: top 6 bits = 100101 (0x94), low 26 bits =
+        // signed-shifted offset in 4-byte words. 16/4 = 4.
+        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(word & 0xfc000000, 0x94000000, "BL opcode bits");
+        assert_eq!(word & 0x03ffffff, 4, "delta-in-words");
+    }
+
+    #[test]
+    fn unknown_symbol_errors() {
+        let lookup = |_: &str| -> Option<u64> { None };
+        let err = compile_at("bl mystery_func", 0, Some(&lookup))
+            .expect_err("should fail to resolve");
+        assert!(format!("{err:#}").contains("mystery_func"));
+    }
+
+    #[test]
+    fn symbol_with_no_resolver_errors() {
+        let err = compile_at("bl decode_packet", 0, None).expect_err("no resolver");
+        assert!(format!("{err:#}").contains("resolver"));
     }
 }

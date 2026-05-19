@@ -74,6 +74,20 @@ impl TextInput {
         &self.text
     }
 
+    /// Byte offset of the insertion point. Used by external
+    /// autocomplete classifiers that need to know where in the
+    /// buffer the cursor sits.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Select the entire buffer; cursor lands at the end. Used
+    /// when opening an edit pre-populated with existing text so
+    /// the user's first keystroke replaces it.
+    pub fn select_all_pub(&mut self) {
+        self.select_all();
+    }
+
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()

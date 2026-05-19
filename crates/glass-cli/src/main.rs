@@ -148,6 +148,22 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             *limit,
             format,
         )),
+        Cmd::Patch { path, artifact, addr, insn, bytes, patches } => Some(verbs::patch(
+            path.clone(),
+            artifact.clone(),
+            addr.clone(),
+            insn.clone(),
+            bytes.clone(),
+            patches.clone(),
+            format,
+        )),
+        Cmd::ExportPatched { path, patches, out } => Some(verbs::export_patched(
+            path.clone(),
+            patches.clone(),
+            out.clone(),
+            format,
+        )),
+        Cmd::PatchSchema => Some(verbs::patch_schema(format)),
         Cmd::Annotations { path } => Some(verbs::annotations(path.clone(), format)),
         Cmd::DbDump { path } => Some(verbs::db_dump_v2(path.clone(), format)),
         Cmd::SetRename { path, key_kind, key, method, name } => Some(verbs::set_rename(
@@ -420,6 +436,44 @@ enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Stage one instruction or byte edit in a patch file.
+    /// The file accumulates edits across calls. Use
+    /// `export-patched` to write a patched bundle.
+    /// Provide exactly one of `--insn` or `--bytes`.
+    Patch {
+        /// Bundle (apk/aab/ipa) or standalone binary.
+        path: PathBuf,
+        /// Artifact label or hex-prefix id (see `glass artifacts`).
+        #[arg(long)]
+        artifact: String,
+        /// Virtual address as hex, with or without 0x prefix.
+        #[arg(long)]
+        addr: String,
+        /// AArch64 assembly source (single instruction). Mutually
+        /// exclusive with --bytes.
+        #[arg(long, conflicts_with = "bytes")]
+        insn: Option<String>,
+        /// Raw replacement bytes, space-separated hex (e.g.
+        /// `'20 00 80 52'`). Length must match the original
+        /// item at addr (typically 4 for instructions).
+        #[arg(long)]
+        bytes: Option<String>,
+        /// Patch file to read/write. Created if absent.
+        #[arg(long)]
+        patches: PathBuf,
+    },
+    /// Apply a patch file to a bundle and write the patched
+    /// output.
+    ExportPatched {
+        path: PathBuf,
+        #[arg(long)]
+        patches: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print the JSON Schema for the patch file format. Useful
+    /// for external validators / tooling.
+    PatchSchema,
     /// Read user-set annotations (rename / comment / colour) for
     /// the artifact identified by content-hashing `path`.
     Annotations { path: PathBuf },
@@ -669,6 +723,9 @@ fn main() -> Result<()> {
         | Cmd::Strings { .. }
         | Cmd::BinSearch { .. }
         | Cmd::InsnSearch { .. }
+        | Cmd::Patch { .. }
+        | Cmd::ExportPatched { .. }
+        | Cmd::PatchSchema
         | Cmd::Annotations { .. }
         | Cmd::DbDump { .. }
         | Cmd::SetRename { .. }

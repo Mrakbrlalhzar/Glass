@@ -234,6 +234,103 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             let limit = opt_usize(args, "limit");
             json_of(&bundle.insn_search(&artifact, &pattern, section.as_deref(), limit)?)?
         }
+        "patch" => {
+            // Reuses the same code path as the CLI verb by
+            // calling glass_api::PatchFile + compile_insn_at.
+            let path = require_path(args)?;
+            let artifact_ref = require_str(args, "artifact")?;
+            let addr_str = require_str(args, "addr")?;
+            let patches_path = std::path::PathBuf::from(require_str(args, "patches")?);
+            let insn = opt_str(args, "insn");
+            let bytes = opt_str(args, "bytes");
+
+            let bundle = glass_api::open(&path)?;
+            let artifact_id = bundle
+                .resolve_artifact(&artifact_ref)
+                .ok_or_else(|| {
+                    DispatchError::Other(format!(
+                        "no artifact matches {artifact_ref:?}"
+                    ))
+                })?
+                .clone();
+            let vaddr = u64::from_str_radix(addr_str.trim_start_matches("0x"), 16)
+                .map_err(|e| {
+                    DispatchError::Other(format!(
+                        "bad hex address {addr_str:?}: {e}"
+                    ))
+                })?;
+            let (new_bytes, kind, source_text) = match (insn, bytes) {
+                (Some(insn_src), None) => {
+                    let bytes_vec = glass_api::compile_insn_at(&insn_src, vaddr, None)?;
+                    (bytes_vec, glass_api::PatchKind::Instruction, insn_src)
+                }
+                (None, Some(hex_src)) => {
+                    let bytes_vec = parse_hex_bytes(&hex_src)?;
+                    let display = bytes_vec
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (bytes_vec, glass_api::PatchKind::Bytes, display)
+                }
+                (Some(_), Some(_)) => {
+                    return Err(DispatchError::Other(format!(
+                        "provide either `insn` or `bytes`, not both"
+                    )))
+                }
+                (None, None) => {
+                    return Err(DispatchError::Other(format!(
+                        "provide `insn` or `bytes`"
+                    )))
+                }
+            };
+            let mut pf = glass_api::PatchFile::read_or_default(&patches_path)?;
+            if pf.source_path.is_none() {
+                pf.source_path = Some(path.clone());
+            }
+            pf.upsert(glass_api::PatchEntry {
+                artifact: artifact_id.to_hex(),
+                vaddr,
+                kind,
+                new_bytes: new_bytes.clone(),
+                original_bytes: Vec::new(),
+                source_text,
+            });
+            pf.write(&patches_path)?;
+            let new_bytes_hex = new_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            json_of(&serde_json::json!({
+                "patches": patches_path,
+                "artifact": artifact_id.to_hex(),
+                "vaddr": format!("0x{vaddr:x}"),
+                "new_bytes_hex": new_bytes_hex,
+                "total_edits": pf.edits.len(),
+            }))?
+        }
+        "export-patched" => {
+            let path = require_path(args)?;
+            let patches = std::path::PathBuf::from(require_str(args, "patches")?);
+            let out = std::path::PathBuf::from(require_str(args, "out")?);
+            let pf = glass_api::PatchFile::read_or_default(&patches)?;
+            if pf.edits.is_empty() {
+                return Err(DispatchError::Other(format!(
+                    "patch file {} contains no edits",
+                    patches.display()
+                )));
+            }
+            let edits_applied = pf.edits.len();
+            let bundle = glass_api::open(&path)?;
+            let edit_map = pf.to_edit_map();
+            glass_api::export_to_path(&bundle, &edit_map, &out)?;
+            json_of(&serde_json::json!({
+                "out": out,
+                "edits_applied": edits_applied,
+            }))?
+        }
+        "patch-schema" => json_of(&glass_api::patch_file_schema())?,
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
     let duration_ms = start.elapsed().as_millis();
@@ -286,3 +383,23 @@ fn parse_kind(s: &str) -> Option<glass_api::SymbolKindName> {
     }
 }
 
+
+/// Parse a hex byte string like `"20 00 80 52"` (whitespace
+/// optional) into a Vec<u8>. Mirrors the CLI's helper.
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() % 2 != 0 {
+        return Err(DispatchError::Other(format!(
+            "hex byte string has odd length: {s:?}"
+        )));
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    for i in (0..cleaned.len()).step_by(2) {
+        let pair = &cleaned[i..i + 2];
+        let byte = u8::from_str_radix(pair, 16).map_err(|e| {
+            DispatchError::Other(format!("non-hex pair {pair:?}: {e}"))
+        })?;
+        out.push(byte);
+    }
+    Ok(out)
+}

@@ -584,6 +584,51 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({ "type": "object" }),
                 example: "glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'adrp x1, * ; add x1, x1, #*'",
             },
+
+            // ---- Patching --------------------------------------------
+            Skill {
+                name: "patch",
+                description: "Stage one instruction or byte edit in a patch file. The file accumulates edits across calls (read-modify-write JSON), and is consumed by `export-patched` to write a patched bundle. Provide exactly one of `insn` (AArch64 assembly source) or `bytes` (raw hex pairs). Same `(artifact, addr)` appearing twice replaces the earlier edit. Patch-file schema: `{version: 1, source_path?: string, edits: [{artifact: <64-char hex>, vaddr: <u64>, kind: \"Instruction|Bytes|String\", new_bytes: [<u8>...], original_bytes?: [<u8>...], source_text?: string}]}`. Use `patch-schema` to fetch the full JSON Schema.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "artifact", "addr", "patches"],
+                    "properties": {
+                        "path": path_arg(),
+                        "artifact": artifact_arg(),
+                        "addr": hex_addr_arg(),
+                        "insn": { "type": "string", "description": "AArch64 assembly source for a single instruction, e.g. 'mov w0, #1' or 'ret'. Mutually exclusive with `bytes`." },
+                        "bytes": { "type": "string", "description": "Raw replacement bytes as space-separated hex pairs (e.g. '20 00 80 52'). Length must match the original at addr (typically 4 for instructions). Mutually exclusive with `insn`." },
+                        "patches": { "type": "string", "description": "Path to a patch file (JSON). Created if absent; rewritten on each call." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass patch ./libfoo.so --artifact libfoo.so --addr 0x1000058d4 --insn 'mov w0, #1' --patches /tmp/p.json",
+            },
+            Skill {
+                name: "export-patched",
+                description: "Apply a patch file to a bundle and write the patched output. For APK/AAB this re-packs the zip with the patched native libs; for IPA it re-streams the archive; for standalone binaries it just writes the patched bytes. Errors if the patch file is empty.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "patches", "out"],
+                    "properties": {
+                        "path": path_arg(),
+                        "patches": { "type": "string", "description": "Patch file (JSON) produced by one or more `patch` calls." },
+                        "out": { "type": "string", "description": "Destination path for the patched bundle. Parent directory created if needed." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass export-patched ./libfoo.so --patches /tmp/p.json --out ./libfoo-patched.so",
+            },
+            Skill {
+                name: "patch-schema",
+                description: "Print the JSON Schema (draft 2020-12) for the patch file format. Useful for external validators or tooling that wants to construct patch files programmatically.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass patch-schema",
+            },
         ],
     }
 }

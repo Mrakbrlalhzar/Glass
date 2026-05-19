@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::output::{self, Envelope, Format};
 
@@ -899,3 +899,179 @@ fn render_insn_search(
 // Marker — `Envelope` referenced in the function signatures.
 #[allow(dead_code)]
 fn _envelope_marker(_: Envelope<()>) {}
+
+// ---- Patch verbs ---------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct PatchResult {
+    pub patches: PathBuf,
+    pub artifact: String,
+    pub vaddr: String,
+    pub new_bytes_hex: String,
+    pub total_edits: usize,
+}
+
+pub fn patch(
+    path: PathBuf,
+    artifact_ref: String,
+    addr: String,
+    insn: Option<String>,
+    bytes: Option<String>,
+    patches: PathBuf,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<PatchResult> {
+        // Resolve the bundle + artifact so we capture the exact
+        // 64-char artifact id + grab the bytes-at to record
+        // `original_bytes` for the patch entry.
+        let bundle = glass_api::open(&path)?;
+        let artifact_id = bundle
+            .resolve_artifact(&artifact_ref)
+            .ok_or_else(|| anyhow::anyhow!("no artifact matches {artifact_ref:?}"))?
+            .clone();
+        let vaddr = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+            .with_context(|| format!("bad hex address {addr:?}"))?;
+
+        // Encode the new bytes from --insn or --bytes.
+        let (new_bytes, kind, source_text) = match (insn, bytes) {
+            (Some(insn_src), None) => {
+                // Build a symbol lookup so identifiers like `bl
+                // decode_packet` resolve. We need the artifact's
+                // SymbolMap — built lazily via glass-api's
+                // disasm verb, but here we can reach for the
+                // container's symbols directly through a one-off
+                // build. Cheaper alternative: just rely on
+                // armv8-encode's own decoder via a re-open after
+                // staging. For v1 of the CLI verb we skip
+                // symbol resolution — users can pass hex.
+                let bytes_vec = glass_api::compile_insn_at(&insn_src, vaddr, None)?;
+                (
+                    bytes_vec,
+                    glass_api::PatchKind::Instruction,
+                    insn_src,
+                )
+            }
+            (None, Some(hex_src)) => {
+                let bytes_vec = parse_hex_bytes(&hex_src)?;
+                let display = bytes_vec
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (bytes_vec, glass_api::PatchKind::Bytes, display)
+            }
+            (Some(_), Some(_)) => anyhow::bail!("provide either --insn or --bytes, not both"),
+            (None, None) => anyhow::bail!("provide --insn or --bytes"),
+        };
+
+        let new_bytes_hex = new_bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Load existing patch file (or default), upsert, save.
+        let mut pf = glass_api::PatchFile::read_or_default(&patches)?;
+        if pf.source_path.is_none() {
+            pf.source_path = Some(path.clone());
+        }
+        let entry = glass_api::PatchEntry {
+            artifact: artifact_id.to_hex(),
+            vaddr,
+            kind,
+            new_bytes,
+            original_bytes: Vec::new(),
+            source_text,
+        };
+        pf.upsert(entry);
+        let total_edits = pf.edits.len();
+        pf.write(&patches)?;
+        Ok(PatchResult {
+            patches,
+            artifact: artifact_id.to_hex(),
+            vaddr: format!("0x{vaddr:x}"),
+            new_bytes_hex,
+            total_edits,
+        })
+    })?;
+    output::emit(envelope, format, render_patch)
+}
+
+fn render_patch(data: &PatchResult, out: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "staged: {} @ {} = {}   ({} edit{} total in {})",
+        &data.artifact[..16.min(data.artifact.len())],
+        data.vaddr,
+        data.new_bytes_hex,
+        data.total_edits,
+        if data.total_edits == 1 { "" } else { "s" },
+        data.patches.display(),
+    )
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportPatchedResult {
+    pub out: PathBuf,
+    pub edits_applied: usize,
+}
+
+pub fn export_patched(
+    path: PathBuf,
+    patches: PathBuf,
+    out: PathBuf,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<ExportPatchedResult> {
+        let pf = glass_api::PatchFile::read_or_default(&patches)?;
+        if pf.edits.is_empty() {
+            anyhow::bail!("patch file {} contains no edits", patches.display());
+        }
+        let edits_applied = pf.edits.len();
+        let bundle = glass_api::open(&path)?;
+        let edit_map = pf.to_edit_map();
+        glass_api::export_to_path(&bundle, &edit_map, &out)?;
+        Ok(ExportPatchedResult {
+            out,
+            edits_applied,
+        })
+    })?;
+    output::emit(envelope, format, render_export_patched)
+}
+
+fn render_export_patched(data: &ExportPatchedResult, out: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "wrote patched bundle to {} ({} edit{} applied)",
+        data.out.display(),
+        data.edits_applied,
+        if data.edits_applied == 1 { "" } else { "s" },
+    )
+}
+
+pub fn patch_schema(format: Format) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        Ok(glass_api::patch_file_schema())
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let pretty = serde_json::to_string_pretty(data).unwrap_or_default();
+        writeln!(out, "{pretty}")
+    })
+}
+
+/// Parse a hex byte string like `"20 00 80 52"` (whitespace
+/// optional) into a Vec<u8>. Used by the `patch --bytes` path.
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() % 2 != 0 {
+        anyhow::bail!("hex byte string has odd length: {s:?}");
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    for i in (0..cleaned.len()).step_by(2) {
+        let pair = &cleaned[i..i + 2];
+        let byte = u8::from_str_radix(pair, 16)
+            .with_context(|| format!("non-hex pair {pair:?}"))?;
+        out.push(byte);
+    }
+    Ok(out)
+}

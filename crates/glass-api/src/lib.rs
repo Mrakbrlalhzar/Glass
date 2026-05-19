@@ -27,9 +27,11 @@ mod cfg;
 mod dex;
 mod disasm;
 mod export;
+mod insn_cursor;
 mod insn_matcher;
 mod insn_pattern;
 mod insn_variants;
+mod patch_file;
 mod inspect;
 mod search;
 mod skills;
@@ -48,6 +50,9 @@ pub use bin_search::{
 };
 pub use bundle::{open, Bundle, BundleKind};
 pub use export::{export_to_path, EditMap, EditPatch};
+pub use patch_file::{
+    schema as patch_file_schema, PatchEntry, PatchFile, PatchKind, PATCH_FILE_VERSION,
+};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
 pub use dex::{
     ClassInfo, ClassListing, FieldInfo, FieldListing, MethodCallSite,
@@ -55,8 +60,10 @@ pub use dex::{
 };
 pub use disasm::{decode_word, DecodeResult, DisasmListing, DisasmRow};
 pub use insn_pattern::{
-    compile as compile_insn_pattern, compile_to_atoms as compile_insn_atoms, InsnSearchResult,
+    compile as compile_insn_pattern, compile_at as compile_insn_at,
+    compile_to_atoms as compile_insn_atoms, InsnSearchResult,
 };
+pub use insn_cursor::{classify as classify_insn_cursor, CursorContext, CursorKind};
 pub use insn_matcher::{match_variants as match_insn_variants, MatchCandidate};
 pub use insn_variants::{variants as insn_variants, SlotSpec, Variant};
 pub use inspect::{

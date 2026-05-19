@@ -77,6 +77,10 @@ actions!(
         PaletteUp,
         PaletteDown,
         PaletteActivate,
+        ListingPageUp,
+        ListingPageDown,
+        HexCursorLeft,
+        HexCursorRight,
         PaletteModeText,
         PaletteModeBinary,
         PaletteAsmTab,
@@ -1052,6 +1056,32 @@ pub(crate) struct DisasmEditState {
     /// on the next keystroke. Rendered as a small chip on the
     /// edit row.
     pub error: Option<String>,
+    /// Candidate suggestions for the cursor's current position
+    /// — mnemonic templates, symbol names, or registers,
+    /// depending on classifier. Refreshed on every keystroke.
+    pub suggestions: Vec<EditSuggestion>,
+    /// Index of the currently-highlighted suggestion. Up/Down
+    /// move; Tab commits it into the input.
+    pub suggestion_selected: usize,
+}
+
+/// One row in the edit-mode autocomplete dropdown. The label
+/// is what the user sees; `commit_text` is what gets spliced
+/// into the input when the user accepts (commit_text == label
+/// except where we want to insert a decorated form).
+#[derive(Debug, Clone)]
+pub(crate) struct EditSuggestion {
+    pub label: SharedString,
+    pub commit_text: String,
+    pub detail: SharedString,
+    pub kind: EditSuggestionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditSuggestionKind {
+    Mnemonic,
+    Symbol,
+    Register,
 }
 
 /// Active hex-view edit. Either a single byte (`length == 1`,
@@ -1355,6 +1385,12 @@ impl Render for Shell {
                 string_edit_popover::render(state, panel, border, fg, dim, cx)
             });
 
+        let disasm_edit_suggestions_overlay: Option<gpui::AnyElement> = self
+            .disasm_edit
+            .as_ref()
+            .filter(|e| !e.suggestions.is_empty())
+            .map(|state| render_disasm_edit_suggestions(state, panel, border, dim, cx));
+
         let about_overlay: Option<gpui::AnyElement> = if self.about_open {
             Some(about::render_about(panel, border, fg, dim, cx))
         } else {
@@ -1413,14 +1449,55 @@ impl Render for Shell {
                 this.close_colour_picker(cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteUp, _w, cx| {
+                // Priority order: disasm suggestions → palette →
+                // listing-row selection.
+                if this.disasm_edit.is_some() {
+                    this.move_disasm_suggestion_pub(-1, cx);
+                    return;
+                }
                 if this.palette_open {
                     this.palette_move(-1, cx);
+                    return;
                 }
+                this.move_listing_selection(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteDown, _w, cx| {
+                if this.disasm_edit.is_some() {
+                    this.move_disasm_suggestion_pub(1, cx);
+                    return;
+                }
                 if this.palette_open {
                     this.palette_move(1, cx);
+                    return;
                 }
+                this.move_listing_selection(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ListingPageUp, _w, cx| {
+                this.listing_page_scroll(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ListingPageDown, _w, cx| {
+                this.listing_page_scroll(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &HexCursorLeft, _w, cx| {
+                // Only act when no edit / palette is consuming
+                // the key — otherwise TextInput needs Left/Right
+                // for cursor movement.
+                if this.disasm_edit.is_some()
+                    || this.hex_edit.is_some()
+                    || this.palette_open
+                {
+                    return;
+                }
+                this.hex_move_byte(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &HexCursorRight, _w, cx| {
+                if this.disasm_edit.is_some()
+                    || this.hex_edit.is_some()
+                    || this.palette_open
+                {
+                    return;
+                }
+                this.hex_move_byte(1, cx);
             }))
             // ⌘1 / ⌘2 switch palette modes when the palette is
             // open. Only the palette-open guard prevents the
@@ -1442,9 +1519,17 @@ impl Render for Shell {
             // globally because the action keymap consumes Enter
             // before our on_key_down listener has a chance to see it.
             .on_action(cx.listener(|this, _: &PaletteActivate, _w, cx| {
-                // Enter commits an active disasm / hex edit ahead of
-                // any palette action — same dominance rule as Esc.
-                if this.disasm_edit.is_some() {
+                // Priority order:
+                //   1. Disasm suggestion highlight (insert it)
+                //   2. Disasm edit in flight (commit it)
+                //   3. Hex edit in flight (commit it)
+                //   4. Palette open (activate selection)
+                //   5. Listing row selected (open it for editing)
+                if let Some(e) = this.disasm_edit.as_ref() {
+                    if !e.suggestions.is_empty() {
+                        this.commit_disasm_suggestion_pub(cx);
+                        return;
+                    }
                     this.commit_disasm_edit(cx);
                     return;
                 }
@@ -1454,7 +1539,12 @@ impl Render for Shell {
                 }
                 if this.palette_open {
                     this.palette_activate(cx);
+                    return;
                 }
+                if this.hex_open_edit_at_selection(cx) {
+                    return;
+                }
+                this.edit_selected_listing_row(cx);
             }))
             // Capture printable keystrokes for the palette query when
             // it's open. gpui doesn't have a turnkey text input for
@@ -1526,6 +1616,9 @@ impl Render for Shell {
             root = root.child(o);
         }
         if let Some(o) = string_edit_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = disasm_edit_suggestions_overlay {
             root = root.child(o);
         }
         root
@@ -1629,5 +1722,106 @@ fn render_export_progress(
         .items_center()
         .justify_center()
         .child(card)
+        .into_any_element()
+}
+
+/// Suggestions panel for the active disasm edit. Renders at
+/// top-right of the window (out of the way of the listing
+/// itself). Up/Down navigates, Tab commits the highlight; key
+/// handling lives in Shell::disasm_edit_handle_key.
+fn render_disasm_edit_suggestions(
+    state: &DisasmEditState,
+    panel: gpui::Rgba,
+    border: gpui::Rgba,
+    dim: gpui::Rgba,
+    cx: &mut Context<Shell>,
+) -> gpui::AnyElement {
+    use gpui::prelude::*;
+    let selected = state.suggestion_selected;
+    let mut list = gpui::div()
+        .id("disasm-edit-suggestions")
+        .w(px(420.))
+        .bg(panel)
+        .border_1()
+        .border_color(border)
+        .rounded_sm()
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .occlude()
+        // Eat clicks on the panel itself so the parent overlay
+        // doesn't intercept; per-row clickers run on top.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            |_ev, _w, cx: &mut gpui::App| {
+                cx.stop_propagation();
+            },
+        );
+    let header_text = match state.suggestions.first().map(|s| s.kind) {
+        Some(EditSuggestionKind::Mnemonic) => "Mnemonics  (Tab to insert)",
+        Some(EditSuggestionKind::Symbol) => "Symbols  (Tab to insert)",
+        Some(EditSuggestionKind::Register) => "Registers  (Tab to insert)",
+        None => "Suggestions",
+    };
+    list = list.child(
+        gpui::div()
+            .px_2()
+            .py_1()
+            .text_xs()
+            .text_color(dim)
+            .border_b_1()
+            .border_color(border)
+            .child(SharedString::from(header_text)),
+    );
+    for (i, sugg) in state.suggestions.iter().enumerate().take(12) {
+        let is_sel = i == selected;
+        let bg = if is_sel {
+            gpui::rgba(0x355487ff)
+        } else {
+            gpui::rgba(0x00000000)
+        };
+        let label_color = if is_sel {
+            rgb(0xffffff)
+        } else {
+            rgb(0xd6d6d6)
+        };
+        list = list.child(
+            gpui::div()
+                .id(("suggestion-row", i))
+                .px_2()
+                .py_1()
+                .bg(bg)
+                .flex()
+                .flex_row()
+                .gap_3()
+                .cursor_pointer()
+                .hover(|s| s.bg(gpui::rgba(0x355487aa)))
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_color(label_color)
+                        .font_family("Courier New")
+                        .child(sugg.label.clone()),
+                )
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(rgb(0x8a8a92))
+                        .child(sugg.detail.clone()),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, _w, cx| {
+                        this.click_disasm_suggestion(i, cx);
+                    }),
+                ),
+        );
+    }
+    gpui::div()
+        .absolute()
+        .top(px(72.))
+        .right(px(20.))
+        .child(list)
         .into_any_element()
 }
