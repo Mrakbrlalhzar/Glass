@@ -26,6 +26,7 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Binary search of sequences of bytes with masking and gaps across code and data
 * Search for asm instructions or patterns of instructions across all sections 
 * Annotate any line (code or data) with a colour and/or comment so you can easily find it again later. 
+* In place editing of instructions and data (double-click on item), rebuild the app for export.
 
 
 ## Screenshots

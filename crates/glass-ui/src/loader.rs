@@ -343,6 +343,7 @@ fn snapshot_apk_with_progress(
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
+        edits: crate::edits::EditRegistry::new(),
     })
 }
 
@@ -572,6 +573,7 @@ fn snapshot_ipa_with_progress(
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
+        edits: crate::edits::EditRegistry::new(),
     })
 }
 
@@ -793,6 +795,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
+        edits: crate::edits::EditRegistry::new(),
     })
 }
 

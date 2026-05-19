@@ -23,6 +23,7 @@ use crate::{
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
     PaletteModeBinary,
     PaletteModeText,
+    ToggleChangesDialog,
     TogglePalette,
 };
 
@@ -70,6 +71,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
             KeyBinding::new("enter", PaletteActivate, None),
             KeyBinding::new("cmd-1", PaletteModeText, None),
             KeyBinding::new("cmd-2", PaletteModeBinary, None),
+            KeyBinding::new("cmd-e", ToggleChangesDialog, None),
             KeyBinding::new("cmd-o", OpenFile, None),
             KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),

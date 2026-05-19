@@ -26,6 +26,7 @@ mod bundle;
 mod cfg;
 mod dex;
 mod disasm;
+mod export;
 mod insn_matcher;
 mod insn_pattern;
 mod insn_variants;
@@ -46,6 +47,7 @@ pub use bin_search::{
     DEFAULT_GAP_MAX,
 };
 pub use bundle::{open, Bundle, BundleKind};
+pub use export::{export_to_path, EditMap, EditPatch};
 pub use cfg::{CallSiteInfo, CallsFromResult, CfgBlock, CfgEdge, CfgResult};
 pub use dex::{
     ClassInfo, ClassListing, FieldInfo, FieldListing, MethodCallSite,

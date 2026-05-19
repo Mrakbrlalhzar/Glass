@@ -39,7 +39,10 @@ mod listing_render;
 mod loader;
 mod manifest;
 mod palette;
+mod changes_dialog;
 mod checkbox;
+mod edits;
+mod string_edit_popover;
 mod scrollbar;
 mod search;
 mod text_input;
@@ -77,6 +80,7 @@ actions!(
         PaletteModeText,
         PaletteModeBinary,
         PaletteAsmTab,
+        ToggleChangesDialog,
         OpenFile,
         NewWindow,
         CloseWindow,
@@ -193,6 +197,13 @@ pub struct LoadedBundle {
     /// Empty for artifacts with no annotations on disk; the whole
     /// map is empty for bundles that have never had any.
     pub annotations: Arc<std::collections::HashMap<glass_db::ArtifactId, annotations::AnnotationIndex>>,
+    /// Staged instruction edits — keyed by (artifact, vaddr). Each
+    /// entry replaces a 4-byte instruction with newly-encoded
+    /// bytes. In-memory only; closing the bundle drops them.
+    /// Listing renderer reads this to recolour + re-disassemble
+    /// edited lines on the fly; export walks `entries()` to splice
+    /// patched bytes back into the artifact.
+    pub edits: edits::EditRegistry,
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
@@ -451,6 +462,55 @@ impl LoadedBundle {
 
     /// Find which section of a native artifact contains `addr`. Only
     /// returns sections we can disassemble (`Text` kind today).
+    /// Read the 4 bytes at `addr` in a text section of `artifact`,
+    /// honouring any staged edit at that address. Returns None if
+    /// the address doesn't fall inside a known text section or is
+    /// too close to the section's end to hold a full instruction.
+    pub fn bytes_at(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        addr: u64,
+    ) -> Option<[u8; 4]> {
+        if let Some(edit) = self.edits.get(artifact, addr) {
+            if edit.new_bytes.len() == 4 {
+                return Some([
+                    edit.new_bytes[0],
+                    edit.new_bytes[1],
+                    edit.new_bytes[2],
+                    edit.new_bytes[3],
+                ]);
+            }
+        }
+        let section_name = self.text_section_for_addr(artifact, addr)?;
+        let key = (artifact.clone(), section_name.to_string());
+        let section = self.text_sections.get(&key)?;
+        let off = addr.checked_sub(section.base)? as usize;
+        if off + 4 > section.bytes.len() {
+            return None;
+        }
+        let bytes: &[u8] = section.bytes.as_ref();
+        Some([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    }
+
+    /// Read the byte at `addr` in any data section of `artifact`,
+    /// honouring any staged edit at that address. Returns None if
+    /// `addr` doesn't fall inside a known data section.
+    pub fn data_byte_at(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        addr: u64,
+    ) -> Option<u8> {
+        if let Some(edit) = self.edits.covering(artifact, addr) {
+            let off = (addr - edit.vaddr) as usize;
+            return edit.new_bytes.get(off).copied();
+        }
+        let section_name = self.data_section_for_addr(artifact, addr)?;
+        let key = (artifact.clone(), section_name.to_string());
+        let section = self.data_sections.get(&key)?;
+        let off = addr.checked_sub(section.base)? as usize;
+        section.bytes.as_ref().get(off).copied()
+    }
+
     pub fn text_section_for_addr(
         &self,
         artifact: &glass_db::ArtifactId,
@@ -954,6 +1014,66 @@ pub(crate) struct Shell {
     /// In-progress colour pick. Renders a small swatch popover at
     /// the saved position. `None` when closed.
     pub(crate) colour_picker: Option<ColourPickerState>,
+    /// Active instruction-edit. `Some` when the user has double-
+    /// clicked a disasm row; the listing renderer swaps the
+    /// matching row to a `TextInput`. Enter encodes + stages,
+    /// Esc cancels. Only one edit can be in flight at a time.
+    pub(crate) disasm_edit: Option<DisasmEditState>,
+    /// Active hex-view edit. `Some` when the user has double-
+    /// clicked a byte cell or a string item in the hex view.
+    /// Mutually exclusive with `disasm_edit` in practice.
+    pub(crate) hex_edit: Option<HexEditState>,
+    /// Whether the "N changes" modal dialog is showing.
+    pub(crate) changes_dialog_open: bool,
+    /// True after the first click of "Abandon all" inside the
+    /// changes dialog; the second click actually wipes. Reset on
+    /// dialog close so a stale-armed state doesn't carry over.
+    pub(crate) changes_dialog_confirm_abandon: bool,
+    /// Result of the most recent export attempt. `Ok(path)` =
+    /// success, `Err(message)` = failure. Surfaced as a small
+    /// status chip in the toolbar until the user dismisses it
+    /// or runs another export.
+    pub(crate) export_status: Option<Result<std::path::PathBuf, String>>,
+    /// True while an export is running (bundle re-open + splice
+    /// + write). Drives the progress overlay so the user knows
+    /// Glass is working — large APKs can take a couple of
+    /// seconds to re-pack.
+    pub(crate) export_in_progress: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DisasmEditState {
+    pub artifact: glass_db::ArtifactId,
+    pub address: u64,
+    /// What the user is typing. Pre-populated with the original
+    /// disasm text on entry.
+    pub input: crate::text_input::TextInput,
+    /// Pretty error from the most recent compile attempt; cleared
+    /// on the next keystroke. Rendered as a small chip on the
+    /// edit row.
+    pub error: Option<String>,
+}
+
+/// Active hex-view edit. Either a single byte (`length == 1`,
+/// the user double-clicked a byte cell) or a multi-byte string
+/// run (`length > 1`, the user double-clicked a string item).
+#[derive(Debug, Clone)]
+pub(crate) struct HexEditState {
+    pub artifact: glass_db::ArtifactId,
+    pub address: u64,
+    pub length: usize,
+    pub input: crate::text_input::TextInput,
+    pub error: Option<String>,
+    pub kind: HexEditKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HexEditKind {
+    /// User is editing a single byte's hex pair.
+    Byte,
+    /// User is editing a NUL-terminated string item; `length`
+    /// is the original item length including the trailing NUL.
+    String,
 }
 
 /// Active inline edit driven by the palette input. Set by an
@@ -1125,6 +1245,45 @@ impl Render for Shell {
         } else {
             header
         };
+        // Staged-edits chip. Only renders when the loaded bundle
+        // has at least one staged edit; clicking opens the
+        // Changes dialog (same as ⌘E).
+        let edit_count = self.bundle().map(|b| b.edits.len()).unwrap_or(0);
+        let header = if edit_count > 0 {
+            header.child(
+                div()
+                    .id("changes-icon")
+                    .px_3()
+                    .h(px(24.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(fg)
+                    .border_1()
+                    .border_color(rgb(0xc8e8d4))
+                    .bg(rgb(0x1c4a3c))
+                    .hover(|s| s.bg(rgb(0x276652)))
+                    .cursor_pointer()
+                    .child(SharedString::from(format!("{edit_count} change{}", if edit_count == 1 { "" } else { "s" })))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(dim)
+                            .child("⌘E"),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.open_changes_dialog(cx);
+                        }),
+                    ),
+            )
+        } else {
+            header
+        };
 
         let body = match &self.state {
             ShellState::Ready(bundle) => {
@@ -1174,6 +1333,28 @@ impl Render for Shell {
                     .into_any_element()
             });
 
+        let changes_overlay: Option<gpui::AnyElement> = if self.changes_dialog_open {
+            Some(changes_dialog::render_changes_dialog(
+                self, panel, border, fg, dim, accent, cx,
+            ))
+        } else {
+            None
+        };
+
+        let export_progress_overlay: Option<gpui::AnyElement> = if self.export_in_progress {
+            Some(render_export_progress(panel, border, fg, dim))
+        } else {
+            None
+        };
+
+        let string_edit_overlay: Option<gpui::AnyElement> = self
+            .hex_edit
+            .as_ref()
+            .filter(|e| e.kind == HexEditKind::String)
+            .map(|state| {
+                string_edit_popover::render(state, panel, border, fg, dim, cx)
+            });
+
         let about_overlay: Option<gpui::AnyElement> = if self.about_open {
             Some(about::render_about(panel, border, fg, dim, cx))
         } else {
@@ -1196,6 +1377,21 @@ impl Render for Shell {
                 this.toggle_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteClose, _w, cx| {
+                // Esc cancels an in-flight disasm / hex edit before
+                // doing anything else — the inline TextInput visually
+                // dominates so it should be the first thing dismissed.
+                if this.disasm_edit.is_some() {
+                    this.cancel_disasm_edit(cx);
+                    return;
+                }
+                if this.hex_edit.is_some() {
+                    this.cancel_hex_edit(cx);
+                    return;
+                }
+                if this.changes_dialog_open {
+                    this.close_changes_dialog(cx);
+                    return;
+                }
                 // Esc closes any annotation-edit cleanly first; the
                 // palette-as-editor case is unambiguous because the
                 // edit's chip is already showing in place of the
@@ -1239,10 +1435,23 @@ impl Render for Shell {
                     this.palette_set_mode_binary(cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleChangesDialog, _w, cx| {
+                this.toggle_changes_dialog(cx);
+            }))
             // Enter activates the palette when it's open. Bound
             // globally because the action keymap consumes Enter
             // before our on_key_down listener has a chance to see it.
             .on_action(cx.listener(|this, _: &PaletteActivate, _w, cx| {
+                // Enter commits an active disasm / hex edit ahead of
+                // any palette action — same dominance rule as Esc.
+                if this.disasm_edit.is_some() {
+                    this.commit_disasm_edit(cx);
+                    return;
+                }
+                if this.hex_edit.is_some() {
+                    this.commit_hex_edit(cx);
+                    return;
+                }
                 if this.palette_open {
                     this.palette_activate(cx);
                 }
@@ -1257,6 +1466,18 @@ impl Render for Shell {
                 // up — beats palette handling.
                 if this.about_open && k.key == "escape" {
                     this.close_about(cx);
+                    return;
+                }
+                // Disasm + hex edits capture all printable keystrokes
+                // while active. Enter/Esc are handled by their own
+                // actions above (PaletteActivate / PaletteClose) so
+                // they don't fall through here.
+                if this.disasm_edit.is_some() {
+                    this.disasm_edit_handle_key(k, cx);
+                    return;
+                }
+                if this.hex_edit.is_some() {
+                    this.hex_edit_handle_key(k, cx);
                     return;
                 }
                 if !this.palette_open {
@@ -1298,6 +1519,15 @@ impl Render for Shell {
         if let Some(o) = about_overlay {
             root = root.child(o);
         }
+        if let Some(o) = changes_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = export_progress_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = string_edit_overlay {
+            root = root.child(o);
+        }
         root
     }
 }
@@ -1309,3 +1539,95 @@ pub(crate) enum RowAction {
     Select(LeafId),
 }
 
+
+/// Centred modal saying "Saving patched bundle…". Renders while
+/// `Shell::export_in_progress` is true; the click backdrop is
+/// inert (no cancel — the re-pack runs uninterruptibly on the
+/// background executor). The bar is indeterminate: a shorter
+/// coloured chunk slides left↔right inside a track on a 1.4 s
+/// loop driven by wall-clock time. Shell's animation pump
+/// re-renders at ~30 fps so the position updates smoothly.
+fn render_export_progress(
+    panel: gpui::Rgba,
+    border: gpui::Rgba,
+    fg: gpui::Rgba,
+    dim: gpui::Rgba,
+) -> gpui::AnyElement {
+    use gpui::prelude::*;
+    const TRACK_WIDTH: f32 = 320.;
+    const CHUNK_WIDTH: f32 = 96.;
+    const PERIOD_MS: f32 = 1400.;
+    // Wall-clock-driven oscillator in [0, 1] with triangle wave
+    // so the chunk pauses briefly at each end.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f32)
+        .unwrap_or(0.);
+    let t = (now_ms % PERIOD_MS) / PERIOD_MS; // 0..1
+    let triangle = if t < 0.5 { t * 2. } else { (1. - t) * 2. }; // 0..1..0
+    let chunk_x = triangle * (TRACK_WIDTH - CHUNK_WIDTH);
+    let card = gpui::div()
+        .id("export-progress-card")
+        .w(gpui::px(360.))
+        .bg(panel)
+        .border_1()
+        .border_color(border)
+        .rounded_md()
+        .shadow_lg()
+        .p_5()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .occlude()
+        .child(
+            gpui::div()
+                .text_lg()
+                .text_color(fg)
+                .child(gpui::SharedString::from("Saving patched bundle…")),
+        )
+        .child(
+            gpui::div()
+                .text_xs()
+                .text_color(dim)
+                .child(gpui::SharedString::from(
+                    "Re-serialising native artifacts and re-packing the archive.",
+                )),
+        )
+        .child(
+            // Track + sliding chunk. The track is full-width and
+            // the chunk is positioned absolutely inside it; the
+            // outer wrapper supplies a relative anchor.
+            gpui::div()
+                .relative()
+                .w(gpui::px(TRACK_WIDTH))
+                .h(gpui::px(6.))
+                .rounded_sm()
+                .bg(gpui::rgb(0x2a2a30))
+                .child(
+                    gpui::div()
+                        .absolute()
+                        .left(gpui::px(chunk_x))
+                        .top(gpui::px(0.))
+                        .w(gpui::px(CHUNK_WIDTH))
+                        .h(gpui::px(6.))
+                        .rounded_sm()
+                        .bg(gpui::rgb(0x4f7cff)),
+                ),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            |_ev, _w, cx: &mut gpui::App| {
+                cx.stop_propagation();
+            },
+        );
+    gpui::div()
+        .absolute()
+        .inset_0()
+        .bg(gpui::rgba(0x000000cc))
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(card)
+        .into_any_element()
+}

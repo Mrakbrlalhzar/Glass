@@ -18,6 +18,7 @@ glass-mobile.workspace = true
 armv8-encode.workspace = true
 smali.workspace = true
 plist.workspace = true
+zip.workspace = true
 parking_lot.workspace = true
 blake3 = { version = "1", features = ["rayon"] }
 

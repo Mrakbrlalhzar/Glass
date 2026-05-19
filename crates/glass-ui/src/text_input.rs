@@ -338,6 +338,96 @@ impl TextInput {
     /// used for the placeholder when the field is empty.
     /// `placeholder` is shown (in `dim`) only when the buffer
     /// is empty.
+    /// Multi-line render: text wraps onto multiple visual lines
+    /// when it exceeds `wrap_chars` per line. Hard `\n` in the
+    /// buffer also break lines. Cursor + selection follow the
+    /// wrapped layout. Returns a column of line rows.
+    ///
+    /// Intended for string-edit popovers where the content can
+    /// be 100+ chars long. Single-byte hex edits should keep
+    /// using `render`.
+    pub fn render_multiline(
+        &self,
+        text_colour: Rgba,
+        dim: Rgba,
+        placeholder: &str,
+        font: &'static str,
+        wrap_chars: usize,
+    ) -> gpui::Div {
+        use gpui::prelude::*;
+        let field_bg: Rgba = rgb(0x1b2a44);
+        let sel_bg: Rgba = rgb(0x355487);
+        let (sel_a, sel_b) = self.selection_range();
+        let caret_idx = self.cursor;
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .px_2()
+            .py_1()
+            .bg(field_bg);
+        if self.text.is_empty() {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(caret(text_colour))
+                    .child(
+                        div()
+                            .text_color(dim)
+                            .font_family(font)
+                            .ml(px(2.))
+                            .child(SharedString::from(placeholder.to_string())),
+                    ),
+            );
+            return col;
+        }
+        // Split the buffer into visual lines. Walk char-by-char
+        // tracking byte offsets so we can position the cursor
+        // and selection by line + intra-line range.
+        let lines = wrap_lines(&self.text, wrap_chars);
+        for (line_start, line_end, _is_hard_break_after) in lines {
+            let mut line_row = div().flex().flex_row().items_center();
+            // Carve into spans at sel_a / sel_b / caret_idx that
+            // fall within this line, plus the line endpoints.
+            let mut breaks: Vec<usize> = vec![line_start, line_end];
+            for &p in &[sel_a, sel_b, caret_idx] {
+                if p >= line_start && p <= line_end {
+                    breaks.push(p);
+                }
+            }
+            breaks.sort();
+            breaks.dedup();
+            let mut last = line_start;
+            for &b in breaks.iter().skip(1) {
+                if b == last {
+                    continue;
+                }
+                let slice = &self.text[last..b];
+                let in_sel = last >= sel_a && b <= sel_b && sel_a != sel_b;
+                let mut span = div()
+                    .font_family(font)
+                    .text_color(text_colour)
+                    .child(SharedString::from(slice.to_string()));
+                if in_sel {
+                    span = span.bg(sel_bg);
+                }
+                line_row = line_row.child(span);
+                if b == caret_idx {
+                    line_row = line_row.child(caret(text_colour));
+                }
+                last = b;
+            }
+            // Caret at end of line when the cursor sits on the
+            // synthetic line-end boundary.
+            if caret_idx == line_end && !breaks.contains(&caret_idx) {
+                line_row = line_row.child(caret(text_colour));
+            }
+            col = col.child(line_row);
+        }
+        col
+    }
+
     pub fn render(
         &self,
         text_colour: Rgba,
@@ -408,4 +498,41 @@ impl TextInput {
 
 fn caret(colour: Rgba) -> gpui::Div {
     div().w(px(1.)).h(px(14.)).bg(colour).flex_shrink_0()
+}
+
+/// Split `text` into visual lines for `render_multiline`. Hard
+/// `\n` always ends a line. Within a hard line, wrap when the
+/// char count reaches `max_chars`. Returns `(byte_start,
+/// byte_end_exclusive, hard_break_after)`. `byte_end` of one
+/// line equals `byte_start` of the next (the `\n` itself isn't
+/// owned by either line — it's consumed by the implicit break).
+fn wrap_lines(text: &str, max_chars: usize) -> Vec<(usize, usize, bool)> {
+    let mut out: Vec<(usize, usize, bool)> = Vec::new();
+    let mut line_start = 0usize;
+    let mut char_count_in_line = 0usize;
+    let mut byte = 0usize;
+    for ch in text.chars() {
+        let ch_len = ch.len_utf8();
+        if ch == '\n' {
+            out.push((line_start, byte, true));
+            line_start = byte + ch_len;
+            char_count_in_line = 0;
+            byte += ch_len;
+            continue;
+        }
+        char_count_in_line += 1;
+        byte += ch_len;
+        if char_count_in_line >= max_chars {
+            out.push((line_start, byte, false));
+            line_start = byte;
+            char_count_in_line = 0;
+        }
+    }
+    if line_start <= text.len() {
+        out.push((line_start, text.len(), false));
+    }
+    if out.is_empty() {
+        out.push((0, 0, false));
+    }
+    out
 }

@@ -92,6 +92,12 @@ impl Shell {
             annotations_pane_h_offset: px(0.),
             annotation_edit: None,
             colour_picker: None,
+            disasm_edit: None,
+            hex_edit: None,
+            changes_dialog_open: false,
+            changes_dialog_confirm_abandon: false,
+            export_status: None,
+            export_in_progress: false,
         }
     }
 
@@ -1266,6 +1272,15 @@ impl Shell {
             current: existing.colour,
             label: SharedString::from("Set colour…"),
         });
+        // 3) Revert staged disasm edit, if any.
+        let has_edit = bundle.edits.get(&artifact, addr).is_some();
+        if has_edit {
+            items.push(ContextMenuItem::RevertDisasmEdit {
+                artifact: artifact.clone(),
+                vaddr: addr,
+                label: SharedString::from(format!("Revert change ({annot_label})")),
+            });
+        }
         if !existing.is_empty() {
             items.push(ContextMenuItem::ClearAnnotation {
                 artifact,
@@ -1621,6 +1636,9 @@ impl Shell {
             }
             ContextMenuItem::ClearAnnotation { artifact, key, .. } => {
                 self.clear_annotation_at(artifact, key, cx);
+            }
+            ContextMenuItem::RevertDisasmEdit { artifact, vaddr, .. } => {
+                self.revert_disasm_edit(artifact, vaddr, cx);
             }
         }
     }
@@ -2839,6 +2857,508 @@ impl Shell {
         Ok(())
     }
 
+    // ---- Disasm edit -------------------------------------------------
+
+    /// Convenience: look up the disasm at `(artifact, address)`
+    /// in the bundle and open the edit field pre-populated with
+    /// that text. Called by the listing row's double-click handler.
+    pub(crate) fn begin_disasm_edit_at_address(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        address: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let initial = match self
+            .bundle()
+            .and_then(|b| b.bytes_at(&artifact, address))
+        {
+            Some(bytes) => decode_insn_pretty(&bytes, address),
+            None => return,
+        };
+        self.begin_disasm_edit(artifact, address, initial, cx);
+    }
+
+    /// Enter edit mode for the disasm row at `(artifact, address)`.
+    /// Pre-populates the input with the original mnemonic + operands.
+    pub(crate) fn begin_disasm_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        address: u64,
+        initial_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.disasm_edit = Some(crate::DisasmEditState {
+            artifact,
+            address,
+            input: crate::text_input::TextInput::from_text(initial_text),
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Forward a key event into the active disasm edit's TextInput.
+    /// Returns `true` if the edit consumed the event (any printable
+    /// key, arrow keys, etc.). Returns `false` for unhandled keys so
+    /// the caller can decide what to do.
+    pub(crate) fn disasm_edit_handle_key(
+        &mut self,
+        k: &gpui::Keystroke,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(edit) = self.disasm_edit.as_mut() else {
+            return false;
+        };
+        let shift = k.modifiers.shift;
+        let cmd = k.modifiers.platform || k.modifiers.control;
+        let alt = k.modifiers.alt;
+        let key_char = k.key_char.as_deref();
+        let app: &mut gpui::App = &mut *cx;
+        let _changed = edit
+            .input
+            .handle_key(&k.key, shift, cmd, alt, key_char, app);
+        edit.error = None;
+        cx.notify();
+        true
+    }
+
+    /// Try to compile + stage the in-progress edit. On success the
+    /// edit is added to the bundle's `edits` registry; on failure
+    /// the error chip is updated and edit mode stays open.
+    pub(crate) fn commit_disasm_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.disasm_edit.clone() else { return };
+        let source_text = edit.input.text().to_string();
+        // Look up the original bytes from the bundle so we can
+        // store them for revert / dialog rendering.
+        let Some(bundle) = self.bundle() else { return };
+        let original = bundle.bytes_at(&edit.artifact, edit.address);
+        let Some(original_bytes) = original else {
+            if let Some(e) = self.disasm_edit.as_mut() {
+                e.error = Some(format!("no instruction at 0x{:x}", edit.address));
+            }
+            cx.notify();
+            return;
+        };
+        // Compile via the same concrete-only path the CLI uses.
+        // Reject any wildcards — patching needs fixed bytes.
+        let new_bytes = match glass_api::compile_insn_pattern(&source_text) {
+            Ok(b) if b.len() == 4 => [b[0], b[1], b[2], b[3]],
+            Ok(_) => {
+                if let Some(e) = self.disasm_edit.as_mut() {
+                    e.error = Some("must encode exactly one instruction".to_string());
+                }
+                cx.notify();
+                return;
+            }
+            Err(err) => {
+                if let Some(e) = self.disasm_edit.as_mut() {
+                    e.error = Some(format!("{err:#}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        // Decode the new bytes for the cached pretty-print.
+        let new_disasm = decode_insn_pretty(&new_bytes, edit.address);
+        let staged = crate::edits::Edit {
+            artifact: edit.artifact.clone(),
+            vaddr: edit.address,
+            kind: crate::edits::EditKind::Instruction,
+            new_bytes: new_bytes.to_vec(),
+            original_bytes: original_bytes.to_vec(),
+            source_text,
+            display: new_disasm,
+        };
+        if let Some(b) = self.bundle_mut() {
+            b.edits.insert(staged);
+        }
+        self.disasm_edit = None;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_disasm_edit(&mut self, cx: &mut Context<Self>) {
+        if self.disasm_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    // ---- Hex edit -----------------------------------------------------
+
+    /// Open a string-item edit at `addr`. Uses the existing
+    /// `item_extent_for` heuristic to determine the item bounds
+    /// (covering symbol size, or NUL-scan in strings sections),
+    /// reads up to the first NUL within that range as the
+    /// initial text, then displays a popover.
+    pub(crate) fn begin_hex_string_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        addr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bundle) = self.bundle() else { return };
+        let Some((start, end)) = crate::listing_render::item_extent_for(
+            bundle, &artifact, addr,
+        ) else {
+            return;
+        };
+        let length = end.saturating_sub(start) as usize;
+        if length == 0 {
+            return;
+        }
+        // Decode bytes [start, end) up to first NUL as the
+        // editable text. Reuses data_byte_at so already-staged
+        // edits show their live content in the popover.
+        let mut decoded = String::new();
+        for off in 0..length {
+            let Some(b) = bundle.data_byte_at(&artifact, start + off as u64)
+            else { break };
+            if b == 0 {
+                break;
+            }
+            if (0x20..=0x7e).contains(&b) {
+                decoded.push(b as char);
+            } else {
+                decoded.push('·');
+            }
+        }
+        self.hex_edit = Some(crate::HexEditState {
+            artifact,
+            address: start,
+            length,
+            input: crate::text_input::TextInput::from_text(decoded),
+            error: None,
+            kind: crate::HexEditKind::String,
+        });
+        cx.notify();
+    }
+
+    /// Open a single-byte edit at `addr`. Pre-populates the
+    /// input with the current byte's hex pair (which may already
+    /// be a staged edit — `bundle.data_byte_at` is the source of
+    /// truth, not the underlying file bytes).
+    pub(crate) fn begin_hex_byte_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        addr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bundle) = self.bundle() else { return };
+        let Some(b) = bundle.data_byte_at(&artifact, addr) else { return };
+        self.hex_edit = Some(crate::HexEditState {
+            artifact,
+            address: addr,
+            length: 1,
+            input: crate::text_input::TextInput::from_text(format!("{b:02x}")),
+            error: None,
+            kind: crate::HexEditKind::Byte,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn hex_edit_handle_key(
+        &mut self,
+        k: &gpui::Keystroke,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(edit) = self.hex_edit.as_mut() else { return false };
+        let shift = k.modifiers.shift;
+        let cmd = k.modifiers.platform || k.modifiers.control;
+        let alt = k.modifiers.alt;
+        let key_char = k.key_char.as_deref();
+        let app: &mut gpui::App = &mut *cx;
+        let _ = edit
+            .input
+            .handle_key(&k.key, shift, cmd, alt, key_char, app);
+        edit.error = None;
+        cx.notify();
+        true
+    }
+
+    /// Commit the in-flight hex edit. Validates the input
+    /// against `kind` (1 hex pair for Byte, length-bounded
+    /// string for String) and stages an Edit. Closes the edit
+    /// on success; leaves it open with an error chip on failure.
+    pub(crate) fn commit_hex_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.hex_edit.clone() else { return };
+        let source = edit.input.text().trim().to_string();
+        let Some(bundle) = self.bundle() else { return };
+        // Look up the original bytes for this span.
+        let mut original = Vec::with_capacity(edit.length);
+        for off in 0..edit.length {
+            let Some(b) = bundle.data_byte_at(&edit.artifact, edit.address + off as u64)
+            else {
+                if let Some(e) = self.hex_edit.as_mut() {
+                    e.error = Some("address span runs past section end".to_string());
+                }
+                cx.notify();
+                return;
+            };
+            original.push(b);
+        }
+        let new_bytes_result: Result<Vec<u8>, String> = match edit.kind {
+            crate::HexEditKind::Byte => {
+                let s = source.replace(' ', "");
+                if s.len() != 2 {
+                    Err("expected 2 hex digits".to_string())
+                } else if let Ok(b) = u8::from_str_radix(&s, 16) {
+                    Ok(vec![b])
+                } else {
+                    Err(format!("not hex: {s:?}"))
+                }
+            }
+            crate::HexEditKind::String => {
+                // The new bytes occupy exactly the original
+                // item length (`edit.length`). Anything shorter
+                // gets NUL-padded — and since the buffer is
+                // zero-initialised, that's automatic. We only
+                // reject inputs that would fill the whole span
+                // with no room for a NUL terminator, which
+                // would break readers scanning for one.
+                let raw = source.as_bytes();
+                if raw.len() > edit.length {
+                    Err(format!(
+                        "string is {} bytes; max {}",
+                        raw.len(),
+                        edit.length
+                    ))
+                } else if raw.len() == edit.length && !raw.contains(&0) {
+                    Err(format!(
+                        "string is {} bytes — no room for the trailing NUL; \
+                         shorten by 1 byte",
+                        raw.len()
+                    ))
+                } else {
+                    let mut v = vec![0u8; edit.length];
+                    v[..raw.len()].copy_from_slice(raw);
+                    Ok(v)
+                }
+            }
+        };
+        let new_bytes = match new_bytes_result {
+            Ok(v) => v,
+            Err(msg) => {
+                if let Some(e) = self.hex_edit.as_mut() {
+                    e.error = Some(msg);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let (kind_label, display) = match edit.kind {
+            crate::HexEditKind::Byte => (
+                crate::edits::EditKind::Bytes,
+                format!("{:02x}", new_bytes[0]),
+            ),
+            crate::HexEditKind::String => {
+                (crate::edits::EditKind::String, source.clone())
+            }
+        };
+        let staged = crate::edits::Edit {
+            artifact: edit.artifact.clone(),
+            vaddr: edit.address,
+            kind: kind_label,
+            new_bytes,
+            original_bytes: original,
+            source_text: source,
+            display,
+        };
+        if let Some(b) = self.bundle_mut() {
+            b.edits.insert(staged);
+        }
+        self.hex_edit = None;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_hex_edit(&mut self, cx: &mut Context<Self>) {
+        if self.hex_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    // ---- Changes dialog ----------------------------------------------
+
+    pub(crate) fn toggle_changes_dialog(&mut self, cx: &mut Context<Self>) {
+        self.changes_dialog_open = !self.changes_dialog_open;
+        self.changes_dialog_confirm_abandon = false;
+        cx.notify();
+    }
+
+    pub(crate) fn open_changes_dialog(&mut self, cx: &mut Context<Self>) {
+        self.changes_dialog_open = true;
+        self.changes_dialog_confirm_abandon = false;
+        cx.notify();
+    }
+
+    pub(crate) fn close_changes_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.changes_dialog_open {
+            self.changes_dialog_open = false;
+            self.changes_dialog_confirm_abandon = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn arm_abandon_confirm(&mut self, cx: &mut Context<Self>) {
+        self.changes_dialog_confirm_abandon = true;
+        cx.notify();
+    }
+
+    pub(crate) fn abandon_all_disasm_edits(&mut self, cx: &mut Context<Self>) {
+        if let Some(b) = self.bundle_mut() {
+            b.edits.clear();
+        }
+        self.changes_dialog_confirm_abandon = false;
+        self.changes_dialog_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn revert_disasm_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        vaddr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(b) = self.bundle_mut() {
+            b.edits.remove(&artifact, vaddr);
+        }
+        cx.notify();
+    }
+
+    /// Open a save-file dialog and write a patched copy of the
+    /// currently-loaded bundle there. Driven by the Changes
+    /// dialog's "Export N changes…" button.
+    pub(crate) fn export_patched_bundle(&mut self, cx: &mut Context<Self>) {
+        use std::collections::HashMap;
+        let Some(bundle) = self.bundle() else { return };
+        if bundle.edits.is_empty() {
+            return;
+        }
+        // Build the EditMap up-front (cheap clone of edit
+        // metadata) so the post-dialog continuation doesn't need
+        // to reach back into the bundle.
+        let mut edit_map: HashMap<glass_db::ArtifactId, Vec<glass_api::EditPatch>> =
+            HashMap::new();
+        for e in bundle.edits.entries() {
+            edit_map.entry(e.artifact.clone()).or_default().push(
+                glass_api::EditPatch {
+                    vaddr: e.vaddr,
+                    new_bytes: e.new_bytes.clone(),
+                },
+            );
+        }
+        // Re-load the source bundle from disk so the exporter
+        // sees fresh bytes (the in-memory ParsedArtifact is the
+        // source of truth for which file to patch, but the
+        // exporter wants a Bundle handle anyway for the path).
+        let source_path = self
+            .source_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let suggested = patched_filename(&source_path);
+        let dir = source_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let rx = {
+            let app: &mut gpui::App = &mut *cx;
+            app.prompt_for_new_path(&dir, Some(&suggested))
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(out_path))) = rx.await else { return };
+            // Flip the progress flag + close the dialog so the
+            // overlay takes over.
+            let _ = this.update(cx, |shell, cx| {
+                shell.export_in_progress = true;
+                shell.changes_dialog_open = false;
+                shell.export_status = None;
+                cx.notify();
+            });
+            // Animation pump: tick at ~30fps so the indeterminate
+            // bar slides while the heavy work runs. Stops on its
+            // own when `export_in_progress` flips false.
+            {
+                let this_pump = this.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(33))
+                            .await;
+                        let still_running = this_pump
+                            .update(cx, |shell, cx| {
+                                cx.notify();
+                                shell.export_in_progress
+                            })
+                            .unwrap_or(false);
+                        if !still_running {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+            // Re-open + export off the foreground thread. The
+            // background_executor pool is the right home — gpui's
+            // main runloop stays responsive while we splice the
+            // archive.
+            let edit_map_for_task = edit_map.clone();
+            let source_path_for_task = source_path.clone();
+            let out_path_for_task = out_path.clone();
+            let summary = cx
+                .background_executor()
+                .spawn(async move {
+                    match glass_api::open(&source_path_for_task) {
+                        Ok(bundle) => match glass_api::export_to_path(
+                            &bundle,
+                            &edit_map_for_task,
+                            &out_path_for_task,
+                        ) {
+                            Ok(()) => Ok(out_path_for_task),
+                            Err(e) => Err(format!("{e:#}")),
+                        },
+                        Err(e) => Err(format!("re-open failed: {e:#}")),
+                    }
+                })
+                .await;
+            match &summary {
+                Ok(p) => tracing::info!("exported patched bundle to {}", p.display()),
+                Err(e) => tracing::warn!("export failed: {e}"),
+            }
+            let _ = this.update(cx, |shell, cx| {
+                shell.export_in_progress = false;
+                shell.export_status = Some(summary);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Close the dialog and jump to the edit's address. Picks
+    /// the listing view for text-section addresses, the hex
+    /// view for data-section addresses (matching where each
+    /// kind of edit was originally staged).
+    pub(crate) fn navigate_to_disasm_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        vaddr: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bundle) = self.bundle() else { return };
+        let target = bundle
+            .text_section_for_addr(&artifact, vaddr)
+            .map(|s| (s.to_string(), true))
+            .or_else(|| {
+                bundle
+                    .data_section_for_addr(&artifact, vaddr)
+                    .map(|s| (s.to_string(), false))
+            });
+        let Some((section, is_text)) = target else { return };
+        self.changes_dialog_open = false;
+        self.changes_dialog_confirm_abandon = false;
+        if is_text {
+            self.open_listing_in_new_tab(artifact, section, vaddr, cx);
+        } else {
+            self.open_hex_in_new_tab(artifact, section, vaddr, cx);
+        }
+    }
+
     fn bundle_mut(&mut self) -> Option<&mut crate::LoadedBundle> {
         if let crate::ShellState::Ready(b) = &mut self.state {
             Some(b)
@@ -3002,4 +3522,42 @@ fn build_dex_field_entries(
             })
         })
         .collect()
+}
+
+/// Pretty-print a 4-byte instruction at `addr`. Used by edit
+/// staging to cache the disasm of the new bytes so the listing
+/// renderer + Changes dialog don't have to re-decode on every
+/// paint. PC-relative operands are resolved against `addr` so
+/// branches show their real target.
+pub(crate) fn decode_insn_pretty(bytes: &[u8; 4], addr: u64) -> String {
+    let word = u32::from_le_bytes(*bytes);
+    match armv8_encode::isa::aarch64::decode_instruction(addr, word) {
+        Ok(insn) => {
+            let mnem = insn.format_mnemonic();
+            let ops = insn.format_operands();
+            if ops.is_empty() {
+                mnem
+            } else {
+                format!("{mnem} {ops}")
+            }
+        }
+        Err(_) => format!(".word 0x{word:08x}"),
+    }
+}
+
+/// Suggest a filename for the patched output. We keep the source
+/// extension intact (so the patched output still looks like an
+/// APK / IPA / `.so` to downstream tools) and insert
+/// `-patched` before it.
+fn patched_filename(source: &std::path::Path) -> String {
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("patched");
+    let ext = source.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        format!("{stem}-patched")
+    } else {
+        format!("{stem}-patched.{ext}")
+    }
 }

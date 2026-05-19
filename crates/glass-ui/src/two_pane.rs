@@ -231,6 +231,8 @@ pub fn render_two_pane(
                     artifact: artifact.clone(),
                     shell: cx.entity().downgrade(),
                     selected_row,
+                    disasm_edit: shell.disasm_edit.clone(),
+                    hex_edit: shell.hex_edit.clone(),
                 };
                 div()
                     .flex_1()
@@ -325,6 +327,8 @@ pub fn render_two_pane(
                                             artifact: artifact.clone(),
                                             shell: cx.entity().downgrade(),
                                             selected_row,
+                    disasm_edit: shell.disasm_edit.clone(),
+                    hex_edit: shell.hex_edit.clone(),
                                         };
                                         list(scroll, move |index, _window, _cx| {
                                             let Some(row) = listing_rows.get(index)

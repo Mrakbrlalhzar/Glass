@@ -109,6 +109,13 @@ pub enum ContextMenuItem {
         key: glass_db::AnnotationKey,
         label: SharedString,
     },
+    /// "Revert change" — removes a staged disasm edit at this
+    /// address. Only shown when the row has been edited.
+    RevertDisasmEdit {
+        artifact: glass_db::ArtifactId,
+        vaddr: u64,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -205,6 +212,9 @@ pub fn render_context_menu(
                 (label.to_string(), SharedString::from(""))
             }
             ContextMenuItem::ClearAnnotation { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::RevertDisasmEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))
             }
         };

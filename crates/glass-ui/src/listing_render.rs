@@ -128,6 +128,13 @@ pub struct RowCtx {
     pub artifact: glass_db::ArtifactId,
     pub shell: gpui::WeakEntity<Shell>,
     pub selected_row: Option<usize>,
+    /// Snapshot of the currently-active disasm edit, if any.
+    /// Cloned by the listing builder so each rendered row can
+    /// cheaply check whether it's the row being edited.
+    pub disasm_edit: Option<crate::DisasmEditState>,
+    /// Snapshot of the currently-active hex edit, if any. Same
+    /// reasoning as `disasm_edit`.
+    pub hex_edit: Option<crate::HexEditState>,
 }
 
 fn lane_x(lane: u8) -> f32 {
@@ -207,12 +214,22 @@ pub(crate) fn h_shift_inner(
     if selectable {
         if let Some(ctx) = ctx {
             let weak = ctx.shell.clone();
+            let click_artifact = ctx.artifact.clone();
             outer = outer.on_mouse_down(
                 gpui::MouseButton::Left,
-                move |_ev, _w, cx: &mut App| {
+                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
                     if let Some(entity) = weak.upgrade() {
+                        let artifact = click_artifact.clone();
+                        let dbl = ev.click_count >= 2;
                         cx.update_entity(&entity, |shell, cx| {
                             shell.select_active_row(row_index, cx);
+                            if dbl {
+                                if let Some(addr) = row_addr {
+                                    shell.begin_disasm_edit_at_address(
+                                        artifact, addr, cx,
+                                    );
+                                }
+                            }
                         });
                     }
                 },
@@ -399,15 +416,48 @@ pub fn render_hex_row(
                 .flex_shrink_0()
                 .flex()
                 .flex_row();
+            // Active hex-edit snapshot for this artifact (None
+            // when there's no edit in flight, or the edit is for
+            // a different artifact).
+            let hex_edit_here = ctx.and_then(|c| {
+                let edit = c.hex_edit.as_ref()?;
+                (edit.artifact == c.artifact).then(|| edit.clone())
+            });
+            // Bytes the renderer should display for this row,
+            // overlaid with any staged edits + the in-flight
+            // hex edit (so the byte column shows live keystrokes).
+            let mut display_bytes = [0u8; 16];
+            for i in 0..16 {
+                let cell_addr = address + i as u64;
+                display_bytes[i] = ctx
+                    .and_then(|c| c.bundle.data_byte_at(&c.artifact, cell_addr))
+                    .or_else(|| bytes.get(i).copied())
+                    .unwrap_or(0);
+            }
             for i in 0..16 {
                 let byte = bytes.get(i).copied();
                 let cell_addr = address + i as u64;
                 let is_selected_byte = selected_byte_addr == Some(cell_addr);
-                let hex_text = match byte {
+                let staged_here = ctx
+                    .and_then(|c| c.bundle.edits.covering(&c.artifact, cell_addr))
+                    .is_some();
+                let is_edit_target = hex_edit_here
+                    .as_ref()
+                    .map(|e| {
+                        let end = e.address + e.length as u64;
+                        cell_addr >= e.address && cell_addr < end
+                    })
+                    .unwrap_or(false);
+                let live_byte = if staged_here || is_edit_target {
+                    Some(display_bytes[i])
+                } else {
+                    byte
+                };
+                let hex_text = match live_byte {
                     Some(b) => format!("{b:02x}"),
                     None => "  ".to_string(),
                 };
-                let ascii_glyph = match byte {
+                let ascii_glyph = match live_byte {
                     Some(b) if (0x20..=0x7e).contains(&b) => (b as char).to_string(),
                     Some(_) => ".".to_string(),
                     None => " ".to_string(),
@@ -416,12 +466,43 @@ pub fn render_hex_row(
                     .map(|(lo, hi)| cell_addr >= lo && cell_addr < hi)
                     .unwrap_or(false);
                 let make_cell = |w: Pixels, text: String| {
+                    // If this is the *hex* cell of the byte being
+                    // edited, swap the static text for an inline
+                    // TextInput driven by `hex_edit_here.input`.
+                    if let Some(edit) = hex_edit_here.as_ref() {
+                        if edit.kind == crate::HexEditKind::Byte
+                            && edit.address == cell_addr
+                            && w == px(HEX_CELL_WIDTH)
+                        {
+                            let mut field = div()
+                                .id(("hex-edit-cell", row_index * 16 + i))
+                                .w(w)
+                                .h(px(HEX_ROW_HEIGHT))
+                                .bg(gpui::rgba(0x3a2f1080))
+                                .child(edit.input.render(
+                                    gpui::Rgba { r: 1., g: 1., b: 1., a: 1. },
+                                    gpui::Rgba { r: 0.6, g: 0.6, b: 0.65, a: 1. },
+                                    "..",
+                                    "Courier New",
+                                ));
+                            if let Some(err) = edit.error.as_ref() {
+                                let _ = err;
+                                field = field.text_color(rgb(0xff7070));
+                            }
+                            return field;
+                        }
+                    }
                     let mut c = div()
                         .id(("hex-cell", row_index * 16 + i))
                         .w(w)
                         .whitespace_nowrap()
                         .text_color(rgb(COLOUR_BYTES))
                         .child(text);
+                    if staged_here {
+                        // Green tint on cells whose underlying byte
+                        // differs from the original file.
+                        c = c.bg(gpui::rgba(0x1c4a3c80));
+                    }
                     if is_selected_byte {
                         c = c.bg(rgb(COLOUR_BYTE_SELECTED)).text_color(rgb(0xffffff));
                     } else if in_item {
@@ -432,13 +513,41 @@ pub fn render_hex_row(
                     if let Some(ctx) = ctx {
                         if byte.is_some() {
                             let weak = ctx.shell.clone();
+                            let click_artifact = ctx.artifact.clone();
+                            // Determine whether this cell sits
+                            // inside a recognised string item, so
+                            // double-click can choose between a
+                            // single-byte edit and a string edit.
+                            let in_string_item = ctx
+                                .bundle
+                                .data_section_for_addr(&ctx.artifact, cell_addr)
+                                .map(|name| {
+                                    name.contains("cstring")
+                                        || name.contains("__cfstring")
+                                        || name.contains("__objc_methname")
+                                })
+                                .unwrap_or(false)
+                                && item_extent_for(&ctx.bundle, &ctx.artifact, cell_addr).is_some();
                             c = c.cursor_pointer().on_mouse_down(
                                 gpui::MouseButton::Left,
-                                move |_ev, _w, cx: &mut App| {
+                                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                    let artifact = click_artifact.clone();
+                                    let dbl = ev.click_count >= 2;
                                     if let Some(entity) = weak.upgrade() {
                                         cx.update_entity(&entity, |shell, cx| {
                                             shell.select_active_row(row_index, cx);
                                             shell.select_byte(cell_addr, cx);
+                                            if dbl {
+                                                if in_string_item {
+                                                    shell.begin_hex_string_edit(
+                                                        artifact, cell_addr, cx,
+                                                    );
+                                                } else {
+                                                    shell.begin_hex_byte_edit(
+                                                        artifact, cell_addr, cx,
+                                                    );
+                                                }
+                                            }
                                         });
                                     }
                                     cx.stop_propagation();
@@ -612,6 +721,167 @@ pub fn render_listing_row_with(
             comment,
             arrows,
         } => {
+            // If this row is the active disasm-edit target, swap
+            // the mnemonic + operand columns for an inline editor.
+            // Address + bytes columns stay so the user keeps spatial
+            // context.
+            let active_edit_for_row = ctx.and_then(|c| {
+                c.disasm_edit.as_ref().and_then(|e| {
+                    (e.artifact == c.artifact && e.address == *address).then(|| e.clone())
+                })
+            });
+            if let Some(edit_state) = active_edit_for_row {
+                use gpui::rgb;
+                let edit_bg = gpui::rgba(0x3a2f1080);
+                // Display bytes in the live edit reflect any
+                // already-staged edit at this address — the user
+                // is editing the current encoding, not the
+                // file's original.
+                let live_bytes = ctx
+                    .and_then(|c| c.bundle.edits.get(&c.artifact, *address))
+                    .filter(|e| e.new_bytes.len() == 4)
+                    .map(|e| [
+                        e.new_bytes[0],
+                        e.new_bytes[1],
+                        e.new_bytes[2],
+                        e.new_bytes[3],
+                    ])
+                    .unwrap_or(*bytes);
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .text_base()
+                    .font_family("Courier New")
+                    .bg(edit_bg)
+                    .child(render_arrow_gutter(arrows, LISTING_ROW_HEIGHT))
+                    .child(
+                        div()
+                            .w(px(LISTING_ADDR_WIDTH))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .pr_4()
+                            .text_color(rgb(COLOUR_ADDR))
+                            .child(format!("{address:016x}")),
+                    )
+                    .child(
+                        div()
+                            .w(px(LISTING_BYTES_WIDTH))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .pr_4()
+                            .text_color(rgb(COLOUR_BYTES))
+                            .child(format!(
+                                "{:02x} {:02x} {:02x} {:02x}",
+                                live_bytes[0], live_bytes[1], live_bytes[2], live_bytes[3]
+                            )),
+                    )
+                    .child(
+                        div().flex_1().min_w(px(0.)).child(edit_state.input.render(
+                            gpui::Rgba { r: 1., g: 1., b: 1., a: 1. },
+                            gpui::Rgba { r: 0.6, g: 0.6, b: 0.65, a: 1. },
+                            "type assembly, Enter to commit…",
+                            "Courier New",
+                        )),
+                    );
+                if let Some(err) = edit_state.error.as_ref() {
+                    row = row.child(
+                        div()
+                            .ml_3()
+                            .text_xs()
+                            .text_color(rgb(0xff7070))
+                            .child(SharedString::from(err.clone())),
+                    );
+                }
+                return h_shift_with_addr_annotated(
+                    row,
+                    h_offset,
+                    LISTING_ROW_HEIGHT,
+                    row_index,
+                    ctx,
+                    Some(*address),
+                    None,
+                    None,
+                );
+            }
+            // Staged edit (not currently being edited): override
+            // bytes + display text with the edit's cached new
+            // disasm, and tint the row so it's visually distinct
+            // from unmodified code.
+            let staged_edit = ctx.and_then(|c| {
+                c.bundle
+                    .edits
+                    .get(&c.artifact, *address)
+                    .filter(|e| {
+                        // Only Instruction edits land on disasm
+                        // rows; data edits at instruction-aligned
+                        // addresses are still data edits and the
+                        // hex view owns their display.
+                        e.kind == crate::edits::EditKind::Instruction
+                            && e.new_bytes.len() == 4
+                    })
+                    .cloned()
+            });
+            if let Some(edit) = staged_edit {
+                use gpui::rgb;
+                let edit_bg = gpui::rgba(0x1c4a3c80);
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .text_base()
+                    .font_family("Courier New")
+                    .bg(edit_bg)
+                    .child(render_arrow_gutter(arrows, LISTING_ROW_HEIGHT))
+                    .child(
+                        div()
+                            .w(px(LISTING_ADDR_WIDTH))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .pr_4()
+                            .text_color(rgb(COLOUR_ADDR))
+                            .child(format!("{address:016x}")),
+                    )
+                    .child(
+                        div()
+                            .w(px(LISTING_BYTES_WIDTH))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .pr_4()
+                            .text_color(rgb(COLOUR_BYTES))
+                            .child(format!(
+                                "{:02x} {:02x} {:02x} {:02x}",
+                                edit.new_bytes[0],
+                                edit.new_bytes[1],
+                                edit.new_bytes[2],
+                                edit.new_bytes[3]
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_color(rgb(0xc8e8d4))
+                            .child(SharedString::from(edit.display.clone())),
+                    )
+                    .child(
+                        div()
+                            .ml_3()
+                            .text_xs()
+                            .text_color(rgb(0x8fbfa3))
+                            .child(SharedString::from("modified")),
+                    );
+                return h_shift_with_addr_annotated(
+                    row,
+                    h_offset,
+                    LISTING_ROW_HEIGHT,
+                    row_index,
+                    ctx,
+                    Some(*address),
+                    None,
+                    None,
+                );
+            }
             let mut row_div = div()
                 .flex()
                 .flex_row()
