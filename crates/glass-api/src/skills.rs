@@ -564,6 +564,26 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({ "type": "object" }),
                 example: "glass bin-search ./libfoo.so --artifact libfoo.so --pattern '00 00 80 d2 c0 03 5f d6'",
             },
+            Skill {
+                name: "insn-search",
+                description: "Search for a sequence of AArch64 instructions. The pattern is a `;`-separated assembly sequence (e.g. `mov w0, #1 ; ret`). Each instruction is encoded via armv8-encode and the resulting bytes — with operand-bit masking for any wildcards — flow into the byte-search engine. Higher-level than `bin-search` when you want to express a code shape without working out the exact bits. Wildcards (Phase C): bare `*` matches any operand; `#*` hints an immediate; bare `x` or `w` matches any X- or W-class register. Bracketed forms `<*>`, `<X>`, `<W>`, `<imm>` work too — useful when the wildcard is embedded inside other syntax (e.g. `[x, #*]`). Captures (`<name:kind>` cross-referencing the same wildcard later) are not yet implemented. Concrete operands constrain the encoding directly. The compiled pattern is shown back in the response as `bytes_hex` (e.g. `01/1f ?? ?? 90/9f` for `adrp x1, *`) for debugging.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "artifact", "pattern"],
+                    "properties": {
+                        "path": path_arg(),
+                        "artifact": artifact_arg(),
+                        "pattern": {
+                            "type": "string",
+                            "description": "Semicolon-separated AArch64 instructions with optional wildcards. Examples: `mov w0, #1 ; ret` (fully concrete); `adrp x1, *` (Rd=1 fixed, target address wildcarded); `mov x, #*` (any X-register, any immediate); `ldr x, [x, #*]` (load any X via any X base + any offset). Mnemonic + operand count must match an opcode in the AArch64 table; ranking prefers opcodes whose slot kinds match wildcard hints (so `#*` lands on immediate forms rather than aliases that hide an immediate elsewhere)."
+                        },
+                        "section": { "type": "string", "description": "Optional: narrow to one section by name (defaults to all text sections)." },
+                        "limit": { "type": "integer", "minimum": 1, "description": "Cap on returned matches across all sections." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'adrp x1, * ; add x1, x1, #*'",
+            },
         ],
     }
 }

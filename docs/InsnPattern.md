@@ -42,28 +42,22 @@ any changes.
 
 ## armv8-encode coverage audit
 
-Audit done against pinned commit (`75a1a765`):
+All Phase A–C prerequisites landed upstream and the workspace
+pins armv8-encode at commit `83806e6a`:
 
 | Component | State | Notes |
 |---|---|---|
 | Opcode table | ✓ 1157 entries | Full A64 base ISA + NEON / SIMD. |
-| `Aarch64Opcode::base_opcode()` + `operands()` | `pub(crate)` | Need `pub` exposure. |
-| Per-opcode iterator | ❌ missing | Need `iter_opcodes() -> impl Iterator<&Aarch64Opcode>`. |
-| Operand kinds (89 variants) | ✓ ~99% encodable | Only `Nil` (trivial) and `AddrSimm92` (LDR/STR-neg-imm alias) fall through with `Unimplemented`. |
-| `encode_instruction(&InstructionTemplate)` | ✓ public | Exactly what Phase 1 needs. |
-| `Aarch64Mnemonic::parse(name)` | ✓ public | String → enum, used for mnemonic lookup. |
-| Per-operand bit ranges | ❌ not exposed | The encoders know where bits go but each writes them into a `Word`. For wildcards we need `(bit_offset, bit_width)` per operand position. |
+| `Aarch64Opcode::base_opcode()` + `operands()` | ✓ public | Driven by the variants index + bit-range lookup. |
+| `iter_opcodes()` | ✓ public | Walked at first use to build the variants index. |
+| Operand kinds (89 variants) | ✓ ~99% encodable | `Nil` (trivial) and `AddrSimm92` (LDR/STR-neg-imm alias) still fall through with `Unimplemented`. |
+| `encode_instruction(&InstructionTemplate)` | ✓ public | Drives the concrete + placeholder-substituted encode path. |
+| `Aarch64Mnemonic::parse(name)` + `as_str()` | ✓ public | String ↔ enum mapping for parser + opcode lookup. |
+| `Aarch64Opcode::operand_bit_ranges()` | ✓ public | Used by wildcard compilation to clear the right bits in the byte mask. |
 
-**Three small upstream changes needed in `azw413/armv8-encode`:**
-
-1. Add `pub fn iter_opcodes() -> impl Iterator<Item = &'static Aarch64Opcode>`.
-2. Promote `Aarch64Opcode::base_opcode()` and `operands()` from
-   `pub(crate)` to `pub`.
-3. Add `pub fn operand_bit_ranges(&self) -> Vec<Range<u8>>` (or
-   `[Option<Range<u8>>; N]`) on `Aarch64Opcode`. For Phase 1
-   this isn't needed; Phase 2 wildcards require it.
-
-Phases 1 and 3 can ship without (3); Phase 2 must wait for it.
+Phase D (captures) doesn't need any further upstream changes —
+it post-filters candidate matches by decoding the 4-byte
+windows and unifying captured slots.
 
 ## Syntax
 
@@ -345,18 +339,47 @@ its own doc (`docs/Patching.md`).
 
 ## Phasing
 
-| Phase | Scope                                                                 | Upstream work                                                                 |
-|-------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| A     | Concrete-instruction compiler + CLI verb `insn-search`. No wildcards. | `iter_opcodes()`, `pub` on `base_opcode()` + `operands()`.                    |
-| B     | Autocomplete UI in the binary palette tab. Dropdown of variants.      | (none — Phase A APIs cover it.)                                               |
-| C     | Operand wildcards `<*>`, slot-kind wildcards `<W>`, `<X>`, `<imm>`.   | `operand_bit_ranges()` on `Aarch64Opcode`; bit-mask atom in bin-search.        |
-| D     | Captures `<X>`, cross-line unification.                                | (none — post-filter in glass-api.)                                             |
-| E     | Patching: same compiler, concrete-only output, write-back API.         | Patching design separate.                                                      |
+| Phase | Scope                                                                 | Status | Upstream work                                                                 |
+|-------|-----------------------------------------------------------------------|--------|-------------------------------------------------------------------------------|
+| A     | Concrete-instruction compiler + CLI verb `insn-search`. No wildcards. | ✅ shipped | `iter_opcodes()`, `pub` on `base_opcode()` + `operands()`.                    |
+| B     | Autocomplete UI in the binary palette tab. Dropdown of variants.      | ✅ shipped | (none — Phase A APIs cover it.)                                               |
+| C     | Operand wildcards `*`, `#*`, `x`, `w` (and bracketed `<*>`, `<X>`, `<W>`, `<imm>`). | ✅ shipped | `operand_bit_ranges()` on `Aarch64Opcode`.                                    |
+| D     | Captures `<name:kind>`, cross-instruction unification.                | pending | (none — post-filter in glass-api.)                                            |
+| E     | Patching: same compiler, concrete-only output, write-back API.        | pending | Patching design separate.                                                      |
 
-Phase A is self-contained and demonstrates the whole pipeline
-end-to-end without needing the autocomplete UI yet. The CLI
-form lets us iterate on the encoder side first; the dropdown
-UX (Phase B) hangs off the same compiler.
+### Phase A — `compile_to_atoms` (concrete operands)
+
+Live in `crates/glass-api/src/insn_pattern.rs`. Mnemonic +
+operand parser, drives `armv8_encode::encode_instruction`,
+emits four byte atoms per instruction with `mask = 0xff`.
+
+### Phase B — autocomplete
+
+Live in `crates/glass-api/src/insn_variants.rs` (variants
+index over `iter_opcodes()`) and `insn_matcher.rs` (prefix
+matcher + ranking). UI in `crates/glass-ui/src/shell_render.rs`
+(`render_palette_asm_dropdown`). ⌘B inside Binary mode toggles
+Bytes ↔ Asm; Tab commits the highlighted variant template.
+
+### Phase C — wildcards
+
+Live in `insn_pattern.rs`. Parser tokenises `*`, `#*`, bare `x`/`w`,
+and the bracketed `<...>` forms. Compiler walks `iter_opcodes()`
+for matching mnemonic + operand count, ranks candidates by how
+well slot kinds match user wildcard hints (so `#*` lands on an
+immediate-encoded form rather than a register-aliased one),
+encodes with kind-appropriate placeholders, and uses
+`Aarch64Opcode::operand_bit_ranges()` to clear the wildcarded
+bits in both `mask` and `value`. Output flows through the
+existing bin-search byte engine — atom-aware (`(mask, value)`
+per byte), so partial-byte masks just work.
+
+### Phases D + E — pending
+
+Captures are designed as a post-filter: byte engine produces
+candidates, decoder verifies bound operands match. Patching
+reuses the concrete-only path with a write-back API; needs its
+own design doc.
 
 ## Open questions
 

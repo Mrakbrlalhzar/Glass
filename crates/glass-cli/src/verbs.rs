@@ -862,6 +862,40 @@ fn render_bin_search(
     Ok(())
 }
 
+pub fn insn_search(
+    path: PathBuf,
+    artifact: String,
+    pattern: String,
+    section: Option<String>,
+    limit: Option<usize>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.insn_search(&artifact, &pattern, section.as_deref(), limit)
+    })?;
+    output::emit(envelope, format, render_insn_search)
+}
+
+fn render_insn_search(
+    data: &glass_api::InsnSearchResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}  {} of {} matches for pattern: {}  (bytes: {})",
+        data.artifact, data.shown, data.total, data.pattern, data.bytes_hex,
+    )?;
+    for m in &data.matches {
+        writeln!(
+            out,
+            "  {:<22}  {:<14}  {}",
+            m.section, m.address, m.preview,
+        )?;
+    }
+    Ok(())
+}
+
 // Marker — `Envelope` referenced in the function signatures.
 #[allow(dead_code)]
 fn _envelope_marker(_: Envelope<()>) {}

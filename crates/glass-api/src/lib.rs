@@ -26,6 +26,9 @@ mod bundle;
 mod cfg;
 mod dex;
 mod disasm;
+mod insn_matcher;
+mod insn_pattern;
+mod insn_variants;
 mod inspect;
 mod search;
 mod skills;
@@ -49,6 +52,11 @@ pub use dex::{
     MethodCallsResult, MethodInfo, MethodListing, SmaliBody,
 };
 pub use disasm::{decode_word, DecodeResult, DisasmListing, DisasmRow};
+pub use insn_pattern::{
+    compile as compile_insn_pattern, compile_to_atoms as compile_insn_atoms, InsnSearchResult,
+};
+pub use insn_matcher::{match_variants as match_insn_variants, MatchCandidate};
+pub use insn_variants::{variants as insn_variants, SlotSpec, Variant};
 pub use inspect::{
     ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,
     SectionInfo,

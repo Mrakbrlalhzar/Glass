@@ -7,7 +7,7 @@
 //!   - `*`                  — gap of 0..=32 bytes (default).
 //!   - `*(min..max)`        — explicit gap bounds.
 //!   - `*(min..)` / `*(..max)` — partial bounds; the other side
-//!                             defaults to 0 / 32 respectively.
+//!     defaults to 0 / 32 respectively.
 //!
 //! Matches don't span sections. The engine runs once per text /
 //! data section (excluding bss / debug / zero-base sections, the

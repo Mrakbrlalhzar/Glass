@@ -39,8 +39,10 @@ mod listing_render;
 mod loader;
 mod manifest;
 mod palette;
+mod checkbox;
 mod scrollbar;
 mod search;
+mod text_input;
 mod section_map;
 mod shell_actions;
 mod shell_render;
@@ -74,6 +76,7 @@ actions!(
         PaletteActivate,
         PaletteModeText,
         PaletteModeBinary,
+        PaletteAsmTab,
         OpenFile,
         NewWindow,
         CloseWindow,
@@ -884,7 +887,7 @@ pub(crate) struct Shell {
     /// Palette modal state. Survives close+reopen — the user's last
     /// query and selection come back when they click the icon again.
     pub(crate) palette_open: bool,
-    pub(crate) palette_query: String,
+    pub(crate) palette_query: crate::text_input::TextInput,
     pub(crate) palette_selected: usize,
     pub(crate) palette_list_state: ListState,
     pub(crate) palette_list_len: usize,
@@ -895,13 +898,34 @@ pub(crate) struct Shell {
     pub(crate) palette_mode: PaletteMode,
     /// Binary-search mode state — query buffer, last result set,
     /// parse / lookup error (rendered inline under the input row).
-    pub(crate) palette_bin_query: String,
+    pub(crate) palette_bin_query: crate::text_input::TextInput,
     pub(crate) palette_bin_results: Option<std::sync::Arc<glass_api::BinSearchResult>>,
     pub(crate) palette_bin_error: Option<String>,
+    /// Persistent virtualised-list state for the bin-search
+    /// results pane. Recreated on every search (with the new
+    /// result count) so list internals see a fresh model; kept
+    /// across render calls so scrolling actually works.
+    pub(crate) palette_bin_list_state: gpui::ListState,
+    /// When true, bin-search and insn-search scan only text
+    /// sections. Default true — keeps the result set focused on
+    /// code so a stray ADRP-shaped data pattern doesn't drown
+    /// the real hits.
+    pub(crate) palette_bin_code_only: bool,
     /// Which artifact bin-search runs against. Defaults to the
     /// bundle's first artifact at open; can be cycled later when we
     /// grow a dropdown.
     pub(crate) palette_bin_artifact: Option<glass_db::ArtifactId>,
+    /// Binary-mode sub-grammar. `Bytes` is the literal byte-mask
+    /// language consumed by `bin-search`; `Asm` is the typed-assembly
+    /// composer that compiles via `insn-search` before scanning.
+    /// Persists across mode switches within the same session.
+    pub(crate) palette_bin_grammar: BinaryGrammar,
+    /// Index of the currently-highlighted variant in the asm-mode
+    /// autocomplete dropdown.
+    pub(crate) palette_asm_selected: usize,
+    /// Cached candidate list. Rebuilt on every keystroke. Length 0
+    /// when the input is empty AND the user hasn't activated asm mode.
+    pub(crate) palette_asm_candidates: Vec<glass_api::MatchCandidate>,
     /// When `Some`, the palette is showing a scoped result set
     /// (e.g. "Callers of foo") rather than the bundle-wide search.
     /// Esc clears the scope back to bundle-wide search rather than
@@ -962,6 +986,20 @@ pub(crate) enum PaletteMode {
     /// Byte-level pattern search (`bin-search`). Pattern compiles
     /// + scans on Enter; results show as a table.
     Binary,
+}
+
+/// Sub-grammar within Binary mode. Shares result rendering and
+/// artifact selection with Bytes; differs only in how the input
+/// query is parsed before scanning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum BinaryGrammar {
+    /// Literal byte-mask pattern (`c0 03 5f d6`, `e? ?? ff *`).
+    #[default]
+    Bytes,
+    /// Typed assembly (`mov w0, #1 ; ret`) compiled via
+    /// `glass_api::compile_insn_pattern`. Drives an autocomplete
+    /// dropdown of matching variants.
+    Asm,
 }
 
 #[derive(Clone, Debug)]
@@ -1224,18 +1262,27 @@ impl Render for Shell {
                 if !this.palette_open {
                     return;
                 }
-                if k.key == "backspace" {
-                    this.palette_backspace(cx);
+                // Palette-global chords that beat the editor:
+                //   Tab in Binary+Asm → commit autocomplete template
+                //   ⌘B in Binary → toggle bytes / asm grammar
+                // Everything else (typing, ⌘V, arrows, etc.) is
+                // forwarded to the active TextInput.
+                if k.key == "tab"
+                    && this.palette_mode == PaletteMode::Binary
+                    && this.palette_bin_grammar == BinaryGrammar::Asm
+                    && this.annotation_edit.is_none()
+                {
+                    this.palette_asm_commit_template(cx);
                     return;
                 }
-                if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
+                if k.modifiers.platform && k.key == "b"
+                    && this.palette_mode == PaletteMode::Binary
+                    && this.annotation_edit.is_none()
+                {
+                    this.palette_toggle_bin_grammar(cx);
                     return;
                 }
-                let Some(s) = k.key_char.as_deref() else { return };
-                if s.is_empty() {
-                    return;
-                }
-                this.palette_type(s, cx);
+                this.palette_handle_key(k, cx);
             }))
             .child(header)
             .child(body);

@@ -1,0 +1,411 @@
+//! Reusable single-line text input widget.
+//!
+//! Owns its own `text`, `cursor`, and `selection_anchor`. Consumers
+//! embed a `TextInput` as a field on their state and call
+//! `handle_key` from a `on_key_down` listener, then `render` from
+//! their render method. The widget emits no actions — consumers
+//! decide what to do with the text after each keystroke by
+//! reading `text()`.
+//!
+//! v1 features:
+//! - Insertion cursor; Left/Right/Home/End movement.
+//! - Selection via Shift+Left/Right/Home/End. Typing replaces
+//!   selection. Click + drag is not supported in v1 because
+//!   the bare `div` renderer doesn't expose per-character hit
+//!   positions in this gpui revision.
+//! - Clipboard: ⌘A (select all), ⌘C (copy), ⌘X (cut), ⌘V
+//!   (paste / replace selection at cursor).
+//! - Backspace deletes selection if any, else char before cursor.
+//!   Delete deletes selection if any, else char after cursor.
+//!
+//! Deferred: word-jump (⌥-arrows), drag-select, undo, IME
+//! marked-text rendering.
+//!
+//! ## Cursor positions
+//!
+//! `cursor` is a **byte** offset into `text`. The widget operates
+//! on UTF-8 char boundaries — moving the cursor walks to the next
+//! / previous char boundary so multi-byte characters never split.
+//! `selection_anchor`, when `Some`, is the *other* end of the
+//! selection; the selected range is `min(cursor, anchor) ..
+//! max(cursor, anchor)`. When `None`, no selection is active.
+
+use gpui::{div, px, rgb, App, ParentElement, Rgba, SharedString, Styled};
+
+/// Single-line text-editing state + key handlers.
+#[derive(Debug, Clone)]
+pub struct TextInput {
+    text: String,
+    /// Byte offset of the insertion point. Always at a UTF-8 char
+    /// boundary.
+    cursor: usize,
+    /// When `Some`, the other end of an active selection. The
+    /// selected byte range is `min(cursor, anchor) .. max(...)`.
+    selection_anchor: Option<usize>,
+}
+
+impl Default for TextInput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextInput {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            selection_anchor: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_text(s: impl Into<String>) -> Self {
+        let text = s.into();
+        let cursor = text.len();
+        Self {
+            text,
+            cursor,
+            selection_anchor: None,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Replace the buffer outright. Cursor lands at the end.
+    /// Clears any selection.
+    pub fn set_text(&mut self, s: impl Into<String>) {
+        self.text = s.into();
+        self.cursor = self.text.len();
+        self.selection_anchor = None;
+    }
+
+    /// Clear the buffer and cursor.
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.selection_anchor = None;
+    }
+
+    // ---- Key handling ---------------------------------------
+
+    /// Handle one key-down event. Returns `true` if the event
+    /// mutated the text (so the caller can re-run any derived
+    /// computations: search results, candidate lists, etc.).
+    ///
+    /// `key` should be the `key` field from `gpui::Keystroke`;
+    /// `shift`, `cmd`, and `alt` flags ride along separately.
+    /// `key_char` is the printable form when the keystroke
+    /// produces one (gpui exposes this via `Keystroke::key_char`).
+    pub fn handle_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        cmd: bool,
+        _alt: bool,
+        key_char: Option<&str>,
+        cx: &mut App,
+    ) -> bool {
+        // Clipboard chords first (cmd-A/C/X/V on macOS, ctrl on
+        // other platforms — but we collapse both into `cmd` per
+        // the listener that calls us).
+        if cmd {
+            match key {
+                "a" => {
+                    self.select_all();
+                    return false;
+                }
+                "c" => {
+                    self.copy(cx);
+                    return false;
+                }
+                "x" => {
+                    return self.cut(cx);
+                }
+                "v" => {
+                    return self.paste(cx);
+                }
+                _ => return false,
+            }
+        }
+
+        match key {
+            "left" => {
+                self.move_cursor(-1, shift);
+                false
+            }
+            "right" => {
+                self.move_cursor(1, shift);
+                false
+            }
+            "home" => {
+                self.set_cursor(0, shift);
+                false
+            }
+            "end" => {
+                let n = self.text.len();
+                self.set_cursor(n, shift);
+                false
+            }
+            "backspace" => self.delete_left(),
+            "delete" => self.delete_right(),
+            _ => {
+                if let Some(s) = key_char {
+                    if !s.is_empty() {
+                        self.insert_str(s);
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    // ---- Editing primitives ---------------------------------
+
+    fn insert_str(&mut self, s: &str) {
+        let (a, b) = self.selection_range();
+        if a != b {
+            self.text.replace_range(a..b, s);
+            self.cursor = a + s.len();
+        } else {
+            self.text.insert_str(self.cursor, s);
+            self.cursor += s.len();
+        }
+        self.selection_anchor = None;
+    }
+
+    fn delete_left(&mut self) -> bool {
+        let (a, b) = self.selection_range();
+        if a != b {
+            self.text.replace_range(a..b, "");
+            self.cursor = a;
+            self.selection_anchor = None;
+            return true;
+        }
+        if self.cursor == 0 {
+            return false;
+        }
+        // Walk back to the previous char boundary so we don't
+        // split a multi-byte character.
+        let mut new_cursor = self.cursor;
+        loop {
+            new_cursor -= 1;
+            if new_cursor == 0 || self.text.is_char_boundary(new_cursor) {
+                break;
+            }
+        }
+        self.text.replace_range(new_cursor..self.cursor, "");
+        self.cursor = new_cursor;
+        true
+    }
+
+    fn delete_right(&mut self) -> bool {
+        let (a, b) = self.selection_range();
+        if a != b {
+            self.text.replace_range(a..b, "");
+            self.cursor = a;
+            self.selection_anchor = None;
+            return true;
+        }
+        if self.cursor >= self.text.len() {
+            return false;
+        }
+        let mut new_end = self.cursor + 1;
+        while new_end < self.text.len() && !self.text.is_char_boundary(new_end) {
+            new_end += 1;
+        }
+        self.text.replace_range(self.cursor..new_end, "");
+        true
+    }
+
+    fn move_cursor(&mut self, delta: i32, shift: bool) {
+        let target = if delta > 0 {
+            self.next_boundary(self.cursor)
+        } else {
+            self.prev_boundary(self.cursor)
+        };
+        self.set_cursor(target, shift);
+    }
+
+    fn set_cursor(&mut self, pos: usize, shift: bool) {
+        let pos = pos.min(self.text.len());
+        if shift {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.cursor);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor = pos;
+    }
+
+    fn prev_boundary(&self, pos: usize) -> usize {
+        if pos == 0 {
+            return 0;
+        }
+        let mut p = pos - 1;
+        while p > 0 && !self.text.is_char_boundary(p) {
+            p -= 1;
+        }
+        p
+    }
+
+    fn next_boundary(&self, pos: usize) -> usize {
+        let n = self.text.len();
+        if pos >= n {
+            return n;
+        }
+        let mut p = pos + 1;
+        while p < n && !self.text.is_char_boundary(p) {
+            p += 1;
+        }
+        p
+    }
+
+    fn selection_range(&self) -> (usize, usize) {
+        match self.selection_anchor {
+            Some(a) if a != self.cursor => {
+                let lo = a.min(self.cursor);
+                let hi = a.max(self.cursor);
+                (lo, hi)
+            }
+            _ => (self.cursor, self.cursor),
+        }
+    }
+
+    fn select_all(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.selection_anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    fn copy(&self, cx: &mut App) {
+        let (a, b) = self.selection_range();
+        if a == b {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.text[a..b].to_string()));
+    }
+
+    fn cut(&mut self, cx: &mut App) -> bool {
+        let (a, b) = self.selection_range();
+        if a == b {
+            return false;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.text[a..b].to_string()));
+        self.text.replace_range(a..b, "");
+        self.cursor = a;
+        self.selection_anchor = None;
+        true
+    }
+
+    fn paste(&mut self, cx: &mut App) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        let Some(s) = item.text() else { return false };
+        if s.is_empty() {
+            return false;
+        }
+        // Strip newlines — this is a single-line editor.
+        let cleaned: String = s.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        if cleaned.is_empty() {
+            return false;
+        }
+        self.insert_str(&cleaned);
+        true
+    }
+
+    // ---- Render ---------------------------------------------
+
+    /// Render the input as three spans (pre-selection,
+    /// selection, post-selection) with a vertical caret bar
+    /// at the cursor position. Caller wraps in whatever
+    /// container they want (gives full control over height,
+    /// padding, font, etc.).
+    ///
+    /// `text_colour` is the colour for normal text; `dim` is
+    /// used for the placeholder when the field is empty.
+    /// `placeholder` is shown (in `dim`) only when the buffer
+    /// is empty.
+    pub fn render(
+        &self,
+        text_colour: Rgba,
+        dim: Rgba,
+        placeholder: &str,
+        font: &'static str,
+    ) -> gpui::Div {
+        let (sel_a, sel_b) = self.selection_range();
+        let caret_idx = self.cursor;
+        // Subtle field tint — a desaturated version of the
+        // tab-selection blue. Makes the input read as a chrome
+        // affordance even when empty.
+        let field_bg: Rgba = rgb(0x1b2a44);
+        // Slices: pre [0..min(sel_a, caret)], sel [sel_a..sel_b],
+        // post [sel_b..end]. The caret position is rendered as a
+        // 1px bar between two spans. To keep things simple we
+        // split on cursor and (optionally) selection bounds.
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(22.))
+            .px_2()
+            .bg(field_bg);
+        if self.text.is_empty() {
+            // Caret at position 0 — sits to the left of the
+            // placeholder so the user sees where typing will land.
+            row = row.child(caret(text_colour)).child(
+                div()
+                    .text_color(dim)
+                    .font_family(font)
+                    .ml(px(2.))
+                    .child(SharedString::from(placeholder.to_string())),
+            );
+            return row;
+        }
+
+        // Build the three text spans, ordering caret + selection
+        // inserts inline.
+        let sel_bg: Rgba = rgb(0x355487);
+        // Indices where we need to break: 0, sel_a, sel_b, cursor, end.
+        let mut breaks = vec![0usize, self.text.len(), sel_a, sel_b, caret_idx];
+        breaks.sort();
+        breaks.dedup();
+        let mut last = 0usize;
+        for &b in breaks.iter().skip(1) {
+            if b == last {
+                continue;
+            }
+            let slice = &self.text[last..b];
+            let in_sel = last >= sel_a && b <= sel_b && sel_a != sel_b;
+            let mut span = div()
+                .font_family(font)
+                .text_color(text_colour)
+                .child(SharedString::from(slice.to_string()));
+            if in_sel {
+                span = span.bg(sel_bg);
+            }
+            row = row.child(span);
+            if b == caret_idx {
+                row = row.child(caret(text_colour));
+            }
+            last = b;
+        }
+        row
+    }
+}
+
+fn caret(colour: Rgba) -> gpui::Div {
+    div().w(px(1.)).h(px(14.)).bg(colour).flex_shrink_0()
+}

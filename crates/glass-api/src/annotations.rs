@@ -92,7 +92,7 @@ pub fn db_dump(path: impl AsRef<Path>) -> Result<DbDumpResult> {
     let bid = BundleId::from_bytes(&bytes);
     let db = Database::open(false).context("opening glass-db (read-only)")?;
     let record = db.load_bundle(&bid)?.map(|rec| BundleRecordView {
-        schema_version: rec.schema_version as u32,
+        schema_version: rec.schema_version,
         label: rec.label,
         last_opened_unix: rec.last_opened_unix,
         artifact_count: rec.artifacts.len(),

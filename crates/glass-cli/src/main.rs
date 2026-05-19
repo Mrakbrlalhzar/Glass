@@ -140,6 +140,14 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             *limit,
             format,
         )),
+        Cmd::InsnSearch { path, artifact, pattern, section, limit } => Some(verbs::insn_search(
+            path.clone(),
+            artifact.clone(),
+            pattern.clone(),
+            section.clone(),
+            *limit,
+            format,
+        )),
         Cmd::Annotations { path } => Some(verbs::annotations(path.clone(), format)),
         Cmd::DbDump { path } => Some(verbs::db_dump_v2(path.clone(), format)),
         Cmd::SetRename { path, key_kind, key, method, name } => Some(verbs::set_rename(
@@ -391,6 +399,27 @@ enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Search native sections for an AArch64 instruction
+    /// sequence written in assembly. The pattern is a `;`-
+    /// separated list of concrete instructions; each compiles
+    /// to 4 bytes and the result feeds the bin-search engine.
+    /// Phase A: concrete operands only — no wildcards or
+    /// captures (see docs/InsnPattern.md for the full plan).
+    /// Examples:
+    ///   --pattern 'mov w0, #1 ; ret'
+    ///   --pattern 'mov x0, #0 ; ret'
+    InsnSearch {
+        path: PathBuf,
+        #[arg(long)]
+        artifact: String,
+        /// Assembly text: `mnemonic op1, op2; mnemonic …`.
+        #[arg(long)]
+        pattern: String,
+        #[arg(long)]
+        section: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Read user-set annotations (rename / comment / colour) for
     /// the artifact identified by content-hashing `path`.
     Annotations { path: PathBuf },
@@ -639,6 +668,7 @@ fn main() -> Result<()> {
         | Cmd::Search { .. }
         | Cmd::Strings { .. }
         | Cmd::BinSearch { .. }
+        | Cmd::InsnSearch { .. }
         | Cmd::Annotations { .. }
         | Cmd::DbDump { .. }
         | Cmd::SetRename { .. }

@@ -226,6 +226,14 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             let limit = opt_usize(args, "limit");
             json_of(&bundle.bin_search(&artifact, &pattern, section.as_deref(), limit)?)?
         }
+        "insn-search" => {
+            let bundle = open(args)?;
+            let artifact = require_str(args, "artifact")?;
+            let pattern = require_str(args, "pattern")?;
+            let section = opt_str(args, "section");
+            let limit = opt_usize(args, "limit");
+            json_of(&bundle.insn_search(&artifact, &pattern, section.as_deref(), limit)?)?
+        }
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
     let duration_ms = start.elapsed().as_millis();

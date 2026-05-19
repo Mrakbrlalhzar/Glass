@@ -212,7 +212,11 @@ impl Database {
     }
 }
 
-fn default_db_path() -> Result<PathBuf> {
+/// Filesystem path the persistence layer uses by default. Exposed
+/// so external watchers (e.g. the GUI's annotation-reload poll)
+/// can monitor mtime / fs events on the file without duplicating
+/// the resolution logic.
+pub fn default_db_path() -> Result<PathBuf> {
     let base = dirs::data_dir().context("no platform data dir (HOME unset?)")?;
     Ok(base.join("Glass").join("glass.redb"))
 }
@@ -275,6 +279,7 @@ mod tests {
             artifacts: vec![ArtifactId::from_bytes(&[9, 9, 9])],
             open_tabs: vec![TabState::SmaliClass {
                 class_jni: "Lcom/example/Foo;".into(),
+                scroll_line: 0,
             }],
             active_tab: Some(0),
             expanded_paths: vec![],

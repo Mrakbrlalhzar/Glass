@@ -321,6 +321,7 @@ fn open_glass_window(
             if let Some(db) = db_for_window.clone() {
                 spawn_flush_timer(&shell, db, cx);
             }
+            spawn_annotation_reload_poll(&shell, cx);
             shell.update(cx, |_shell, cx: &mut Context<Shell>| {
                 cx.observe_window_bounds(window, |_shell, window: &mut Window, _cx| {
                     let b = window.bounds();
@@ -343,6 +344,42 @@ fn open_glass_window(
 
 /// Drive `db.flush()` every 500ms while the window lives. Cheap when
 /// nothing is dirty.
+/// Watch the glass-db file's mtime; when it changes (typically
+/// because a CLI / MCP invocation wrote an annotation), reload
+/// annotations into the in-memory index for every artifact in
+/// the current bundle. 2-second cadence — cheap (one stat call)
+/// and well below the latency users notice between running an
+/// external write and switching back to the GUI.
+fn spawn_annotation_reload_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
+    let Ok(db_path) = glass_db::default_db_path() else {
+        return;
+    };
+    let weak = shell.downgrade();
+    cx.spawn(async move |cx| {
+        let mut last_mtime: Option<std::time::SystemTime> =
+            std::fs::metadata(&db_path).ok().and_then(|m| m.modified().ok());
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let Some(entity) = weak.upgrade() else { break };
+            let Some(current) = std::fs::metadata(&db_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+            else {
+                continue;
+            };
+            if Some(current) != last_mtime {
+                last_mtime = Some(current);
+                let _ = cx.update_entity(&entity, |shell, cx| {
+                    shell.refresh_all_annotations(cx);
+                });
+            }
+        }
+    })
+    .detach();
+}
+
 fn spawn_flush_timer(shell: &gpui::Entity<Shell>, db: glass_db::Database, cx: &mut App) {
     let interval = db.flush_interval();
     let weak = shell.downgrade();

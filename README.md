@@ -24,6 +24,7 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 * Native binary layout overview with section data
 * Xref search of callers, references to data
 * Binary search of sequences of bytes with masking and gaps across code and data
+* Search for asm instructions or patterns of instructions across all sections 
 * Annotate any line (code or data) with a colour and/or comment so you can easily find it again later. 
 
 
@@ -113,7 +114,69 @@ To register with **Claude Desktop**, add Glass to `~/Library/Application Support
 
 The model can then call `inspect`, `symbols`, `disasm`, `cfg-of`, `dex-callers`, `search` and every other verb on any bundle you point it at. Tool results come back as the same JSON envelope you'd get from the CLI.
 
-## Status
+
+## Searching
+
+Three complementary engines, all available from the same ⌘F palette in the GUI and as CLI / MCP verbs.
+
+### Full text search
+
+Bundle-wide fuzzy match across native symbols, DEX classes / methods / fields, and string literals in code and data sections. Live-filtered as you type; results dispatch to the right view (listing for native addresses, smali viewer for DEX targets, hex view for data hits). Indices build on a background thread after load — a progress chip shows while in flight.
+
+```sh
+glass search ./app.apk onCreate                 # all things named like "onCreate"
+glass search ./libfoo.so init --limit 20
+```
+
+CLI reference: [`search` verb in `docs/cli-api.md`](docs/cli-api.md#search--path-p---query-q---limit-n).
+
+### Binary search
+
+Byte-level pattern engine. Each atom is a 2-character hex mask (`c0`, `e?`, `?f`, `??`) or a gap (`*` = 0..=32 bytes, `*(min..max)` for explicit bounds). Matches don't span sections. In the GUI palette, ⌘2 switches to Binary mode; the **Code only** checkbox (default on) restricts the scan to text sections so you aren't drowning in data hits when looking for an instruction shape.
+
+```sh
+# returning-true stub finder — `mov w0, #1 ; ret`
+glass bin-search ./libfoo.so --artifact libfoo.so --pattern '20 00 80 52 c0 03 5f d6'
+
+# any ADRP+ADD pair with no intervening bytes
+glass bin-search ./libfoo.so --artifact libfoo.so --pattern '?? ?? ?? 9? ?? ?? 4? 91'
+
+# raw data: find embedded magic
+glass bin-search ./libfoo.so --artifact libfoo.so --pattern 'de ad be ef'
+```
+
+Full grammar + worked examples: [`docs/BinSearch.md`](docs/BinSearch.md).
+
+### Instruction search
+
+Write the assembly, Glass compiles it to bytes. A `;`-separated AArch64 sequence is encoded via [armv8-encode](https://github.com/azw413/armv8-encode), and any wildcards are translated to operand-bit masks before the byte engine takes over. Inside Binary mode in the GUI, ⌘B toggles between **Bytes** and **Asm** grammars; an autocomplete dropdown shows variants that still match what you've typed.
+
+Wildcards:
+
+| Token | Meaning |
+|---|---|
+| `*` | any operand (kind inferred from the chosen opcode) |
+| `#*` | any immediate (hints the opcode picker) |
+| `x`, `w` | any X- or W-class register |
+| `<*>`, `<X>`, `<W>`, `<imm>` | bracketed equivalents, useful nested in other syntax (`[x, #*]`) |
+
+```sh
+# every `mov w0, #N` (any N)
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'mov w0, #*'
+
+# any ADRP into x1 followed immediately by ADD into the same reg
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'adrp x1, * ; add x1, x1, #*'
+
+# every `ret x30` — concrete, no wildcards
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'ret'
+```
+
+The response carries `bytes_hex` showing the compiled mask (e.g. `01/1f ?? ?? 90/9f` for `adrp x1, *`) so you can see exactly which bits are pinned vs wildcarded. Captures (`<name:kind>` cross-referencing the same operand later in the pattern) are designed but not yet implemented.
+
+Full design + phasing: [`docs/InsnPattern.md`](docs/InsnPattern.md). CLI/MCP reference: [`insn-search` in `docs/cli-api.md`](docs/cli-api.md#insn-search--path-p---artifact-a---pattern----section-s---limit-n).
+
+
+## Current Status
 
 Glass is usable today for reversing both Android (APK / DEX / native `.so`) and iOS (IPA / Mach-O) apps targeting AArch64. 32-bit ARM is on the roadmap.
 

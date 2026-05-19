@@ -70,15 +70,20 @@ impl Shell {
             search_index: None,
             search_indexing: false,
             palette_open: false,
-            palette_query: String::new(),
+            palette_query: crate::text_input::TextInput::new(),
             palette_selected: 0,
             palette_list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
             palette_list_len: 0,
             palette_mode: crate::PaletteMode::default(),
-            palette_bin_query: String::new(),
+            palette_bin_query: crate::text_input::TextInput::new(),
+            palette_bin_list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
+            palette_bin_code_only: true,
             palette_bin_results: None,
             palette_bin_error: None,
             palette_bin_artifact: None,
+            palette_bin_grammar: crate::BinaryGrammar::default(),
+            palette_asm_selected: 0,
+            palette_asm_candidates: Vec::new(),
             palette_scope: None,
             palette_focused: false,
             context_menu: None,
@@ -826,13 +831,29 @@ impl Shell {
             self.palette_focused = true;
             self.refresh_palette_list();
             self.spawn_search_index_build_if_needed(cx);
-            // Default the binary-search artifact to the bundle's
-            // first one if we don't have a selection yet. Most
-            // bundles have one artifact anyway.
-            if self.palette_bin_artifact.is_none() {
-                self.palette_bin_artifact = self
-                    .bundle()
-                    .and_then(|b| b.artifact_ids.first().cloned());
+            // Default (or refresh) the binary-search artifact to
+            // an artifact id that actually has text sections in
+            // the loaded bundle. `artifact_ids` lists everything
+            // (including DEX artifacts that have no native bytes
+            // to scan); using a DEX id here would give zero hits
+            // and look like a broken search.
+            let valid = match (&self.palette_bin_artifact, self.bundle()) {
+                (Some(aid), Some(b)) => {
+                    b.text_sections.keys().any(|(x, _)| x == aid)
+                        || b.data_sections.keys().any(|(x, _)| x == aid)
+                }
+                _ => false,
+            };
+            if !valid {
+                self.palette_bin_artifact = self.bundle().and_then(|b| {
+                    b.text_sections
+                        .keys()
+                        .next()
+                        .map(|(aid, _)| aid.clone())
+                        .or_else(|| {
+                            b.data_sections.keys().next().map(|(aid, _)| aid.clone())
+                        })
+                });
             }
             // Pull keyboard focus onto our root so typing reaches the
             // palette without the user clicking it first.
@@ -857,6 +878,110 @@ impl Shell {
         if self.palette_mode != crate::PaletteMode::Binary {
             self.palette_mode = crate::PaletteMode::Binary;
             self.palette_selected = 0;
+            cx.notify();
+        }
+    }
+
+    /// Toggle the "Code only" filter for bin/insn-search.
+    /// Re-runs the last search if results were on screen so the
+    /// table updates immediately without the user re-pressing
+    /// Enter.
+    pub(crate) fn palette_toggle_bin_code_only(&mut self, cx: &mut Context<Self>) {
+        self.palette_bin_code_only = !self.palette_bin_code_only;
+        if self.palette_bin_results.is_some() && !self.palette_bin_query.text().is_empty() {
+            self.run_palette_bin_search(cx);
+        }
+        cx.notify();
+    }
+
+    /// Toggle the binary-mode sub-grammar between Bytes and Asm.
+    pub(crate) fn palette_toggle_bin_grammar(&mut self, cx: &mut Context<Self>) {
+        self.palette_bin_grammar = match self.palette_bin_grammar {
+            crate::BinaryGrammar::Bytes => crate::BinaryGrammar::Asm,
+            crate::BinaryGrammar::Asm => crate::BinaryGrammar::Bytes,
+        };
+        self.palette_bin_results = None;
+        self.palette_bin_error = None;
+        self.refresh_palette_asm_candidates();
+        cx.notify();
+    }
+
+    pub(crate) fn palette_set_bin_grammar(
+        &mut self,
+        grammar: crate::BinaryGrammar,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette_bin_grammar != grammar {
+            self.palette_bin_grammar = grammar;
+            self.palette_bin_results = None;
+            self.palette_bin_error = None;
+            self.refresh_palette_asm_candidates();
+            cx.notify();
+        }
+    }
+
+    /// Rebuild the asm-mode autocomplete candidate list. Cheap —
+    /// just walks the variants index. Active instruction = text
+    /// after the last `;` in the input.
+    pub(crate) fn refresh_palette_asm_candidates(&mut self) {
+        if self.palette_bin_grammar != crate::BinaryGrammar::Asm {
+            self.palette_asm_candidates.clear();
+            self.palette_asm_selected = 0;
+            return;
+        }
+        let active = self
+            .palette_bin_query
+            .text()
+            .rsplit(';')
+            .next()
+            .unwrap_or("")
+            .trim_start();
+        self.palette_asm_candidates = glass_api::match_insn_variants(active, 12);
+        self.palette_asm_selected = self
+            .palette_asm_selected
+            .min(self.palette_asm_candidates.len().saturating_sub(1));
+    }
+
+    /// Tab inside asm mode: commit the highlighted variant's
+    /// template into the current instruction, replacing whatever
+    /// the user has half-typed.
+    pub(crate) fn palette_asm_commit_template(&mut self, cx: &mut Context<Self>) {
+        if self.palette_bin_grammar != crate::BinaryGrammar::Asm {
+            return;
+        }
+        let Some(cand) = self
+            .palette_asm_candidates
+            .get(self.palette_asm_selected)
+            .cloned()
+        else {
+            return;
+        };
+        // Split off the current instruction (everything after the
+        // last `;`); replace it with the variant's template.
+        let mut prefix = String::new();
+        let current = self.palette_bin_query.text();
+        if let Some(idx) = current.rfind(';') {
+            prefix.push_str(&current[..=idx]);
+            prefix.push(' ');
+        }
+        prefix.push_str(&cand.variant.template);
+        self.palette_bin_query.set_text(prefix);
+        self.palette_bin_results = None;
+        self.palette_bin_error = None;
+        self.refresh_palette_asm_candidates();
+        cx.notify();
+    }
+
+    /// Up/Down within the asm dropdown.
+    pub(crate) fn palette_asm_move(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if self.palette_asm_candidates.is_empty() {
+            return;
+        }
+        let max = self.palette_asm_candidates.len() - 1;
+        let next =
+            (self.palette_asm_selected as i32 + delta).clamp(0, max as i32) as usize;
+        if next != self.palette_asm_selected {
+            self.palette_asm_selected = next;
             cx.notify();
         }
     }
@@ -1531,7 +1656,7 @@ impl Shell {
             chip_label: SharedString::from(chip),
         });
         self.palette_open = true;
-        self.palette_query = current;
+        self.palette_query.set_text(current);
         self.palette_selected = 0;
         self.palette_list_len = 0;
         self.palette_focused = true;
@@ -1543,7 +1668,8 @@ impl Shell {
     /// refreshes the in-memory index, opens the pane on success.
     pub(crate) fn commit_annotation_edit(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = self.annotation_edit.take() else { return };
-        let value = std::mem::take(&mut self.palette_query);
+        let value = self.palette_query.text().to_string();
+        self.palette_query.clear();
         self.palette_open = false;
         self.palette_focused = false;
         let result = match edit.facet {
@@ -1823,45 +1949,57 @@ impl Shell {
         self.save_state();
     }
 
-    pub(crate) fn palette_type(&mut self, s: &str, cx: &mut Context<Self>) {
-        match self.palette_mode {
-            crate::PaletteMode::Text => {
-                self.palette_query.push_str(s);
-                self.palette_selected = 0;
-                self.refresh_palette_list();
-            }
-            crate::PaletteMode::Binary => {
-                self.palette_bin_query.push_str(s);
-                // Editing the pattern invalidates the displayed
-                // result set — drop it so the table doesn't show
-                // matches for a stale query while the user is
-                // still typing. Same for the error.
-                self.palette_bin_results = None;
-                self.palette_bin_error = None;
-                self.palette_selected = 0;
-            }
+    /// Forward a key event to the appropriate palette TextInput
+    /// and run any side-effects (search refresh, result-set
+    /// invalidation). Returns `true` if handled.
+    pub(crate) fn palette_handle_key(
+        &mut self,
+        k: &gpui::Keystroke,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shift = k.modifiers.shift;
+        let cmd = k.modifiers.platform || k.modifiers.control;
+        let alt = k.modifiers.alt;
+        let key_char = k.key_char.as_deref();
+        // In Text mode the same input drives bundle search AND
+        // the annotation-edit chip (which keeps annotation_edit
+        // set while typing); the differentiating logic happens
+        // at commit time.
+        let target_is_text = self.palette_mode == crate::PaletteMode::Text
+            || self.annotation_edit.is_some();
+        let app: &mut gpui::App = &mut *cx;
+        let handled = if target_is_text {
+            self.palette_query
+                .handle_key(&k.key, shift, cmd, alt, key_char, app)
+        } else {
+            self.palette_bin_query
+                .handle_key(&k.key, shift, cmd, alt, key_char, app)
+        };
+        // Side-effects on real text mutations.
+        if target_is_text {
+            self.palette_selected = 0;
+            self.refresh_palette_list();
+        } else {
+            self.palette_bin_results = None;
+            self.palette_bin_error = None;
+            self.palette_selected = 0;
+            self.refresh_palette_asm_candidates();
         }
         cx.notify();
-    }
-
-    pub(crate) fn palette_backspace(&mut self, cx: &mut Context<Self>) {
-        match self.palette_mode {
-            crate::PaletteMode::Text => {
-                self.palette_query.pop();
-                self.palette_selected = 0;
-                self.refresh_palette_list();
-            }
-            crate::PaletteMode::Binary => {
-                self.palette_bin_query.pop();
-                self.palette_bin_results = None;
-                self.palette_bin_error = None;
-                self.palette_selected = 0;
-            }
-        }
-        cx.notify();
+        handled
     }
 
     pub(crate) fn palette_move(&mut self, delta: i32, cx: &mut Context<Self>) {
+        // In Binary+Asm mode with no results table yet, Up/Down
+        // navigates the autocomplete dropdown instead.
+        if self.palette_mode == crate::PaletteMode::Binary
+            && self.palette_bin_grammar == crate::BinaryGrammar::Asm
+            && self.palette_bin_results.is_none()
+            && !self.palette_asm_candidates.is_empty()
+        {
+            self.palette_asm_move(delta, cx);
+            return;
+        }
         let len = match self.palette_mode {
             crate::PaletteMode::Text => self.palette_list_len,
             crate::PaletteMode::Binary => self
@@ -1877,8 +2015,13 @@ impl Shell {
         let next = (self.palette_selected as i32 + delta).clamp(0, max as i32) as usize;
         if next != self.palette_selected {
             self.palette_selected = next;
-            if self.palette_mode == crate::PaletteMode::Text {
-                self.palette_list_state.scroll_to_reveal_item(next);
+            match self.palette_mode {
+                crate::PaletteMode::Text => {
+                    self.palette_list_state.scroll_to_reveal_item(next);
+                }
+                crate::PaletteMode::Binary => {
+                    self.palette_bin_list_state.scroll_to_reveal_item(next);
+                }
             }
             cx.notify();
         }
@@ -1893,17 +2036,24 @@ impl Shell {
         use glass_arch_arm64::SymbolMap;
         let _ = SymbolMap::default; // touch import for future use
         self.palette_bin_error = None;
-        let pattern = std::mem::take(&mut self.palette_bin_query);
-        // Keep the query around for display + edit; restore it
-        // here after the take.
-        self.palette_bin_query = pattern.clone();
-        let atoms = match glass_api::parse_pattern(&pattern) {
-            Ok(a) => a,
-            Err(e) => {
-                self.palette_bin_error = Some(format!("{e:#}"));
-                cx.notify();
-                return;
-            }
+        let pattern = self.palette_bin_query.text().to_string();
+        let atoms = match self.palette_bin_grammar {
+            crate::BinaryGrammar::Bytes => match glass_api::parse_pattern(&pattern) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.palette_bin_error = Some(format!("{e:#}"));
+                    cx.notify();
+                    return;
+                }
+            },
+            crate::BinaryGrammar::Asm => match glass_api::compile_insn_atoms(&pattern) {
+                Ok(atoms) => atoms,
+                Err(e) => {
+                    self.palette_bin_error = Some(format!("{e:#}"));
+                    cx.notify();
+                    return;
+                }
+            },
         };
         let Some(bundle) = self.bundle().cloned() else {
             self.palette_bin_error = Some("no bundle loaded".to_string());
@@ -1918,12 +2068,16 @@ impl Shell {
         // Scan every text + data section of the artifact. Mirror
         // the bin-search verb's filter so behaviour matches.
         let mut matches: Vec<glass_api::BinMatch> = Vec::new();
+        let mut scanned_sections = 0usize;
+        let mut total_bytes_scanned = 0usize;
         // Text sections.
         for ((aid, name), text) in bundle.text_sections.iter() {
             if aid != &artifact {
                 continue;
             }
             let bytes: &[u8] = text.bytes.as_ref();
+            scanned_sections += 1;
+            total_bytes_scanned += bytes.len();
             for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = text.base + start as u64;
@@ -1941,7 +2095,11 @@ impl Shell {
             }
         }
         // Data sections (non-text, non-bss, non-debug, non-zero-base).
-        for ((aid, name), data) in bundle.data_sections.iter() {
+        // Skipped entirely when `Code only` is checked — the
+        // common case where the user is hunting an instruction
+        // shape and doesn't want stray ADRP-looking data hits.
+        let scan_data = !self.palette_bin_code_only;
+        for ((aid, name), data) in bundle.data_sections.iter().filter(|_| scan_data) {
             if aid != &artifact {
                 continue;
             }
@@ -1952,6 +2110,8 @@ impl Shell {
                 continue;
             }
             let bytes: &[u8] = data.bytes.as_ref();
+            scanned_sections += 1;
+            total_bytes_scanned += bytes.len();
             for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = data.base + start as u64;
@@ -1970,6 +2130,18 @@ impl Shell {
         }
         matches.sort_by(|a, b| a.section.cmp(&b.section).then(a.address.cmp(&b.address)));
         let total = matches.len();
+        if scanned_sections == 0 {
+            self.palette_bin_error = Some(format!(
+                "no sections to scan for artifact {} (bundle has {} text + {} data sections total)",
+                artifact.to_string().chars().take(10).collect::<String>(),
+                bundle.text_sections.len(),
+                bundle.data_sections.len(),
+            ));
+        } else if total == 0 {
+            self.palette_bin_error = Some(format!(
+                "no matches across {scanned_sections} sections ({total_bytes_scanned} bytes scanned)"
+            ));
+        }
         let result = glass_api::BinSearchResult {
             artifact: artifact.to_string(),
             pattern: pattern.clone(),
@@ -1977,6 +2149,8 @@ impl Shell {
             shown: total,
             matches,
         };
+        self.palette_bin_list_state =
+            ListState::new(total, ListAlignment::Top, px(2000.));
         self.palette_bin_results = Some(std::sync::Arc::new(result));
         self.palette_selected = 0;
         cx.notify();
@@ -2135,7 +2309,7 @@ impl Shell {
         if let Some(scope) = self.palette_scope.as_ref() {
             // Scoped: fixed entry set + fuzzy refinement via the
             // same matching tiers the bundle search uses.
-            let q = self.palette_query.to_lowercase();
+            let q = self.palette_query.text().to_lowercase();
             let mut scored: Vec<(u8, usize, &SearchEntry)> = Vec::new();
             for e in scope.entries.iter() {
                 let hay = e.display.to_lowercase();
@@ -2159,7 +2333,7 @@ impl Shell {
                 .map(|(_, _, e)| e.clone())
                 .collect()
         } else if let Some(idx) = self.search_index.as_ref() {
-            idx.filter(&self.palette_query, CAP)
+            idx.filter(self.palette_query.text(), CAP)
                 .into_iter()
                 .cloned()
                 .collect()
@@ -2618,6 +2792,24 @@ impl Shell {
         db.flush()?;
         self.refresh_artifact_annotations(&artifact)?;
         Ok(())
+    }
+
+    /// Re-read annotations for every artifact in the loaded
+    /// bundle. Called by the DB-mtime poller so writes made via
+    /// CLI / MCP land in the GUI without a bundle reload.
+    pub(crate) fn refresh_all_annotations(&mut self, cx: &mut Context<Self>) {
+        let Some(ids) = self
+            .bundle()
+            .map(|b| b.artifact_ids.as_ref().clone())
+        else {
+            return;
+        };
+        for aid in ids.iter() {
+            if let Err(e) = self.refresh_artifact_annotations(aid) {
+                tracing::warn!(artifact = %aid, "annotation reload failed: {e:#}");
+            }
+        }
+        cx.notify();
     }
 
     /// Rebuild the per-artifact AnnotationIndex from the DB and

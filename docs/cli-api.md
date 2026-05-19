@@ -270,6 +270,47 @@ bytes as space-separated hex for data sections.
 
 Full pattern reference + worked examples: [`docs/BinSearch.md`](BinSearch.md).
 
+### `insn-search --path P --artifact A --pattern '...' [--section S] [--limit N]`
+Higher-level than `bin-search`: write the *assembly* and let
+Glass compile it to bytes (with operand-bit masking for any
+wildcards) before scanning. Mnemonics, register names,
+immediates, and `;`-separated multi-instruction sequences are
+supported. Wildcards let you express a code shape without
+pinning every operand:
+
+| Token  | Meaning                                              |
+|--------|------------------------------------------------------|
+| `*`    | any operand (kind inferred from the chosen opcode)   |
+| `#*`   | any immediate (hints the opcode picker)              |
+| `x`    | any X-class register                                 |
+| `w`    | any W-class register                                 |
+| `<*>`, `<X>`, `<W>`, `<imm>` | same as the shorthand forms, useful when nested inside other syntax (`[x, #*]`, etc.) |
+
+```sh
+# every `mov w0, #N` site, whatever N is
+glass insn-search ./libfoo.so --artifact libfoo.so \
+  --pattern 'mov w0, #*'
+
+# any ADRP into x1 followed immediately by ADD into the same reg
+glass insn-search ./libfoo.so --artifact libfoo.so \
+  --pattern 'adrp x1, * ; add x1, x1, #*'
+
+# every `ret x30` (concrete — no wildcards)
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'ret'
+```
+
+The response includes `bytes_hex` showing the compiled
+byte-mask atoms (e.g. `01/1f ?? ?? 90/9f` for `adrp x1, *`) so
+you can see exactly which bits are pinned vs wildcarded. Match
+rows reuse the `bin-search` shape — section, address, length,
+preview.
+
+Captures (`<name:kind>` cross-referencing the same wildcard
+later in the pattern) are designed but not yet implemented;
+track on the roadmap.
+
+Full design + phasing: [`docs/InsnPattern.md`](InsnPattern.md).
+
 ## Annotations & persistence
 
 Glass persists window state, open tabs, and user annotations in a

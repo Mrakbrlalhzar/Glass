@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, ListAlignment, ListState, Pixels,
+    div, list, prelude::*, px, rgb, App, Context, Pixels,
     SharedString,
 };
 
@@ -170,14 +170,8 @@ impl Shell {
             .child(
                 div()
                     .flex_1()
-                    .text_color(fg)
                     .text_base()
-                    .font_family("Courier New")
-                    .child(if self.palette_query.is_empty() {
-                        SharedString::from(placeholder)
-                    } else {
-                        SharedString::from(self.palette_query.clone())
-                    }),
+                    .child(self.palette_query.render(fg, dim, placeholder, "Courier New")),
             )
             .child(div().text_color(dim).text_xs().child(status));
 
@@ -300,8 +294,19 @@ impl Shell {
                         }
                     }
                     crate::PaletteMode::Binary => {
+                        card = card.child(self.render_palette_bin_grammar_tabs(
+                            border, fg, dim, cx,
+                        ));
                         card = card
-                            .child(self.render_palette_bin_input(border, fg, dim, cx));
+                            .child(self.render_palette_bin_input(border, fg, dim, accent, cx));
+                        if self.palette_bin_grammar == crate::BinaryGrammar::Asm
+                            && self.palette_bin_results.is_none()
+                            && !self.palette_asm_candidates.is_empty()
+                        {
+                            card = card.child(
+                                self.render_palette_asm_dropdown(border, fg, dim, accent, cx),
+                            );
+                        }
                         card = card
                             .child(self.render_palette_bin_results(border, fg, dim, accent, cx));
                     }
@@ -377,21 +382,31 @@ impl Shell {
         border: gpui::Rgba,
         fg: gpui::Rgba,
         dim: gpui::Rgba,
-        _cx: &mut Context<Self>,
+        accent: gpui::Rgba,
+        cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let placeholder = "Byte pattern: c0 03 5f d6, e? ?? ff *(0..16) c0";
-        let display = if self.palette_bin_query.is_empty() {
-            SharedString::from(placeholder)
-        } else {
-            SharedString::from(self.palette_bin_query.clone())
+        let placeholder = match self.palette_bin_grammar {
+            crate::BinaryGrammar::Bytes => {
+                "Byte pattern: c0 03 5f d6, e? ?? ff *(0..16) c0"
+            }
+            crate::BinaryGrammar::Asm => "AArch64 asm: mov w0, #1 ; ret",
         };
-        let display_colour = if self.palette_bin_query.is_empty() { dim } else { fg };
-        let scope_chip = self.palette_bin_artifact.as_ref().map(|aid| {
-            SharedString::from(format!(
-                "artifact {}",
-                aid.to_string().chars().take(10).collect::<String>()
-            ))
-        });
+        let weak = cx.entity().downgrade();
+        let code_only_box = crate::checkbox::checkbox(
+            "palette-bin-code-only",
+            "Code only",
+            self.palette_bin_code_only,
+            fg,
+            dim,
+            accent,
+            move |cx| {
+                if let Some(entity) = weak.upgrade() {
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.palette_toggle_bin_code_only(cx);
+                    });
+                }
+            },
+        );
         let mut row = div()
             .h(px(40.))
             .flex_shrink_0()
@@ -404,16 +419,12 @@ impl Shell {
             .border_color(border)
             .child(div().text_color(dim).text_base().child("⌗"))
             .child(
-                div()
-                    .flex_1()
-                    .text_color(display_colour)
-                    .text_base()
-                    .font_family("Courier New")
-                    .child(display),
-            );
-        if let Some(chip) = scope_chip {
-            row = row.child(div().text_xs().text_color(dim).child(chip));
-        }
+                div().flex_1().text_base().child(
+                    self.palette_bin_query
+                        .render(fg, dim, placeholder, "Courier New"),
+                ),
+            )
+            .child(code_only_box);
         if let Some(err) = self.palette_bin_error.as_ref() {
             row = row.child(
                 div()
@@ -423,6 +434,109 @@ impl Shell {
             );
         }
         row
+    }
+
+    /// Small two-tab strip inside Binary mode that toggles between
+    /// the byte-mask grammar and the typed-assembly composer.
+    fn render_palette_bin_grammar_tabs(
+        &self,
+        border: gpui::Rgba,
+        fg: gpui::Rgba,
+        dim: gpui::Rgba,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let grammar = self.palette_bin_grammar;
+        let tab = |label: &'static str,
+                   shortcut: Option<&'static str>,
+                   is_active: bool,
+                   id: &'static str,
+                   target: crate::BinaryGrammar| {
+            let bg = if is_active { panel_active() } else { panel_inactive() };
+            let text_col = if is_active { fg } else { dim };
+            let mut d = div()
+                .id(id)
+                .px_3()
+                .h(px(22.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .bg(bg)
+                .text_xs()
+                .text_color(text_col)
+                .cursor_pointer()
+                .child(SharedString::from(label));
+            if let Some(s) = shortcut {
+                d = d.child(div().text_xs().text_color(dim).child(SharedString::from(s)));
+            }
+            d.on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _ev, _w, cx| {
+                    this.palette_set_bin_grammar(target, cx);
+                }),
+            )
+        };
+        div()
+            .h(px(22.))
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(border)
+            .child(tab(
+                "Bytes",
+                None,
+                grammar == crate::BinaryGrammar::Bytes,
+                "palette-bin-grammar-bytes",
+                crate::BinaryGrammar::Bytes,
+            ))
+            .child(tab(
+                "Asm",
+                Some("⌘B"),
+                grammar == crate::BinaryGrammar::Asm,
+                "palette-bin-grammar-asm",
+                crate::BinaryGrammar::Asm,
+            ))
+    }
+
+    /// Autocomplete dropdown for asm-mode binary search.
+    fn render_palette_asm_dropdown(
+        &self,
+        border: gpui::Rgba,
+        fg: gpui::Rgba,
+        dim: gpui::Rgba,
+        accent: gpui::Rgba,
+        _cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let selected = self.palette_asm_selected;
+        let rows = self.palette_asm_candidates.iter().enumerate().map(
+            |(i, cand)| {
+                let is_sel = i == selected;
+                let bg = if is_sel { accent } else { rgb(0x00000000) };
+                let text_col = if is_sel { fg } else { dim };
+                div()
+                    .h(px(20.))
+                    .px_3()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(bg)
+                    .text_sm()
+                    .font_family("Courier New")
+                    .text_color(text_col)
+                    .child(SharedString::from(cand.variant.template.clone()))
+            },
+        );
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(border)
+            .max_h(px(260.));
+        for r in rows {
+            col = col.child(r);
+        }
+        col
     }
 
     fn render_palette_bin_results(
@@ -457,9 +571,7 @@ impl Shell {
                 ))),
             Some(result) => {
                 let matches: Arc<Vec<glass_api::BinMatch>> = Arc::new(result.matches.clone());
-                let len = matches.len();
-                let state =
-                    ListState::new(len, ListAlignment::Top, px(2000.));
+                let state = self.palette_bin_list_state.clone();
                 let header = SharedString::from(format!(
                     "{} of {} matches",
                     result.shown, result.total

@@ -21,7 +21,7 @@ use crate::{AnnotationIndex, LoadedBundle, Shell, TextTooltip};
 
 /// Borrow the per-row annotation index, if any. Convenience: avoids
 /// repeating the `bundle.annotations.get(&artifact)` dance.
-fn annotation_index<'a>(ctx: Option<&'a RowCtx>) -> Option<&'a AnnotationIndex> {
+fn annotation_index(ctx: Option<&RowCtx>) -> Option<&AnnotationIndex> {
     let ctx = ctx?;
     ctx.bundle.annotations.get(&ctx.artifact)
 }
@@ -35,6 +35,7 @@ fn annotation_index<'a>(ctx: Option<&'a RowCtx>) -> Option<&'a AnnotationIndex> 
 ///      from `addr` forward to the next NUL and back from `addr`
 ///      to the previous NUL (or section start) so the highlight
 ///      covers the whole string the user has selected.
+///
 /// Returns `None` when neither heuristic applies — the renderer
 /// then draws no item highlight.
 pub(crate) fn item_extent_for(
