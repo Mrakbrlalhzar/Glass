@@ -229,6 +229,11 @@ pub fn default_db_path() -> Result<PathBuf> {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct WindowSettings {
     pub bounds: Option<StoredBounds>,
+    /// Active theme, by `name` (matches the `name` field in a theme
+    /// JSON or a built-in). `None` → built-in default. `#[serde(default)]`
+    /// so older settings.json files load unchanged.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
@@ -242,6 +247,15 @@ pub struct StoredBounds {
 fn settings_path() -> Result<PathBuf> {
     let base = dirs::data_dir().context("no platform data dir")?;
     Ok(base.join("Glass").join("settings.json"))
+}
+
+/// Directory where user-installed theme JSONs live. Built-ins are
+/// compiled into the binary and merged with whatever's on disk.
+/// Returns the path even if the directory doesn't exist yet — callers
+/// that read from it should tolerate a missing dir.
+pub fn themes_dir() -> Result<PathBuf> {
+    let base = dirs::data_dir().context("no platform data dir")?;
+    Ok(base.join("Glass").join("Themes"))
 }
 
 pub fn load_window_settings() -> WindowSettings {
@@ -285,6 +299,7 @@ mod tests {
             expanded_paths: vec![],
             source_path: None,
             annotations_pane_open: false,
+            window_tint: 0,
         };
         db.save_bundle(bid.clone(), rec.clone());
         db.flush()?;
@@ -317,6 +332,7 @@ mod tests {
                 expanded_paths: vec![],
                 source_path: None,
             annotations_pane_open: false,
+            window_tint: 0,
             },
         );
         db.flush()?;
@@ -337,6 +353,7 @@ mod tests {
                 expanded_paths: vec![],
                 source_path: None,
             annotations_pane_open: false,
+            window_tint: 0,
             },
         );
         fresh.flush()?;

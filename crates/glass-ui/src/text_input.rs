@@ -30,7 +30,7 @@
 //! selection; the selected range is `min(cursor, anchor) ..
 //! max(cursor, anchor)`. When `None`, no selection is active.
 
-use gpui::{div, px, rgb, App, ParentElement, Rgba, SharedString, Styled};
+use gpui::{div, px, App, ParentElement, Rgba, SharedString, Styled};
 
 /// Single-line text-editing state + key handlers.
 #[derive(Debug, Clone)]
@@ -369,8 +369,9 @@ impl TextInput {
         wrap_chars: usize,
     ) -> gpui::Div {
         use gpui::prelude::*;
-        let field_bg: Rgba = rgb(0x1b2a44);
-        let sel_bg: Rgba = rgb(0x355487);
+        let t = crate::theme::current();
+        let field_bg: Rgba = t.hex.field_bg.rgba();
+        let sel_bg: Rgba = t.hex.field_selection.rgba();
         let (sel_a, sel_b) = self.selection_range();
         let caret_idx = self.cursor;
         let mut col = div()
@@ -454,7 +455,7 @@ impl TextInput {
         // Subtle field tint — a desaturated version of the
         // tab-selection blue. Makes the input read as a chrome
         // affordance even when empty.
-        let field_bg: Rgba = rgb(0x1b2a44);
+        let field_bg: Rgba = crate::theme::current().hex.field_bg.rgba();
         // Slices: pre [0..min(sel_a, caret)], sel [sel_a..sel_b],
         // post [sel_b..end]. The caret position is rendered as a
         // 1px bar between two spans. To keep things simple we
@@ -481,7 +482,7 @@ impl TextInput {
 
         // Build the three text spans, ordering caret + selection
         // inserts inline.
-        let sel_bg: Rgba = rgb(0x355487);
+        let sel_bg: Rgba = crate::theme::current().hex.field_selection.rgba();
         // Indices where we need to break: 0, sel_a, sel_b, cursor, end.
         let mut breaks = vec![0usize, self.text.len(), sel_a, sel_b, caret_idx];
         breaks.sort();

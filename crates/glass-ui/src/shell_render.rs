@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, Pixels,
+    div, list, prelude::*, px, App, Context, Pixels,
     SharedString,
 };
 
@@ -19,10 +19,10 @@ use crate::{
 };
 
 fn panel_active() -> gpui::Rgba {
-    rgb(0x2e2e34)
+    crate::theme::current().hovers.delete.rgba()
 }
 fn panel_inactive() -> gpui::Rgba {
-    rgb(0x1e1e22)
+    crate::theme::current().shell.bg.rgba()
 }
 
 impl Shell {
@@ -56,7 +56,7 @@ impl Shell {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(div().text_xs().text_color(rgb(0x66c2ff)).child("✎"))
+                .child(div().text_xs().text_color(crate::theme::current().refs.edit_indicator.rgba()).child("✎"))
                 .child(
                     div()
                         .flex_1()
@@ -87,7 +87,7 @@ impl Shell {
                 .flex_shrink_0()
                 .px_3()
                 .py_2()
-                .bg(rgb(0x2a313cff & 0x00ff_ffff | 0xff_00_00_00))
+                .bg(crate::theme::current().cfg.block_normal.rgba())
                 .border_b_1()
                 .border_color(border)
                 .flex()
@@ -102,7 +102,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x66c2ff))
+                                .text_color(crate::theme::current().refs.edit_indicator.rgba())
                                 .child("⇉"),
                         )
                         .child(
@@ -181,7 +181,7 @@ impl Shell {
                 return div().into_any();
             };
             let is_sel = index == selected;
-            let bg = if is_sel { accent } else { rgb(0x00000000) };
+            let bg = if is_sel { accent } else { gpui::rgba(0x00000000) };
             let weak = weak.clone();
             div()
                 .id(("palette-row", index))
@@ -208,14 +208,14 @@ impl Shell {
                 .child(
                     div()
                         .w(px(20.))
-                        .text_color(if is_sel { rgb(0xffffff) } else { dim })
+                        .text_color(if is_sel { crate::theme::current().hex.selection_text.rgba() } else { dim })
                         .child(SharedString::from(entry.kind_glyph)),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .text_color(if is_sel { rgb(0xffffff) } else { fg })
+                        .text_color(if is_sel { crate::theme::current().hex.selection_text.rgba() } else { fg })
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
@@ -225,7 +225,7 @@ impl Shell {
                     div()
                         .max_w(px(280.))
                         .text_xs()
-                        .text_color(if is_sel { rgb(0xddddee) } else { dim })
+                        .text_color(if is_sel { crate::theme::current().shell.text_bright.rgba() } else { dim })
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
@@ -243,7 +243,7 @@ impl Shell {
         div()
             .absolute()
             .inset_0()
-            .bg(gpui::rgba(0x000000bb))
+            .bg(crate::theme::current().modals.overlay_light.rgba())
             .occlude()
             .flex()
             .items_start()
@@ -429,7 +429,7 @@ impl Shell {
             row = row.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0xff6060))
+                    .text_color(crate::theme::current().errors.icon.rgba())
                     .child(SharedString::from(err.clone())),
             );
         }
@@ -511,7 +511,7 @@ impl Shell {
         let rows = self.palette_asm_candidates.iter().enumerate().map(
             |(i, cand)| {
                 let is_sel = i == selected;
-                let bg = if is_sel { accent } else { rgb(0x00000000) };
+                let bg = if is_sel { accent } else { gpui::rgba(0x00000000) };
                 let text_col = if is_sel { fg } else { dim };
                 div()
                     .h(px(20.))
@@ -584,7 +584,7 @@ impl Shell {
                             return div().into_any();
                         };
                         let is_sel = index == selected;
-                        let bg = if is_sel { accent } else { rgb(0x00000000) };
+                        let bg = if is_sel { accent } else { gpui::rgba(0x00000000) };
                         let weak = weak.clone();
                         let section = SharedString::from(m.section.clone());
                         let address = SharedString::from(m.address.clone());
@@ -607,21 +607,21 @@ impl Shell {
                                 div()
                                     .w(px(140.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(0xa0a0a8))
+                                    .text_color(crate::theme::current().refs.xref_addr.rgba())
                                     .child(section),
                             )
                             .child(
                                 div()
                                     .w(px(160.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(0xb0c8ff))
+                                    .text_color(crate::theme::current().refs.dex_ref.rgba())
                                     .child(address),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
-                                    .text_color(rgb(0xd6d6d6))
+                                    .text_color(crate::theme::current().shell.text.rgba())
                                     .child(preview),
                             )
                             .on_mouse_down(
@@ -1123,10 +1123,10 @@ impl Shell {
                 .justify_center()
                 .border_l_1()
                 .border_color(border)
-                .bg(if overflow_open { rgb(0x36363c) } else { panel })
+                .bg(if overflow_open { crate::theme::current().hovers.standard.rgba() } else { panel })
                 .text_color(fg)
                 .text_xs()
-                .hover(|s| s.bg(rgb(0x36363c)))
+                .hover(|s| s.bg(crate::theme::current().hovers.standard.rgba()))
                 .child(format!("▾ {}", hidden_count))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -1167,8 +1167,8 @@ impl Shell {
         const TAB_WIDTH: f32 = 160.;
         let label = self.tab_display_label(bundle, index);
         let tab_bg = if is_active { accent } else { panel };
-        let tab_fg = if is_active { rgb(0xffffff) } else { fg };
-        let close_fg = if is_active { rgb(0xffffff) } else { dim };
+        let tab_fg = if is_active { crate::theme::current().shell.text_bright.rgba() } else { fg };
+        let close_fg = if is_active { crate::theme::current().shell.text_bright.rgba() } else { dim };
         let focus_handle = handle.clone();
         let close_handle = handle.clone();
 
@@ -1211,7 +1211,7 @@ impl Shell {
                     .justify_center()
                     .rounded_sm()
                     .text_color(close_fg)
-                    .hover(|s| s.bg(rgb(0x55555c)))
+                    .hover(|s| s.bg(crate::theme::current().hovers.tab.rgba()))
                     .child("×")
                     .on_mouse_down(
                         gpui::MouseButton::Left,
@@ -1273,7 +1273,7 @@ impl Shell {
                     .border_color(border)
                     .text_xs()
                     .text_color(fg)
-                    .hover(|s| s.bg(rgb(0x36363c)))
+                    .hover(|s| s.bg(crate::theme::current().hovers.standard.rgba()))
                     .child(
                         div()
                             .flex_1()
@@ -1303,7 +1303,7 @@ impl Shell {
                             .justify_center()
                             .rounded_sm()
                             .text_color(dim)
-                            .hover(|s| s.bg(rgb(0x55555c)))
+                            .hover(|s| s.bg(crate::theme::current().hovers.tab.rgba()))
                             .child("×")
                             .on_mouse_down(
                                 gpui::MouseButton::Left,

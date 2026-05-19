@@ -203,7 +203,7 @@ pub(crate) fn h_shift_inner(
         .overflow_hidden()
         .relative();
     if is_selected {
-        outer = outer.bg(rgb(COLOUR_ROW_SELECTED));
+        outer = outer.bg(rgb(COLOUR_ROW_SELECTED()));
     } else if let Some(rgba) = tint_rgba {
         // Dim alpha to ~24% so the tint reads as a row highlight
         // rather than overwhelming the syntax-coloured text. The
@@ -376,7 +376,7 @@ pub fn render_hex_row(
                 .child(div().w(px(LISTING_GUTTER_WIDTH)).h_full().flex_shrink_0())
                 .child(
                     div()
-                        .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                        .text_color(rgb(COLOUR_SYMBOL_HEADER()))
                         .child(format!("{name}:")),
                 ),
             h_offset,
@@ -487,7 +487,7 @@ pub fn render_hex_row(
                                 ));
                             if let Some(err) = edit.error.as_ref() {
                                 let _ = err;
-                                field = field.text_color(rgb(0xff7070));
+                                field = field.text_color(crate::theme::current().hex.error_text.rgba());
                             }
                             return field;
                         }
@@ -496,7 +496,7 @@ pub fn render_hex_row(
                         .id(("hex-cell", row_index * 16 + i))
                         .w(w)
                         .whitespace_nowrap()
-                        .text_color(rgb(COLOUR_BYTES))
+                        .text_color(rgb(COLOUR_BYTES()))
                         .child(text);
                     if staged_here {
                         // Green tint on cells whose underlying byte
@@ -504,7 +504,7 @@ pub fn render_hex_row(
                         c = c.bg(gpui::rgba(0x1c4a3c80));
                     }
                     if is_selected_byte {
-                        c = c.bg(rgb(COLOUR_BYTE_SELECTED)).text_color(rgb(0xffffff));
+                        c = c.bg(rgb(COLOUR_BYTE_SELECTED)).text_color(crate::theme::current().hex.selection_text.rgba());
                     } else if in_item {
                         // ~14% white wash so the item span reads as
                         // a subtle highlight rather than dominant.
@@ -574,7 +574,7 @@ pub fn render_hex_row(
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .pr_4()
-                        .text_color(rgb(COLOUR_ADDR))
+                        .text_color(rgb(COLOUR_ADDR()))
                         .child(format!("{address:016x}")),
                 )
                 .child(hex_cells)
@@ -648,24 +648,24 @@ pub fn render_listing_row_with(
                         .child(
                             div()
                                 .italic()
-                                .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                                .text_color(rgb(COLOUR_SYMBOL_HEADER()))
                                 .child(format!("{new_name}:")),
                         )
                         .child(
                             div()
-                                .text_color(rgb(COLOUR_COMMENT))
+                                .text_color(rgb(COLOUR_COMMENT()))
                                 .child(format!("({name})")),
                         )
                 } else {
                     div()
-                        .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                        .text_color(rgb(COLOUR_SYMBOL_HEADER()))
                         .child(format!("{name}:"))
                 });
             if let Some(comment) = merged_comment {
                 inner = inner.child(
                     div()
                         .ml_4()
-                        .text_color(rgb(COLOUR_COMMENT))
+                        .text_color(rgb(COLOUR_COMMENT()))
                         .child(SharedString::from(format!("; {comment}"))),
                 );
             }
@@ -706,7 +706,7 @@ pub fn render_listing_row_with(
                     div()
                         .flex_1()
                         .h(px(1.))
-                        .bg(rgb(COLOUR_BB_SEPARATOR)),
+                        .bg(rgb(COLOUR_BB_SEPARATOR())),
                 ),
             h_offset,
             BB_SEPARATOR_HEIGHT,
@@ -759,7 +759,7 @@ pub fn render_listing_row_with(
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .pr_4()
-                            .text_color(rgb(COLOUR_ADDR))
+                            .text_color(rgb(COLOUR_ADDR()))
                             .child(format!("{address:016x}")),
                     )
                     .child(
@@ -768,7 +768,7 @@ pub fn render_listing_row_with(
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .pr_4()
-                            .text_color(rgb(COLOUR_BYTES))
+                            .text_color(rgb(COLOUR_BYTES()))
                             .child(format!(
                                 "{:02x} {:02x} {:02x} {:02x}",
                                 live_bytes[0], live_bytes[1], live_bytes[2], live_bytes[3]
@@ -843,7 +843,7 @@ pub fn render_listing_row_with(
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .pr_4()
-                            .text_color(rgb(COLOUR_ADDR))
+                            .text_color(rgb(COLOUR_ADDR()))
                             .child(format!("{address:016x}")),
                     )
                     .child(
@@ -852,7 +852,7 @@ pub fn render_listing_row_with(
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .pr_4()
-                            .text_color(rgb(COLOUR_BYTES))
+                            .text_color(rgb(COLOUR_BYTES()))
                             .child(format!(
                                 "{:02x} {:02x} {:02x} {:02x}",
                                 edit.new_bytes[0],
@@ -865,7 +865,7 @@ pub fn render_listing_row_with(
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .text_color(rgb(0xc8e8d4))
+                            .text_color(crate::theme::current().state.committed_change.rgba())
                             .child(SharedString::from(edit.display.clone())),
                     )
                     .child(
@@ -899,7 +899,7 @@ pub fn render_listing_row_with(
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .pr_4()
-                        .text_color(rgb(COLOUR_ADDR))
+                        .text_color(rgb(COLOUR_ADDR()))
                         .child(format!("{address:016x}")),
                 )
                 .child(
@@ -908,7 +908,7 @@ pub fn render_listing_row_with(
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .pr_4()
-                        .text_color(rgb(COLOUR_BYTES))
+                        .text_color(rgb(COLOUR_BYTES()))
                         .child(format!(
                             "{:02x} {:02x} {:02x} {:02x}",
                             bytes[0], bytes[1], bytes[2], bytes[3]
@@ -919,7 +919,7 @@ pub fn render_listing_row_with(
                         .w(px(LISTING_MNEMONIC_WIDTH))
                         .flex_shrink_0()
                         .whitespace_nowrap()
-                        .text_color(rgb(COLOUR_MNEMONIC))
+                        .text_color(rgb(COLOUR_MNEMONIC()))
                         .child(mnemonic.clone()),
                 );
             let mut ops_row = div().flex().flex_row().flex_shrink_0();
@@ -1047,7 +1047,7 @@ pub fn render_listing_row_with(
                 row_div = row_div.child(
                     div()
                         .ml_4()
-                        .text_color(rgb(COLOUR_COMMENT))
+                        .text_color(rgb(COLOUR_COMMENT()))
                         .child(c),
                 );
             }

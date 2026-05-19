@@ -5,7 +5,7 @@
 //! third-party attributions. Click outside or press Escape to
 //! dismiss.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, App, Context, SharedString};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString};
 
 use crate::Shell;
 
@@ -109,7 +109,7 @@ pub fn render_about(
                 .child(
                     div()
                         .w(px(160.))
-                        .text_color(rgb(0x808088))
+                        .text_color(crate::theme::current().shell.text_dim.rgba())
                         .child(SharedString::from(*licence)),
                 )
                 .child(div().child(SharedString::from(*blurb))),
@@ -146,7 +146,7 @@ pub fn render_about(
     div()
         .absolute()
         .inset_0()
-        .bg(gpui::rgba(0x000000bb))
+        .bg(crate::theme::current().modals.overlay_light.rgba())
         .occlude()
         .flex()
         .items_start()

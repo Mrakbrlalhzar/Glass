@@ -1,0 +1,51 @@
+{
+  "name": "Sepia",
+  "description": "Warm low-contrast palette — easier on the eyes for long sessions.",
+  "shell": {
+    "bg":          "#2a221a",
+    "panel":       "#332a20",
+    "panel_alt":   "#3a3024",
+    "border":      "#4a3e30",
+    "border_alt":  "#3d3327",
+    "text":        "#e6d8c2",
+    "text_bright": "#fff2dc",
+    "text_dim":    "#a89882",
+    "accent":      "#c98a3e"
+  },
+  "disasm": {
+    "address":        "#a89682",
+    "bytes":          "#8a7a64",
+    "mnemonic":       "#e8b56a",
+    "register":       "#f0c894",
+    "immediate":      "#d97a3a",
+    "address_op":     "#e6c478",
+    "shift":          "#bca890",
+    "condition":      "#d49ae0",
+    "punct":          "#9a8a74",
+    "comment":        "#a8c590",
+    "symbol_header":  "#ffe8a8",
+    "bb_separator":   "#4a3e30",
+    "plain":          "#e6d8c2"
+  },
+  "smali": {
+    "directive":     "#e89060",
+    "modifier":      "#d4a0d8",
+    "label":         "#f4a8c8",
+    "string":        "#c8d488",
+    "type_":         "#e6c478",
+    "type_external": "#9a8060"
+  },
+  "state": {
+    "row_selected":     "#4a3e2c",
+    "committed_change": "#d8e6c0",
+    "committed_bg":     "#3a4a30",
+    "committed_hover":  "#506640"
+  },
+  "window_tints": [
+    "#2a221a",
+    "#2a2a1a",
+    "#2a221e",
+    "#2a1a22",
+    "#1a221a"
+  ]
+}

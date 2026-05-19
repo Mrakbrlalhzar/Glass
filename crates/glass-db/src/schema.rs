@@ -42,6 +42,12 @@ pub struct BundleRecord {
     /// `#[serde(default)]` so old v2 records keep loading.
     #[serde(default)]
     pub annotations_pane_open: bool,
+    /// Per-bundle window-tint slot (0..=4), indexing into the active
+    /// theme's `window_tints` array. Lets each window be visually
+    /// distinct at a glance. Default 0 → first tint. `#[serde(default)]`
+    /// so old records load.
+    #[serde(default)]
+    pub window_tint: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -98,6 +98,12 @@ impl Shell {
             changes_dialog_confirm_abandon: false,
             export_status: None,
             export_in_progress: false,
+            theme: {
+                let settings = glass_db::load_window_settings();
+                let set = crate::theme::ThemeSet::load();
+                Arc::new(set.resolve(settings.theme.as_deref()).clone())
+            },
+            window_tint: 0,
         }
     }
 
@@ -213,6 +219,31 @@ impl Shell {
         }
     }
 
+    /// Set the per-bundle window-tint slot (0..=4). Persists on
+    /// next flush and triggers a re-render.
+    pub(crate) fn set_window_tint(&mut self, slot: u8, cx: &mut Context<Self>) {
+        let slot = slot.min(4);
+        if self.window_tint == slot {
+            return;
+        }
+        self.window_tint = slot;
+        self.save_state();
+        cx.notify();
+    }
+
+    /// Switch the active theme by name. Persists to
+    /// `WindowSettings.theme` and replaces `self.theme` so the next
+    /// render uses it.
+    pub(crate) fn set_theme(&mut self, name: &str, cx: &mut Context<Self>) {
+        let set = crate::theme::ThemeSet::load();
+        let chosen = set.resolve(Some(name)).clone();
+        self.theme = Arc::new(chosen);
+        let mut settings = glass_db::load_window_settings();
+        settings.theme = Some(name.to_string());
+        let _ = glass_db::save_window_settings(&settings);
+        cx.notify();
+    }
+
     /// Save the current bundle's UI state to the staged-write set.
     /// The flush timer turns it into a real DB write within 500ms.
     pub(crate) fn save_state(&self) {
@@ -316,6 +347,7 @@ impl Shell {
                 .as_ref()
                 .and_then(|p| p.to_str().map(|s| s.to_string())),
             annotations_pane_open: self.annotations_pane_open,
+            window_tint: self.window_tint,
         };
         db.save_bundle(bundle_id, rec);
     }
@@ -334,6 +366,7 @@ impl Shell {
             }
         };
         self.annotations_pane_open = rec.annotations_pane_open;
+        self.window_tint = rec.window_tint.min(4);
         // Tabs.
         for state in &rec.open_tabs {
             // CFG tabs are persisted with their camera state; restore

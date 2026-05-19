@@ -6,7 +6,7 @@
 //! invoke other Shell methods (`show_cfg`, `show_dex_callgraph`) and
 //! consult bundle / symbol data.
 
-use gpui::{div, prelude::*, px, rgb, App, Context, Pixels, SharedString};
+use gpui::{div, prelude::*, px, App, Context, Pixels, SharedString};
 
 use crate::Shell;
 
@@ -245,7 +245,7 @@ pub fn render_context_menu(
                 .child(
                     div()
                         .flex_1()
-                        .text_color(rgb(0x808088))
+                        .text_color(crate::theme::current().shell.text_dim.rgba())
                         .child(hint),
                 ),
         );

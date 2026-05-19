@@ -15,7 +15,7 @@
 //! `hex_edit_handle_key` path so the popover doesn't need its
 //! own key listener.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, App, Context, SharedString};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString};
 
 use crate::{HexEditKind, HexEditState, Shell};
 
@@ -38,7 +38,7 @@ pub fn render(
         current_len > max_len || (current_len == max_len && no_nul_in_text);
     let budget_chip = div()
         .text_xs()
-        .text_color(if over_budget { rgb(0xff7070) } else { dim })
+        .text_color(if over_budget { crate::theme::current().hex.error_text.rgba() } else { dim })
         .child(SharedString::from(format!(
             "{} / {} bytes",
             current_len, max_len
@@ -87,7 +87,7 @@ pub fn render(
         "Enter saves, Esc cancels. Strings are NUL-padded to the original length.".to_string()
     };
     let footer_colour = if over_budget || state.error.is_some() {
-        rgb(0xff8080)
+        crate::theme::current().errors.highlight.rgba()
     } else {
         dim
     };
@@ -121,7 +121,7 @@ pub fn render(
     div()
         .absolute()
         .inset_0()
-        .bg(gpui::rgba(0x000000bb))
+        .bg(crate::theme::current().modals.overlay_light.rgba())
         .occlude()
         .flex()
         .items_start()

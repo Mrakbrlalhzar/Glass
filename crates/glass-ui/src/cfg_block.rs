@@ -66,10 +66,11 @@ pub fn cfg_block_bg(
         let dimmed = (rgba & 0xffffff00) | 0x20;
         return gpui::rgba(dimmed);
     }
+    let t = crate::theme::current();
     if block.exits_function {
-        gpui::rgba(0x3a2c2cff)
+        t.cfg.block_exit.rgba()
     } else {
-        gpui::rgba(0x2a313cff)
+        t.cfg.block_normal.rgba()
     }
 }
 
@@ -157,7 +158,7 @@ pub fn render_cfg_block_content(
     if let Some(name) = summary.symbol.as_ref() {
         body = body.child(
             div()
-                .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                .text_color(rgb(COLOUR_SYMBOL_HEADER()))
                 .child(SharedString::from(format!("{name}:"))),
         );
     }
@@ -178,12 +179,12 @@ pub fn render_cfg_block_content(
         }
         row = row.child(
             div()
-                .text_color(rgb(COLOUR_ADDR))
+                .text_color(rgb(COLOUR_ADDR()))
                 .child(SharedString::from(format!("{:016x}", insn.address))),
         );
         row = row.child(
             div()
-                .text_color(rgb(COLOUR_MNEMONIC))
+                .text_color(rgb(COLOUR_MNEMONIC()))
                 .child(SharedString::from(insn.mnemonic.clone())),
         );
         let call = summary.calls.get(&insn.address);
@@ -200,7 +201,7 @@ pub fn render_cfg_block_content(
                             "cfg-call",
                             c.block_idx * 1024 + insn_idx,
                         ))
-                        .text_color(rgb(COLOUR_ADDRESS_OP))
+                        .text_color(rgb(COLOUR_ADDRESS_OP()))
                         .cursor_pointer()
                         .hover(|s| s.bg(gpui::rgba(0xffffff20)))
                         .child(label)
@@ -224,7 +225,7 @@ pub fn render_cfg_block_content(
                         .into_any_element()
                 }
                 None => div()
-                    .text_color(rgb(COLOUR_ADDRESS_OP))
+                    .text_color(rgb(COLOUR_ADDRESS_OP()))
                     .child(label)
                     .into_any_element(),
             };
@@ -232,14 +233,14 @@ pub fn render_cfg_block_content(
         } else if !insn.operands.is_empty() {
             row = row.child(
                 div()
-                    .text_color(rgb(COLOUR_REGISTER))
+                    .text_color(rgb(COLOUR_REGISTER()))
                     .child(SharedString::from(insn.operands.clone())),
             );
         }
         if let Some(comment) = annotation.as_ref().and_then(|a| a.comment.as_deref()) {
             row = row.child(
                 div()
-                    .text_color(rgb(crate::palette::COLOUR_COMMENT))
+                    .text_color(rgb(crate::palette::COLOUR_COMMENT()))
                     .child(SharedString::from(format!("; {comment}"))),
             );
         }
@@ -275,13 +276,13 @@ pub fn render_cfg_block_content(
             ellipsis_row
                 .child(
                     div()
-                        .text_color(rgb(COLOUR_PUNCT))
+                        .text_color(rgb(COLOUR_PUNCT()))
                         .text_lg()
                         .child(SharedString::from("…")),
                 )
                 .child(
                     div()
-                        .text_color(rgb(COLOUR_BYTES))
+                        .text_color(rgb(COLOUR_BYTES()))
                         .child(SharedString::from(format!("{skipped} instructions"))),
                 ),
         );
@@ -294,7 +295,7 @@ pub fn render_cfg_block_content(
     if total == 0 {
         body = body.child(
             div()
-                .text_color(rgb(COLOUR_BYTES))
+                .text_color(rgb(COLOUR_BYTES()))
                 .child(SharedString::from("(empty)")),
         );
     }

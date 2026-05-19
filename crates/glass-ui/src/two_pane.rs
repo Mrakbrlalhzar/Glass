@@ -73,7 +73,7 @@ pub fn render_two_pane(
                         };
 
                         let row_bg = if is_selected { accent } else { panel };
-                        let row_fg = if is_selected { rgb(0xffffff) } else { fg };
+                        let row_fg = if is_selected { crate::theme::current().shell.text_bright.rgba() } else { fg };
 
                         div()
                             .h(px(22.))
@@ -174,7 +174,7 @@ pub fn render_two_pane(
                                         .pr_3()
                                         .text_base()
                                         .font_family("Courier New")
-                                        .text_color(rgb(COLOUR_PLAIN))
+                                        .text_color(rgb(COLOUR_PLAIN()))
                                         .whitespace_nowrap()
                                         .flex()
                                         .flex_row()
@@ -449,7 +449,7 @@ pub fn render_two_pane(
                                             .overflow_hidden()
                                             .relative();
                                         if is_selected {
-                                            row = row.bg(rgb(COLOUR_ROW_SELECTED));
+                                            row = row.bg(rgb(COLOUR_ROW_SELECTED()));
                                         } else if let Some(rgba) =
                                             annotation.as_ref().and_then(|a| a.colour)
                                         {
@@ -471,7 +471,7 @@ pub fn render_two_pane(
                                             .px_3()
                                             .text_base()
                                             .font_family("Courier New")
-                                            .text_color(rgb(COLOUR_PLAIN))
+                                            .text_color(rgb(COLOUR_PLAIN()))
                                             .whitespace_nowrap()
                                             .flex()
                                             .flex_row()
@@ -495,9 +495,9 @@ pub fn render_two_pane(
                                                     .copied();
                                                 let base_div = div()
                                                     .text_color(rgb(if location.is_some() {
-                                                        COLOUR_PLAIN
+                                                        COLOUR_PLAIN()
                                                     } else {
-                                                        COLOUR_PLAIN
+                                                        COLOUR_PLAIN()
                                                     }))
                                                     .whitespace_nowrap()
                                                     .child(SharedString::from(
@@ -562,9 +562,9 @@ pub fn render_two_pane(
                                                         )
                                                         .is_some();
                                                     let colour = if resolves {
-                                                        COLOUR_TYPE
+                                                        COLOUR_TYPE()
                                                     } else {
-                                                        COLOUR_TYPE_EXTERNAL
+                                                        COLOUR_TYPE_EXTERNAL()
                                                     };
                                                     if resolves {
                                                         let jni = jni.to_string();
@@ -659,7 +659,7 @@ pub fn render_two_pane(
                                             inner = inner.child(
                                                 div()
                                                     .ml_4()
-                                                    .text_color(rgb(crate::palette::COLOUR_COMMENT))
+                                                    .text_color(rgb(crate::palette::COLOUR_COMMENT()))
                                                     .whitespace_nowrap()
                                                     .child(SharedString::from(
                                                         format!("; {comment}"),

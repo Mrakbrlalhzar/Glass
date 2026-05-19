@@ -50,6 +50,7 @@ mod section_map;
 mod shell_actions;
 mod shell_render;
 mod smali;
+mod theme;
 mod two_pane;
 mod xref;
 
@@ -105,6 +106,19 @@ actions!(
         OpenRecent7,
         OpenRecent8,
         OpenRecent9,
+        // Up to 8 theme slots — same trick as OpenRecent: separate
+        // zero-sized actions because gpui's payload actions need
+        // additional setup. Theme list is read from `ThemeSet::load()`
+        // at menu-build time; selecting one switches the active theme
+        // for every Shell window.
+        Theme0,
+        Theme1,
+        Theme2,
+        Theme3,
+        Theme4,
+        Theme5,
+        Theme6,
+        Theme7,
     ]
 );
 
@@ -376,12 +390,17 @@ impl Render for TextTooltip {
         div()
             .px_2()
             .py_1()
-            .bg(rgb(0x18181c))
+            .bg({
+                // Tooltip uses a darker variant of the panel background.
+                let t = theme::current();
+                let p = t.shell.bg.rgba();
+                gpui::Rgba { r: p.r * 0.8, g: p.g * 0.8, b: p.b * 0.8, a: 1.0 }
+            })
             .border_1()
-            .border_color(rgb(0x36363c))
+            .border_color(theme::current().shell.border.rgba())
             .rounded_sm()
             .text_xs()
-            .text_color(rgb(0xf2f2f2))
+            .text_color(theme::current().shell.text_bright.rgba())
             .font_family("Menlo")
             .child(self.text.clone())
     }
@@ -1006,6 +1025,13 @@ pub(crate) struct Shell {
     /// to the bundle record; default false. Auto-opens on write or
     /// when the user clicks an edge-icon (Phase 4).
     pub(crate) annotations_pane_open: bool,
+    /// Active theme for this window. Cloned from the global `ThemeSet`
+    /// when the window opens. Re-cloning happens when the user picks a
+    /// different theme in settings.
+    pub(crate) theme: Arc<theme::Theme>,
+    /// Per-bundle window-tint slot (0..=4) — indexes `theme.window_tints`.
+    /// Persisted on `BundleRecord`; default 0 (no tint).
+    pub(crate) window_tint: u8,
     /// Horizontal scroll offset inside the annotations pane. Same
     /// pattern as the listing's `h_offset` — the row's content area
     /// shifts by -h_offset and a scrollbar at the bottom of the
@@ -1163,12 +1189,18 @@ pub(crate) struct ColourPickerState {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = rgb(0x1e1e22);
-        let panel = rgb(0x26262c);
-        let border = rgb(0x36363c);
-        let fg = rgb(0xd6d6d6);
-        let dim = rgb(0x808088);
-        let accent = rgb(0x4f7cff);
+        // Publish the active theme so leaf renderers can reach it without
+        // every render fn taking a `&Theme` parameter.
+        theme::set_active(&self.theme);
+        // Theme-derived shell colours. `bg` includes the per-bundle
+        // window tint so each window stands out from the others.
+        let bg = self.theme.window_bg(self.window_tint);
+        let panel = self.theme.shell.panel.rgba();
+        let border = self.theme.shell.border.rgba();
+        let fg = self.theme.shell.text.rgba();
+        let dim = self.theme.shell.text_dim.rgba();
+        let accent = self.theme.shell.accent.rgba();
+        let hover_bg = self.theme.hovers.standard.rgba();
 
         let header_text: String = match &self.state {
             ShellState::Ready(b) => b.title.clone(),
@@ -1216,7 +1248,7 @@ impl Render for Shell {
                     .text_color(fg)
                     .border_1()
                     .border_color(border)
-                    .hover(|s| s.bg(rgb(0x36363c)))
+                    .hover(|s| s.bg(hover_bg))
                     .cursor_pointer()
                     .child("Search")
                     .child(
@@ -1259,7 +1291,7 @@ impl Render for Shell {
                             .w(px(6.))
                             .h(px(6.))
                             .rounded_full()
-                            .bg(if pane_open { rgb(0x4f7cff) } else { rgb(0x36363c) }),
+                            .bg(if pane_open { accent } else { hover_bg }),
                     )
                     .on_mouse_down(
                         gpui::MouseButton::Left,
@@ -1293,9 +1325,9 @@ impl Render for Shell {
                     .text_sm()
                     .text_color(fg)
                     .border_1()
-                    .border_color(rgb(0xc8e8d4))
-                    .bg(rgb(0x1c4a3c))
-                    .hover(|s| s.bg(rgb(0x276652)))
+                    .border_color(self.theme.state.committed_change.rgba())
+                    .bg(self.theme.state.committed_bg.rgba())
+                    .hover(|s| s.bg(self.theme.state.committed_hover.rgba()))
                     .cursor_pointer()
                     .child(SharedString::from(format!("{edit_count} change{}", if edit_count == 1 { "" } else { "s" })))
                     .child(
@@ -1315,6 +1347,48 @@ impl Render for Shell {
             header
         };
 
+        // Window-tint swatches. Five small dots; clicking sets
+        // `self.window_tint`, which selects which entry of the
+        // active theme's `window_tints` array tints the window
+        // background. Slot 0 is the neutral baseline. Persisted on
+        // the BundleRecord, so each window remembers its tint.
+        let current_slot = self.window_tint;
+        let theme_for_swatch = self.theme.clone();
+        let header = {
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2();
+            for slot in 0u8..5 {
+                // The on-window tints are near-black and unreadable at
+                // 14px. Use a punched-up preview instead so the user
+                // can tell the slots apart in the picker.
+                let tint = theme_for_swatch.swatch_preview(slot);
+                let is_sel = slot == current_slot;
+                let border_color = if is_sel { accent } else { border };
+                row = row.child(
+                    div()
+                        .id(("window-tint-swatch", slot as usize))
+                        .w(px(14.))
+                        .h(px(14.))
+                        .rounded_full()
+                        .bg(tint)
+                        .border_1()
+                        .border_color(border_color)
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _ev, _w, cx| {
+                                this.set_window_tint(slot, cx);
+                            }),
+                        ),
+                );
+            }
+            header.child(row)
+        };
+
         let body = match &self.state {
             ShellState::Ready(bundle) => {
                 let bundle = bundle.clone();
@@ -1329,7 +1403,7 @@ impl Render for Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0xff8080))
+                .text_color(self.theme.errors.highlight.rgba())
                 .child(format!("Load failed: {msg}"))
                 .into_any_element(),
             ShellState::Empty => div()
@@ -1695,7 +1769,7 @@ fn render_export_progress(
                 .w(gpui::px(TRACK_WIDTH))
                 .h(gpui::px(6.))
                 .rounded_sm()
-                .bg(gpui::rgb(0x2a2a30))
+                .bg(theme::current().shell.panel_alt.rgba())
                 .child(
                     gpui::div()
                         .absolute()
@@ -1704,7 +1778,7 @@ fn render_export_progress(
                         .w(gpui::px(CHUNK_WIDTH))
                         .h(gpui::px(6.))
                         .rounded_sm()
-                        .bg(gpui::rgb(0x4f7cff)),
+                        .bg(theme::current().shell.accent.rgba()),
                 ),
         )
         .on_mouse_down(
@@ -1716,7 +1790,7 @@ fn render_export_progress(
     gpui::div()
         .absolute()
         .inset_0()
-        .bg(gpui::rgba(0x000000cc))
+        .bg(theme::current().modals.overlay_dark.rgba())
         .occlude()
         .flex()
         .items_center()
@@ -1775,15 +1849,16 @@ fn render_disasm_edit_suggestions(
     );
     for (i, sugg) in state.suggestions.iter().enumerate().take(12) {
         let is_sel = i == selected;
+        let t = theme::current();
         let bg = if is_sel {
-            gpui::rgba(0x355487ff)
+            t.modals.palette_selected.rgba()
         } else {
             gpui::rgba(0x00000000)
         };
         let label_color = if is_sel {
-            rgb(0xffffff)
+            t.shell.text_bright.rgba()
         } else {
-            rgb(0xd6d6d6)
+            t.shell.text.rgba()
         };
         list = list.child(
             gpui::div()
@@ -1795,7 +1870,7 @@ fn render_disasm_edit_suggestions(
                 .flex_row()
                 .gap_3()
                 .cursor_pointer()
-                .hover(|s| s.bg(gpui::rgba(0x355487aa)))
+                .hover(|s| s.bg(theme::current().modals.palette_hover.rgba()))
                 .child(
                     gpui::div()
                         .flex_1()
@@ -1807,7 +1882,7 @@ fn render_disasm_edit_suggestions(
                 .child(
                     gpui::div()
                         .text_xs()
-                        .text_color(rgb(0x8a8a92))
+                        .text_color(theme::current().disasm.address.rgba())
                         .child(sugg.detail.clone()),
                 )
                 .on_mouse_down(

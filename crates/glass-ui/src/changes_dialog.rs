@@ -11,7 +11,7 @@
 //! confirmation step so a slip doesn't blow away the user's
 //! edits).
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, App, Context, SharedString};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString};
 
 use crate::Shell;
 
@@ -137,7 +137,7 @@ pub fn render_changes_dialog(
     div()
         .absolute()
         .inset_0()
-        .bg(gpui::rgba(0x000000bb))
+        .bg(crate::theme::current().modals.overlay_light.rgba())
         .occlude()
         .flex()
         .items_start()
@@ -232,7 +232,7 @@ fn render_row(
             div()
                 .w(px(140.))
                 .flex_shrink_0()
-                .text_color(rgb(0xb0c8ff))
+                .text_color(crate::theme::current().refs.dex_ref.rgba())
                 .child(format!("0x{:x}", row.vaddr)),
         )
         .child(
@@ -261,7 +261,7 @@ fn render_row(
                 .w(px(120.))
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(rgb(0x8a8a92))
+                .text_color(crate::theme::current().disasm.address.rgba())
                 .child(SharedString::from(bytes_text)),
         )
         .child(
@@ -269,7 +269,7 @@ fn render_row(
                 .id(("changes-revert", index))
                 .px_2()
                 .text_xs()
-                .text_color(rgb(0xff9090))
+                .text_color(crate::theme::current().errors.severe.rgba())
                 .cursor_pointer()
                 .hover(|s| s.underline())
                 .child(SharedString::from("Revert"))
@@ -339,13 +339,13 @@ fn build_footer(
         .px_3()
         .py_1p5()
         .border_1()
-        .border_color(if confirm_abandon { rgb(0xff9090) } else { border })
+        .border_color(if confirm_abandon { crate::theme::current().errors.severe.rgba() } else { border })
         .rounded_sm()
         .text_sm()
         .text_color(if abandon_disabled {
             dim
         } else if confirm_abandon {
-            rgb(0xff9090)
+            crate::theme::current().errors.severe.rgba()
         } else {
             fg
         })

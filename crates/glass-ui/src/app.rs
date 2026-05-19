@@ -21,6 +21,7 @@ use crate::{
     About, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
     OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7, OpenRecent8, OpenRecent9,
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
+    Theme0, Theme1, Theme2, Theme3, Theme4, Theme5, Theme6, Theme7,
     HexCursorLeft,
     HexCursorRight,
     ListingPageDown,
@@ -122,6 +123,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         });
 
         register_open_recent_actions(db.clone(), cx);
+        register_theme_actions(cx, db.clone());
         set_app_menus(cx, db.as_ref());
 
         open_glass_window(path.clone(), db.clone(), cx);
@@ -149,6 +151,61 @@ fn register_open_recent_actions(db: Option<glass_db::Database>, cx: &mut App) {
     wire!(OpenRecent7, 7);
     wire!(OpenRecent8, 8);
     wire!(OpenRecent9, 9);
+}
+
+fn register_theme_actions(cx: &mut App, db: Option<glass_db::Database>) {
+    macro_rules! wire {
+        ($action:ty, $idx:expr) => {{
+            let db = db.clone();
+            cx.on_action(move |_: &$action, cx: &mut App| {
+                apply_nth_theme($idx, cx);
+                // Rebuild menus so the "● " marker moves to the
+                // newly active item.
+                set_app_menus(cx, db.as_ref());
+            });
+        }};
+    }
+    wire!(Theme0, 0);
+    wire!(Theme1, 1);
+    wire!(Theme2, 2);
+    wire!(Theme3, 3);
+    wire!(Theme4, 4);
+    wire!(Theme5, 5);
+    wire!(Theme6, 6);
+    wire!(Theme7, 7);
+}
+
+/// Apply theme #`idx` from the current `ThemeSet` to every Shell
+/// window, persisting the choice to `WindowSettings.theme` so the
+/// next launch starts on it. No-ops if the index is out of range.
+fn apply_nth_theme(idx: usize, cx: &mut App) {
+    let set = crate::theme::ThemeSet::load();
+    let Some(theme) = set.all().get(idx).cloned() else { return };
+    let name = theme.name.clone();
+    // Persist first so even if no Shell window exists, the next launch
+    // picks up the new choice.
+    let mut settings = glass_db::load_window_settings();
+    settings.theme = Some(name.clone());
+    let _ = glass_db::save_window_settings(&settings);
+    // Push the new theme into every live window. Deferred via
+    // cx.spawn for the same reason `About` is — we may be inside a
+    // menu callback and reading the active window directly would
+    // hit gpui's "window is on the stack" assertion.
+    cx.spawn(async move |cx| {
+        cx.update(|cx| {
+            for wh in cx.windows() {
+                if let Some(typed) = wh.downcast::<Shell>() {
+                    let name = name.clone();
+                    let _ = cx.update_window(typed.into(), |root, _w, cx| {
+                        if let Ok(entity) = root.downcast::<Shell>() {
+                            entity.update(cx, |shell, cx| shell.set_theme(&name, cx));
+                        }
+                    });
+                }
+            }
+        });
+    })
+    .detach();
 }
 
 fn open_nth_recent(db: Option<glass_db::Database>, idx: usize, cx: &mut App) {
@@ -207,6 +264,45 @@ fn open_path_now(path: PathBuf, db: Option<glass_db::Database>, cx: &mut App) {
     }
 }
 
+/// Up to this many themes appear in the View → Theme submenu. The
+/// `actions!` list above has a matching set of Theme0..ThemeN slots.
+const THEME_SLOTS: usize = 8;
+
+fn build_theme_items() -> Vec<gpui::MenuItem> {
+    let set = crate::theme::ThemeSet::load();
+    let themes = set.all();
+    let active = glass_db::load_window_settings().theme;
+    if themes.is_empty() {
+        return vec![gpui::MenuItem::action("No themes installed", Theme0).disabled(true)];
+    }
+    themes
+        .iter()
+        .take(THEME_SLOTS)
+        .enumerate()
+        .map(|(i, t)| {
+            // Mark the active theme with a leading bullet. macOS
+            // doesn't expose a native "checked" item via the menu
+            // API we use, so a glyph prefix is the simplest signal.
+            let is_active = active.as_deref() == Some(&t.name);
+            let label = if is_active {
+                format!("● {}", t.name)
+            } else {
+                format!("   {}", t.name)
+            };
+            match i {
+                0 => gpui::MenuItem::action(label, Theme0),
+                1 => gpui::MenuItem::action(label, Theme1),
+                2 => gpui::MenuItem::action(label, Theme2),
+                3 => gpui::MenuItem::action(label, Theme3),
+                4 => gpui::MenuItem::action(label, Theme4),
+                5 => gpui::MenuItem::action(label, Theme5),
+                6 => gpui::MenuItem::action(label, Theme6),
+                _ => gpui::MenuItem::action(label, Theme7),
+            }
+        })
+        .collect()
+}
+
 fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
     let recents: Vec<glass_db::BundleRecord> = db
         .map(|d| d.recent_bundles(RECENT_SLOTS))
@@ -258,6 +354,10 @@ fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
         }),
         gpui::Menu::new("View").items([
             gpui::MenuItem::action("Search…", TogglePalette),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::submenu(
+                gpui::Menu::new("Theme").items(build_theme_items()),
+            ),
         ]),
         gpui::Menu::new("Window").items([]),
     ]);
@@ -335,14 +435,14 @@ fn open_glass_window(
             shell.update(cx, |_shell, cx: &mut Context<Shell>| {
                 cx.observe_window_bounds(window, |_shell, window: &mut Window, _cx| {
                     let b = window.bounds();
-                    let _ = glass_db::save_window_settings(&glass_db::WindowSettings {
-                        bounds: Some(glass_db::StoredBounds {
-                            x: b.origin.x.as_f32(),
-                            y: b.origin.y.as_f32(),
-                            width: b.size.width.as_f32(),
-                            height: b.size.height.as_f32(),
-                        }),
+                    let mut settings = glass_db::load_window_settings();
+                    settings.bounds = Some(glass_db::StoredBounds {
+                        x: b.origin.x.as_f32(),
+                        y: b.origin.y.as_f32(),
+                        width: b.size.width.as_f32(),
+                        height: b.size.height.as_f32(),
                     });
+                    let _ = glass_db::save_window_settings(&settings);
                 })
                 .detach();
             });

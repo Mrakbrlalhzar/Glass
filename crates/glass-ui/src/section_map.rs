@@ -116,7 +116,7 @@ pub fn render_section_map(
                 .top_0()
                 .h_full()
                 .w(px(2.))
-                .bg(rgb(0xffffff))
+                .bg(crate::theme::current().hex.selection_text.rgba())
                 .left(gpui::relative(cursor_left_frac)),
         )
     } else {
@@ -318,7 +318,7 @@ pub fn render_section_map(
         move |index, _window, _cx| {
             let sec = sections[index].clone();
             let is_hot = hovered == Some(index);
-            let bg = if is_hot { rgb(0x36363c) } else { rgb(0x00000000) };
+            let bg = if is_hot { crate::theme::current().hovers.standard.rgba() } else { gpui::rgba(0x00000000).into() };
             let hover_handle = row_handle.clone();
             let click_handle = row_handle.clone();
             let click_artifact = row_artifact.clone();
@@ -336,7 +336,7 @@ pub fn render_section_map(
                 .items_center()
                 .bg(bg)
                 .border_b_1()
-                .border_color(rgb(0x2d2d33))
+                .border_color(crate::theme::current().shell.border_alt.rgba())
                 .on_mouse_move(move |_ev, _window, cx: &mut App| {
                     if let Some(entity) = hover_handle.upgrade() {
                         cx.update_entity(&entity, |shell, cx| {
@@ -381,13 +381,13 @@ pub fn render_section_map(
                 .child(
                     div()
                         .w(px(160.))
-                        .text_color(rgb(0xb0b0b0))
+                        .text_color(crate::theme::current().shell.text.rgba())
                         .child(format!("0x{:x}", sec.address)),
                 )
                 .child(
                     div()
                         .w(px(140.))
-                        .text_color(rgb(0xb0b0b0))
+                        .text_color(crate::theme::current().shell.text.rgba())
                         .child(format!("0x{:x}", sec.size)),
                 )
                 .child(
@@ -478,7 +478,10 @@ fn build_section_tooltip(
         .w(px(280.))
         .flex_shrink_0()
         .p_3()
-        .bg(rgb(0x18181c))
+        .bg({
+            let p = crate::theme::current().shell.bg.rgba();
+            gpui::Rgba { r: p.r * 0.8, g: p.g * 0.8, b: p.b * 0.8, a: 1.0 }
+        })
         .border_1()
         .border_color(border)
         .rounded_md()
@@ -498,7 +501,7 @@ fn build_section_tooltip(
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0xffffff))
+                    .text_color(crate::theme::current().shell.text_bright.rgba())
                     .child(sec.name.clone()),
             )
             .child(
@@ -526,7 +529,7 @@ fn build_section_tooltip(
             }
             None => format!("@ 0x{:x}", addr),
         };
-        body = body.child(div().text_color(rgb(0xf2f2f2)).child(line));
+        body = body.child(div().text_color(crate::theme::current().shell.text_bright.rgba()).child(line));
     }
 
     body = body.child(

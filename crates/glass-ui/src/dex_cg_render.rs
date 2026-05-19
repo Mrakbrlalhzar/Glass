@@ -65,9 +65,9 @@ pub fn render_dex_callgraph(
             };
             let mut body = div()
                 .size_full()
-                .bg(gpui::rgba(0x2a313cff))
+                .bg(crate::theme::current().cfg.block_normal.rgba())
                 .border_2()
-                .border_color(rgb(0x6b6b78))
+                .border_color(crate::theme::current().cfg.block_border.rgba())
                 .rounded_sm()
                 .px_2()
                 .py_1()
@@ -80,7 +80,7 @@ pub fn render_dex_callgraph(
             // Class header (yellow, matches CFG symbol header).
             body = body.child(
                 div()
-                    .text_color(rgb(COLOUR_SYMBOL_HEADER))
+                    .text_color(rgb(COLOUR_SYMBOL_HEADER()))
                     .whitespace_nowrap()
                     .child(SharedString::from(format!(
                         "{}:",
@@ -97,12 +97,12 @@ pub fn render_dex_callgraph(
                     .whitespace_nowrap()
                     .child(
                         div()
-                            .text_color(rgb(COLOUR_PLAIN))
+                            .text_color(rgb(COLOUR_PLAIN()))
                             .child(node_info.method_name.clone()),
                     )
                     .child(
                         div()
-                            .text_color(rgb(COLOUR_BYTES))
+                            .text_color(rgb(COLOUR_BYTES()))
                             .child(node_info.signature.clone()),
                     ),
             );
@@ -115,7 +115,7 @@ pub fn render_dex_callgraph(
             body = body.child(
                 div()
                     .mt_auto()
-                    .text_color(rgb(COLOUR_BYTES))
+                    .text_color(rgb(COLOUR_BYTES()))
                     .whitespace_nowrap()
                     .child(footer),
             );

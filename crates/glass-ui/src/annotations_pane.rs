@@ -173,7 +173,7 @@ fn render_pane_row(
     } = row;
     let dot: gpui::Background = match dot_colour {
         Some(c) => gpui::rgba(*c).into(),
-        None => rgb(0x4f7cff).into(),
+        None => crate::theme::current().shell.accent.rgba().into(),
     };
 
     // Inner scrolling content area: dot + two-line text column.
@@ -207,14 +207,14 @@ fn render_pane_row(
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xd6d6d6))
+                        .text_color(crate::theme::current().shell.text.rgba())
                         .whitespace_nowrap()
                         .child(primary.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(COLOUR_COMMENT))
+                        .text_color(rgb(COLOUR_COMMENT()))
                         .whitespace_nowrap()
                         .child(facets.clone()),
                 ),
@@ -240,9 +240,9 @@ fn render_pane_row(
         .items_center()
         .justify_center()
         .text_sm()
-        .text_color(rgb(0x808088))
+        .text_color(crate::theme::current().shell.text_dim.rgba())
         .cursor_pointer()
-        .hover(|this| this.text_color(rgb(0xff8080)).bg(rgb(0x2e2e34)))
+        .hover(|this| this.text_color(crate::theme::current().errors.highlight.rgba()).bg(crate::theme::current().hovers.delete.rgba()))
         .child("×")
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -267,7 +267,7 @@ fn render_pane_row(
         .border_b_1()
         .border_color(border)
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(0x2e2e34)))
+        .hover(|this| this.bg(crate::theme::current().hovers.delete.rgba()))
         .child(inner)
         .child(delete_icon)
         .on_mouse_down(
