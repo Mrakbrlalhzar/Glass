@@ -361,6 +361,11 @@ pub fn render_two_pane(
                         TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
                         _ => None,
                     });
+                // Snapshot the active op-edit state so the per-row
+                // closure can swap in the inline editor when the
+                // row matches.
+                let op_edit_snapshot: Option<crate::op_editor::OpEditState> =
+                    shell.op_edit.clone();
                 let (right_state, right_lines, h_offset, selected_row) = match shell
                     .active_tab
                     .and_then(|i| shell.tabs.get(i))
@@ -399,6 +404,56 @@ pub fn render_two_pane(
                         &right_lines,
                     ),
                 );
+                // Does the active class have a staged smali edit?
+                // If so we tint its class-declaration lines so the
+                // user can see which class headers are modified at
+                // a glance. Same pattern as the disasm editor's
+                // green wash on edited rows.
+                // Tint class-decl rows only when the staged edit
+                // actually differs in the class-declaration portion
+                // (modifiers / super / implements / source / class
+                // annotations). A pure field or method edit shouldn't
+                // light up the `.class` / `.super` / … rows.
+                // Per-row structural-scope mask. Tells us, for
+                // each line in the leaf, whether the row belongs
+                // to the class declaration, a specific field, a
+                // specific method, or none of the above. Computed
+                // once per render; the per-row closures index in
+                // by row index.
+                let row_scopes: Arc<Vec<crate::smali_row_scope::RowScope>> =
+                    Arc::new(crate::smali_row_scope::compute(&right_lines));
+                // Find which class members are actually edited
+                // (class-decl portion, individual fields, individual
+                // methods). Tinting compares each row's scope
+                // against these sets.
+                let class_decl_edited: bool;
+                let edited_fields: std::collections::HashSet<(String, String)>;
+                let edited_methods: std::collections::HashSet<(String, String)>;
+                if let Some(jni) = active_class_jni.as_deref() {
+                    let (cd, fs, ms) = bundle
+                        .smali_classes
+                        .iter()
+                        .find_map(|((aid, j), original)| {
+                            if j != jni {
+                                return None;
+                            }
+                            Some((
+                                bundle.smali_edits.class_decl_differs(aid, j, original),
+                                bundle.smali_edits.edited_fields(aid, j, original),
+                                bundle.smali_edits.edited_methods(aid, j, original),
+                            ))
+                        })
+                        .unwrap_or((false, Vec::new(), Vec::new()));
+                    class_decl_edited = cd;
+                    edited_fields = fs.into_iter().collect();
+                    edited_methods = ms.into_iter().collect();
+                } else {
+                    class_decl_edited = false;
+                    edited_fields = Default::default();
+                    edited_methods = Default::default();
+                }
+                let edited_fields = Arc::new(edited_fields);
+                let edited_methods = Arc::new(edited_methods);
                 let max_h = px(LISTING_ROW_MIN_WIDTH);
                 div()
                     .flex_1()
@@ -425,7 +480,43 @@ pub fn render_two_pane(
                                     let bundle = bundle.clone();
                                     let active_class_jni = active_class_jni.clone();
                                     let row_annotations = row_annotations.clone();
+                                    let class_decl_edited = class_decl_edited;
+                                    let row_scopes = row_scopes.clone();
+                                    let edited_fields = edited_fields.clone();
+                                    let edited_methods = edited_methods.clone();
+                                    let op_edit_snapshot = op_edit_snapshot.clone();
                                     move |index, _window, _cx| {
+                                        // Inline op editor — when this row is
+                                        // the active op-edit target, render a
+                                        // TextInput row instead of the normal
+                                        // syntax-highlighted line. Keystrokes
+                                        // reach the editor via the Shell-level
+                                        // on_key_down listener.
+                                        if let Some(op_state) = op_edit_snapshot.as_ref() {
+                                            if op_state.row_index == index {
+                                                let bg = crate::theme::current()
+                                                    .state
+                                                    .committed_bg
+                                                    .rgba();
+                                                let bg = gpui::Rgba {
+                                                    r: bg.r,
+                                                    g: bg.g,
+                                                    b: bg.b,
+                                                    a: 0.7,
+                                                };
+                                                let fg = crate::theme::current()
+                                                    .shell
+                                                    .text_bright
+                                                    .rgba();
+                                                let dim = crate::theme::current()
+                                                    .shell
+                                                    .text_dim
+                                                    .rgba();
+                                                return crate::op_editor::render_row(
+                                                    op_state, bg, fg, dim,
+                                                );
+                                            }
+                                        }
                                         let text = lines
                                             .get(index)
                                             .cloned()
@@ -450,6 +541,28 @@ pub fn render_two_pane(
                                             .relative();
                                         if is_selected {
                                             row = row.bg(rgb(COLOUR_ROW_SELECTED()));
+                                        } else if {
+                                            // Tint when the row's scope matches
+                                            // an edited bucket. Class decl,
+                                            // edited field, or edited method
+                                            // all light up the row.
+                                            match row_scopes.get(index) {
+                                                Some(crate::smali_row_scope::RowScope::ClassDecl) => class_decl_edited,
+                                                Some(crate::smali_row_scope::RowScope::Field { name, signature }) => {
+                                                    edited_fields.contains(&(name.clone(), signature.clone()))
+                                                }
+                                                Some(crate::smali_row_scope::RowScope::Method { name, signature }) => {
+                                                    edited_methods.contains(&(name.clone(), signature.clone()))
+                                                }
+                                                _ => false,
+                                            }
+                                        } {
+                                            // Green wash — same idiom as the
+                                            // disasm editor uses for staged
+                                            // instruction edits, at ~50% alpha
+                                            // so the syntax tokens stay legible.
+                                            let bg = crate::theme::current().state.committed_bg.rgba();
+                                            row = row.bg(gpui::Rgba { r: bg.r, g: bg.g, b: bg.b, a: 0.5 });
                                         } else if let Some(rgba) =
                                             annotation.as_ref().and_then(|a| a.colour)
                                         {
@@ -518,7 +631,13 @@ pub fn render_two_pane(
                                                         .hover(|s| s.underline())
                                                         .on_mouse_down(
                                                             gpui::MouseButton::Left,
-                                                            move |_ev, _w, cx: &mut App| {
+                                                            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                                                // Let double-clicks bubble
+                                                                // to the row so the per-op
+                                                                // editor opens.
+                                                                if ev.click_count >= 2 {
+                                                                    return;
+                                                                }
                                                                 cx.stop_propagation();
                                                                 let Some(entity) =
                                                                     weak.upgrade()
@@ -586,7 +705,13 @@ pub fn render_two_pane(
                                                             ))
                                                             .on_mouse_down(
                                                                 gpui::MouseButton::Left,
-                                                                move |_ev, _w, cx: &mut App| {
+                                                                move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                                                    // Let double-clicks bubble
+                                                                    // to the row so the per-op
+                                                                    // editor opens.
+                                                                    if ev.click_count >= 2 {
+                                                                        return;
+                                                                    }
                                                                     cx.stop_propagation();
                                                                     let Some(entity) =
                                                                         weak.upgrade()
@@ -669,16 +794,82 @@ pub fn render_two_pane(
                                         let right_weak = weak.clone();
                                         let right_lines = lines.clone();
                                         let right_class = active_class_jni.clone();
+                                        let right_scopes = row_scopes.clone();
+                                        let dbl_lines = lines.clone();
+                                        let dbl_weak = weak.clone();
+                                        let dbl_scopes = row_scopes.clone();
                                         let row = row.on_mouse_down(
                                             gpui::MouseButton::Left,
-                                            move |_ev, _w, cx: &mut App| {
-                                                if let Some(entity) = weak.upgrade() {
+                                            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                                                // Single-click selects the row.
+                                                if let Some(entity) = dbl_weak.upgrade() {
                                                     cx.update_entity(
                                                         &entity,
                                                         |shell, cx| {
                                                             shell.select_active_row(
                                                                 index, cx,
                                                             );
+                                                        },
+                                                    );
+                                                }
+                                                // Double-click opens a structural
+                                                // editor when the row is part of
+                                                // the class declaration (`.class`,
+                                                // `.super`, `.implements`,
+                                                // `.source`). Field / method
+                                                // headers are M1.4 / M1.5 — for
+                                                // now they're inert on double-click.
+                                                if ev.click_count < 2 {
+                                                    return;
+                                                }
+                                                let Some(text) = dbl_lines.get(index) else {
+                                                    return;
+                                                };
+                                                if matches!(
+                                                    dbl_scopes.get(index),
+                                                    Some(crate::smali_row_scope::RowScope::ClassDecl)
+                                                ) {
+                                                    if let Some(entity) = dbl_weak.upgrade() {
+                                                        cx.update_entity(
+                                                            &entity,
+                                                            |shell, cx| {
+                                                                shell.open_class_decl_edit(cx);
+                                                            },
+                                                        );
+                                                    }
+                                                    return;
+                                                }
+                                                if crate::field_popover::line_is_field_decl(text) {
+                                                    let line = text.clone();
+                                                    if let Some(entity) = dbl_weak.upgrade() {
+                                                        cx.update_entity(
+                                                            &entity,
+                                                            |shell, cx| {
+                                                                shell.open_field_edit_for_line(line.as_ref(), cx);
+                                                            },
+                                                        );
+                                                    }
+                                                    return;
+                                                }
+                                                if crate::method_popover::line_is_method_decl(text) {
+                                                    let line = text.clone();
+                                                    if let Some(entity) = dbl_weak.upgrade() {
+                                                        cx.update_entity(
+                                                            &entity,
+                                                            |shell, cx| {
+                                                                shell.open_method_edit_for_line(line.as_ref(), cx);
+                                                            },
+                                                        );
+                                                    }
+                                                    return;
+                                                }
+                                                // Method body row — open the
+                                                // per-op inline editor.
+                                                if let Some(entity) = dbl_weak.upgrade() {
+                                                    cx.update_entity(
+                                                        &entity,
+                                                        |shell, cx| {
+                                                            shell.open_op_edit_for_row(index, cx);
                                                         },
                                                     );
                                                 }
@@ -695,28 +886,35 @@ pub fn render_two_pane(
                                                     return;
                                                 };
                                                 let pos = ev.position;
-                                                // First: is this row itself a
-                                                // `.class` header? Annotate
-                                                // the class as a whole.
-                                                if let Some(row) = right_lines.get(index) {
-                                                    let trimmed = row.trim_start();
-                                                    if trimmed.starts_with(".class ") {
-                                                        if let Some(entity) =
-                                                            right_weak.upgrade()
-                                                        {
-                                                            cx.update_entity(
-                                                                &entity,
-                                                                |shell, cx| {
-                                                                    shell.open_smali_class_context_menu(
-                                                                        class_jni.clone(),
-                                                                        pos,
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            );
-                                                        }
-                                                        return;
+                                                // First: is this row part of
+                                                // the class declaration
+                                                // (`.class`, `.super`,
+                                                // `.implements`, `.source`)?
+                                                // All four share the same
+                                                // annotation surface — keyed
+                                                // on the class as a whole —
+                                                // and the same Revert
+                                                // affordance when the class
+                                                // has a staged edit.
+                                                if matches!(
+                                                    right_scopes.get(index),
+                                                    Some(crate::smali_row_scope::RowScope::ClassDecl)
+                                                ) {
+                                                    if let Some(entity) =
+                                                        right_weak.upgrade()
+                                                    {
+                                                        cx.update_entity(
+                                                            &entity,
+                                                            |shell, cx| {
+                                                                shell.open_smali_class_context_menu(
+                                                                    class_jni.clone(),
+                                                                    pos,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        );
                                                     }
+                                                    return;
                                                 }
                                                 // First: is this row itself a
                                                 // `.field` line? If so, show
@@ -746,6 +944,39 @@ pub fn render_two_pane(
                                                                             label,
                                                                             pos,
                                                                             cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                                // Right-click on a method
+                                                // header line itself — show
+                                                // the method-specific menu
+                                                // (call-graph, callers,
+                                                // Revert when staged).
+                                                if let Some(row_text) =
+                                                    right_lines.get(index)
+                                                {
+                                                    if row_text.trim_start().starts_with(".method ") {
+                                                        if let Some(crate::smali_row_scope::RowScope::Method {
+                                                            name, signature,
+                                                        }) = right_scopes.get(index)
+                                                        {
+                                                            let name = name.clone();
+                                                            let sig = signature.clone();
+                                                            let display =
+                                                                format!("{name}{sig}");
+                                                            if let Some(entity) =
+                                                                right_weak.upgrade()
+                                                            {
+                                                                cx.update_entity(
+                                                                    &entity,
+                                                                    |shell, cx| {
+                                                                        shell.open_method_header_context_menu(
+                                                                            name, sig, display, pos, cx,
                                                                         );
                                                                     },
                                                                 );
@@ -916,9 +1147,16 @@ fn build_smali_row_annotations(
     let mut out: Vec<Option<glass_db::Annotation>> = vec![None; lines.len()];
     let Some(aid) = bundle.artifact_ids.first() else { return out };
     let Some(idx) = bundle.annotations.get(aid) else { return out };
-    // Current method state across the walk.
     let mut current_method_key: Option<String> = None;
     let mut current_method_line: usize = 0;
+    // op_cursor counts the ops we've passed within the current
+    // method body. Same classifier as `line_offset_to_op_index`
+    // — every line that's not method-prelude / .end method
+    // counts as one op (with `.array-data`/`.packed-switch`/
+    // `.sparse-switch` blocks counted once and then skipped
+    // until their closer).
+    let mut op_cursor: u32 = 0;
+    let mut skip_until: Option<&'static str> = None;
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with(".class ") {
@@ -933,10 +1171,10 @@ fn build_smali_row_annotations(
                     let key = format!("{class_jni}->{decl}");
                     current_method_key = Some(key.clone());
                     current_method_line = i;
-                    // header line == method_line offset 0; the GUI
-                    // writes always go through MethodLine. Fall
-                    // back to the legacy Method key so MCP-set
-                    // entries still appear on the header.
+                    op_cursor = 0;
+                    skip_until = None;
+                    // Header row: legacy `MethodLine(_, 0)` or
+                    // `Method` both apply.
                     out[i] = idx
                         .at_method_line(&key, 0)
                         .cloned()
@@ -948,16 +1186,70 @@ fn build_smali_row_annotations(
         }
         if trimmed.starts_with(".end method") {
             current_method_key = None;
+            op_cursor = 0;
+            skip_until = None;
             continue;
         }
-        if let Some(key) = current_method_key.as_ref() {
-            let offset = (i - current_method_line) as u32;
-            if offset == 0 {
-                continue;
+        let Some(key) = current_method_key.as_ref() else { continue };
+        // Mid-body row classification — mirrors
+        // `line_offset_to_op_index`.
+        if let Some(closer) = skip_until {
+            // Body of a multi-line op block. Annotation, if any,
+            // belongs to the op whose opener we already counted
+            // (op_cursor - 1).
+            if let Some(prev_op) = op_cursor.checked_sub(1) {
+                if let Some(a) = idx.at_op_index(key, prev_op) {
+                    out[i] = Some(a.clone());
+                }
             }
+            if trimmed.starts_with(closer) {
+                skip_until = None;
+            }
+            continue;
+        }
+        let prelude = trimmed.starts_with(".locals ")
+            || trimmed.starts_with(".registers ")
+            || trimmed.starts_with(".param")
+            || trimmed.starts_with(".annotation ")
+            || trimmed.starts_with(".end annotation")
+            || trimmed.starts_with(".subannotation ")
+            || trimmed.starts_with(".end subannotation")
+            || trimmed.is_empty();
+        if prelude {
+            // Legacy MethodLine annotations may have been
+            // attached to one of these rows — surface them as a
+            // fallback so users don't lose their notes pre-
+            // migration.
+            let offset = (i - current_method_line) as u32;
             if let Some(a) = idx.at_method_line(key, offset) {
                 out[i] = Some(a.clone());
             }
+            continue;
+        }
+        let multi_close: Option<&'static str> = if trimmed.starts_with(".array-data ") {
+            Some(".end array-data")
+        } else if trimmed.starts_with(".packed-switch ") {
+            Some(".end packed-switch")
+        } else if trimmed.starts_with(".sparse-switch") {
+            Some(".end sparse-switch")
+        } else {
+            None
+        };
+        // Look up OpIndex first; fall back to MethodLine for
+        // records that haven't been upgraded yet. The upgrade
+        // pass at bundle-open should clear most of these.
+        let this_op = op_cursor;
+        if let Some(a) = idx.at_op_index(key, this_op) {
+            out[i] = Some(a.clone());
+        } else {
+            let offset = (i - current_method_line) as u32;
+            if let Some(a) = idx.at_method_line(key, offset) {
+                out[i] = Some(a.clone());
+            }
+        }
+        op_cursor = op_cursor.saturating_add(1);
+        if let Some(closer) = multi_close {
+            skip_until = Some(closer);
         }
     }
     out

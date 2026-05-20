@@ -314,6 +314,28 @@ pub fn catalog() -> SkillCatalog {
                 example: "glass smali ./app.apk --class com.example.MainActivity",
             },
             Skill {
+                name: "smali-set",
+                description: "Stage a typed rewrite of one DEX class. `body` is the full smali text (same shape `smali` returns); the `.class` line must declare the same class as `class`. Edits stack in the patch file used by `patch` / `export-patched`.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path", "class", "body", "patches"],
+                    "properties": {
+                        "path": path_arg(),
+                        "class": class_arg(),
+                        "body": {
+                            "type": "string",
+                            "description": "Full smali body of the class — same format `smali` returns."
+                        },
+                        "patches": {
+                            "type": "string",
+                            "description": "Patch file path. Reused / created. Shared with byte-level `patch` entries."
+                        }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass smali-set ./app.apk --class com.example.Foo --body \"$(cat new_foo.smali)\" --patches edits.json",
+            },
+            Skill {
                 name: "methods",
                 description: "Methods declared by a class (name, descriptor, modifiers, op count, constructor flag).",
                 input_schema: json!({

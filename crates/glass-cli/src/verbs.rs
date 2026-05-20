@@ -997,6 +997,107 @@ pub fn patch(
     output::emit(envelope, format, render_patch)
 }
 
+/// Stage a typed smali class rewrite into a patch file. The body
+/// is the full class text (everything `glass smali --class …`
+/// returns); we parse + validate it against the bundle so the
+/// caller gets a fast failure on a malformed body. `body_source`
+/// is one of `Inline(text)`, `File(path)`, or `Stdin` —
+/// resolved by the CLI layer before calling here.
+#[derive(serde::Serialize)]
+pub struct SmaliSetResult {
+    pub patches: PathBuf,
+    pub artifact: String,
+    pub class_jni: String,
+    pub body_bytes: usize,
+    pub total_smali_edits: usize,
+}
+
+pub enum SmaliBodySource {
+    Inline(String),
+    File(PathBuf),
+    Stdin,
+}
+
+pub fn smali_set(
+    path: PathBuf,
+    class_ref: String,
+    body_source: SmaliBodySource,
+    patches: PathBuf,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<SmaliSetResult> {
+        // Pull the body in first so we fail fast if e.g. the file
+        // can't be read — opening the bundle is the expensive step.
+        let body = match body_source {
+            SmaliBodySource::Inline(s) => s,
+            SmaliBodySource::File(p) => std::fs::read_to_string(&p)
+                .with_context(|| format!("reading body file {}", p.display()))?,
+            SmaliBodySource::Stdin => {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .context("reading body from stdin")?;
+                buf
+            }
+        };
+        if body.trim().is_empty() {
+            anyhow::bail!("smali body is empty");
+        }
+        // Parse the body so we catch syntax errors here rather
+        // than at export time.
+        let parsed = glass_api::parse_smali_class(&body)?;
+
+        let bundle = glass_api::open(&path)?;
+        let (artifact_id, class_jni) =
+            bundle.resolve_smali_class(&class_ref)?;
+        // Make sure the body's `.class` line agrees with what the
+        // caller asked to replace — accidental mismatches here
+        // would silently overwrite the wrong slot.
+        let body_jni = glass_api::smali_class_jni(&parsed);
+        if body_jni != class_jni {
+            anyhow::bail!(
+                "smali body declares class {body_jni:?} but --class resolves to {class_jni:?}"
+            );
+        }
+
+        let mut pf = glass_api::PatchFile::read_or_default(&patches)?;
+        if pf.source_path.is_none() {
+            pf.source_path = Some(path.clone());
+        }
+        let body_bytes = body.len();
+        pf.upsert_smali(glass_api::SmaliPatchEntry {
+            artifact: artifact_id.to_hex(),
+            class_jni: class_jni.clone(),
+            body,
+        });
+        let total_smali_edits = pf.smali_edits.len();
+        pf.write(&patches)?;
+        Ok(SmaliSetResult {
+            patches,
+            artifact: artifact_id.to_hex(),
+            class_jni,
+            body_bytes,
+            total_smali_edits,
+        })
+    })?;
+    output::emit(envelope, format, render_smali_set)
+}
+
+fn render_smali_set(data: &SmaliSetResult, out: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "staged smali: {} on {} ({} byte{} body) — {} smali edit{} total in {}",
+        data.class_jni,
+        &data.artifact[..16.min(data.artifact.len())],
+        data.body_bytes,
+        if data.body_bytes == 1 { "" } else { "s" },
+        data.total_smali_edits,
+        if data.total_smali_edits == 1 { "" } else { "s" },
+        data.patches.display(),
+    )
+}
+
 fn render_patch(data: &PatchResult, out: &mut dyn Write) -> std::io::Result<()> {
     writeln!(
         out,
@@ -1024,13 +1125,14 @@ pub fn export_patched(
 ) -> Result<()> {
     let envelope = output::measured(|| -> Result<ExportPatchedResult> {
         let pf = glass_api::PatchFile::read_or_default(&patches)?;
-        if pf.edits.is_empty() {
+        if pf.edits.is_empty() && pf.smali_edits.is_empty() {
             anyhow::bail!("patch file {} contains no edits", patches.display());
         }
-        let edits_applied = pf.edits.len();
+        let edits_applied = pf.edits.len() + pf.smali_edits.len();
         let bundle = glass_api::open(&path)?;
         let edit_map = pf.to_edit_map();
-        glass_api::export_to_path(&bundle, &edit_map, &out)?;
+        let smali_map = pf.to_smali_edit_map()?;
+        glass_api::export_to_path_with_smali(&bundle, &edit_map, &smali_map, &out)?;
         Ok(ExportPatchedResult {
             out,
             edits_applied,

@@ -47,9 +47,18 @@ mod scrollbar;
 mod search;
 mod text_input;
 mod section_map;
+mod annotation_popover;
+mod class_decl_popover;
+mod external_editor;
+mod field_popover;
+mod method_popover;
+mod modifier_picker;
+mod op_editor;
+mod smali_row_scope;
 mod shell_actions;
 mod shell_render;
 mod smali;
+mod smali_edits;
 mod theme;
 mod two_pane;
 mod xref;
@@ -119,6 +128,17 @@ actions!(
         Theme5,
         Theme6,
         Theme7,
+        // Class-declaration popover. Open via double-click on the
+        // `.class` line; commit/cancel via Enter/Esc inside the
+        // popover. Dispatched explicitly because the popover's
+        // text inputs swallow keys before any window-level key
+        // binding has a chance to fire.
+        ClassDeclCommit,
+        ClassDeclCancel,
+        FieldCommit,
+        FieldCancel,
+        MethodCommit,
+        MethodCancel,
     ]
 );
 
@@ -222,6 +242,16 @@ pub struct LoadedBundle {
     /// edited lines on the fly; export walks `entries()` to splice
     /// patched bytes back into the artifact.
     pub edits: edits::EditRegistry,
+    /// Original parsed DEX classes, keyed by
+    /// `(dex-artifact, class_jni)`. Kept on the snapshot so the
+    /// smali editor has a typed value to clone before modifying;
+    /// also the source the export path falls back to for unedited
+    /// classes when re-emitting a DEX. Cheap shared `Arc`.
+    pub smali_classes: Arc<std::collections::HashMap<(glass_db::ArtifactId, String), ::smali::types::SmaliClass>>,
+    /// Staged class-level smali edits — keyed by the same
+    /// `(artifact, class_jni)` pair as `smali_classes`. In-memory
+    /// only; closing the bundle drops them.
+    pub smali_edits: smali_edits::SmaliEditRegistry,
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
@@ -439,6 +469,26 @@ pub enum LeafKind {
 }
 
 impl LoadedBundle {
+    /// The smali class to render for `(artifact, class_jni)` —
+    /// returns the staged edit if any, otherwise the original
+    /// parsed class. `None` if the artifact / jni pair isn't a
+    /// DEX class known to this bundle.
+    ///
+    /// Both branches return `&SmaliClass` from differently-owned
+    /// containers, so we return a reference into whichever map
+    /// has it.
+    pub fn smali_class_for(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+    ) -> Option<&::smali::types::SmaliClass> {
+        if let Some(edit) = self.smali_edits.get(artifact, class_jni) {
+            return Some(&edit.modified);
+        }
+        let key = (artifact.clone(), class_jni.to_string());
+        self.smali_classes.get(&key)
+    }
+
     /// Find the leaf that backs a given persisted tab state. Returns
     /// `None` if the bundle no longer contains it (e.g. a class
     /// disappeared between sessions).
@@ -724,6 +774,12 @@ pub(crate) struct Tab {
     /// Smali deep-link target — the line index to scroll to once the
     /// tab's smali body is materialised.
     pub(crate) pending_smali_scroll_line: Option<usize>,
+    /// Preserved scroll offset captured just before a re-render
+    /// that invalidates `tab.lines` (e.g. staging a smali edit).
+    /// Consumed by `ensure_active_tab_lines` after the new line
+    /// cache is built — restores the exact viewport position so
+    /// the user doesn't get yanked back to the top.
+    pub(crate) pending_scroll_restore: Option<gpui::ListOffset>,
     /// Index of the currently-selected row in this tab's row list.
     pub(crate) selected_row: Option<usize>,
     /// Hex view: the absolute address of the byte under the user's
@@ -879,6 +935,7 @@ impl Tab {
             kind,
             pending_scroll_addr: None,
             pending_smali_scroll_line: None,
+            pending_scroll_restore: None,
             scroll: ListState::new(0, ListAlignment::Top, px(2000.)),
             lines: None,
             listing_rows: None,
@@ -1053,6 +1110,16 @@ pub(crate) struct Shell {
     /// clicked a byte cell or a string item in the hex view.
     /// Mutually exclusive with `disasm_edit` in practice.
     pub(crate) hex_edit: Option<HexEditState>,
+    /// Active class-declaration edit. `Some` when the user
+    /// double-clicked the `.class` line in a smali tab. Holds the
+    /// in-progress form values; nothing commits to the bundle's
+    /// `smali_edits` registry until Save fires.
+    pub(crate) class_decl_edit: Option<class_decl_popover::ClassDeclEditState>,
+    pub(crate) field_edit: Option<field_popover::FieldEditState>,
+    pub(crate) method_edit: Option<method_popover::MethodEditState>,
+    pub(crate) op_edit: Option<op_editor::OpEditState>,
+    pub(crate) annotation_stack: Option<annotation_popover::AnnotationStack>,
+    pub(crate) external_edit: Option<external_editor::ExternalEditState>,
     /// Whether the "N changes" modal dialog is showing.
     pub(crate) changes_dialog_open: bool,
     /// True after the first click of "Abandon all" inside the
@@ -1307,10 +1374,48 @@ impl Render for Shell {
         } else {
             header
         };
+        // "Edit File" affordance — either the launch button (when
+        // no session is active and a smali tab is in front) or the
+        // live-watching chip (when a session is running). At most
+        // one is on screen at a time.
+        let header = if let Some(state) = self.external_edit.as_ref() {
+            header.child(external_editor::render_chip(state, fg, dim, cx))
+        } else if external_editor::can_open_editor(self) {
+            header.child(
+                div()
+                    .id("edit-file-btn")
+                    .px_3()
+                    .h(px(24.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(fg)
+                    .border_1()
+                    .border_color(self.theme.shell.border.rgba())
+                    .hover(|s| s.bg(self.theme.hovers.standard.rgba()))
+                    .cursor_pointer()
+                    .child(SharedString::from("Edit File"))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.open_active_smali_in_external_editor(cx);
+                        }),
+                    ),
+            )
+        } else {
+            header
+        };
+
         // Staged-edits chip. Only renders when the loaded bundle
         // has at least one staged edit; clicking opens the
         // Changes dialog (same as ⌘E).
-        let edit_count = self.bundle().map(|b| b.edits.len()).unwrap_or(0);
+        let edit_count = self
+            .bundle()
+            .map(|b| b.edits.len() + b.smali_edits.len())
+            .unwrap_or(0);
         let header = if edit_count > 0 {
             header.child(
                 div()
@@ -1459,11 +1564,69 @@ impl Render for Shell {
                 string_edit_popover::render(state, panel, border, fg, dim, cx)
             });
 
+        let class_decl_overlay: Option<gpui::AnyElement> = self
+            .class_decl_edit
+            .as_ref()
+            .map(|state| {
+                let annotations = self
+                    .class_annotation_summaries(&state.artifact, &state.class_jni);
+                class_decl_popover::render(
+                    state, &annotations, panel, border, fg, dim, accent, cx,
+                )
+            });
+
+        let field_edit_overlay: Option<gpui::AnyElement> = self
+            .field_edit
+            .as_ref()
+            .map(|state| {
+                let annotations = self.field_annotation_summaries(
+                    &state.artifact,
+                    &state.class_jni,
+                    &state.original_name,
+                    &state.original_signature_jni,
+                );
+                field_popover::render(
+                    state, &annotations, panel, border, fg, dim, accent, cx,
+                )
+            });
+
+        let method_edit_overlay: Option<gpui::AnyElement> = self
+            .method_edit
+            .as_ref()
+            .map(|state| {
+                let annotations = self.method_annotation_summaries(
+                    &state.artifact,
+                    &state.class_jni,
+                    &state.original_name,
+                    &state.original_signature_jni,
+                );
+                method_popover::render(
+                    state, &annotations, panel, border, fg, dim, accent, cx,
+                )
+            });
+
+        let annotation_overlay: Option<gpui::AnyElement> = self
+            .annotation_stack
+            .as_ref()
+            .filter(|s| !s.frames.is_empty())
+            .map(|stack| {
+                annotation_popover::render(stack, panel, border, fg, dim, accent, cx)
+            });
+
+
         let disasm_edit_suggestions_overlay: Option<gpui::AnyElement> = self
             .disasm_edit
             .as_ref()
             .filter(|e| !e.suggestions.is_empty())
             .map(|state| render_disasm_edit_suggestions(state, panel, border, dim, cx));
+
+        let op_edit_suggestions_overlay: Option<gpui::AnyElement> = self
+            .op_edit
+            .as_ref()
+            .filter(|e| !e.suggestions.is_empty())
+            .map(|state| {
+                op_editor::render_suggestions(state, panel, border, dim, cx)
+            });
 
         let about_overlay: Option<gpui::AnyElement> = if self.about_open {
             Some(about::render_about(panel, border, fg, dim, cx))
@@ -1498,6 +1661,46 @@ impl Render for Shell {
                     this.cancel_hex_edit(cx);
                     return;
                 }
+                if this
+                    .annotation_stack
+                    .as_ref()
+                    .map_or(false, |s| !s.frames.is_empty())
+                {
+                    this.cancel_annotation_frame(cx);
+                    return;
+                }
+                if this.class_decl_edit.is_some() {
+                    this.cancel_class_decl_edit(cx);
+                    return;
+                }
+                if this.field_edit.is_some() {
+                    this.cancel_field_edit(cx);
+                    return;
+                }
+                if this.method_edit.is_some() {
+                    this.cancel_method_edit(cx);
+                    return;
+                }
+                if this.op_edit.is_some() {
+                    // Progressive cancel: if the dropdown is up,
+                    // collapse it first so the user can keep
+                    // typing in the editor. A second Esc closes
+                    // the editor proper.
+                    let has_suggestions = this
+                        .op_edit
+                        .as_ref()
+                        .map_or(false, |e| !e.suggestions.is_empty());
+                    if has_suggestions {
+                        if let Some(state) = this.op_edit.as_mut() {
+                            state.suggestions.clear();
+                            state.suggestion_selected = 0;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    this.cancel_op_edit(cx);
+                    return;
+                }
                 if this.changes_dialog_open {
                     this.close_changes_dialog(cx);
                     return;
@@ -1529,6 +1732,14 @@ impl Render for Shell {
                     this.move_disasm_suggestion_pub(-1, cx);
                     return;
                 }
+                // While the op-edit inline editor is open the arrow
+                // keys should stay inside its TextInput — without
+                // this guard they fall through and shift the row
+                // selection underneath the editor.
+                if this.op_edit.is_some() {
+                    op_editor::handle_named_key(this, "up", cx);
+                    return;
+                }
                 if this.palette_open {
                     this.palette_move(-1, cx);
                     return;
@@ -1538,6 +1749,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PaletteDown, _w, cx| {
                 if this.disasm_edit.is_some() {
                     this.move_disasm_suggestion_pub(1, cx);
+                    return;
+                }
+                if this.op_edit.is_some() {
+                    op_editor::handle_named_key(this, "down", cx);
                     return;
                 }
                 if this.palette_open {
@@ -1553,9 +1768,33 @@ impl Render for Shell {
                 this.listing_page_scroll(1, cx);
             }))
             .on_action(cx.listener(|this, _: &HexCursorLeft, _w, cx| {
-                // Only act when no edit / palette is consuming
-                // the key — otherwise TextInput needs Left/Right
-                // for cursor movement.
+                // Class-decl / field popovers steal Left for caret
+                // movement inside the focused input. Other edits /
+                // palette also need the key for their own buffers.
+                if this
+                    .annotation_stack
+                    .as_ref()
+                    .map_or(false, |s| !s.frames.is_empty())
+                {
+                    annotation_popover::handle_named_key(this, "left", cx);
+                    return;
+                }
+                if this.class_decl_edit.is_some() {
+                    class_decl_popover::handle_named_key(this, "left", cx);
+                    return;
+                }
+                if this.field_edit.is_some() {
+                    field_popover::handle_named_key(this, "left", cx);
+                    return;
+                }
+                if this.method_edit.is_some() {
+                    method_popover::handle_named_key(this, "left", cx);
+                    return;
+                }
+                if this.op_edit.is_some() {
+                    op_editor::handle_named_key(this, "left", cx);
+                    return;
+                }
                 if this.disasm_edit.is_some()
                     || this.hex_edit.is_some()
                     || this.palette_open
@@ -1565,6 +1804,30 @@ impl Render for Shell {
                 this.hex_move_byte(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &HexCursorRight, _w, cx| {
+                if this
+                    .annotation_stack
+                    .as_ref()
+                    .map_or(false, |s| !s.frames.is_empty())
+                {
+                    annotation_popover::handle_named_key(this, "right", cx);
+                    return;
+                }
+                if this.class_decl_edit.is_some() {
+                    class_decl_popover::handle_named_key(this, "right", cx);
+                    return;
+                }
+                if this.field_edit.is_some() {
+                    field_popover::handle_named_key(this, "right", cx);
+                    return;
+                }
+                if this.method_edit.is_some() {
+                    method_popover::handle_named_key(this, "right", cx);
+                    return;
+                }
+                if this.op_edit.is_some() {
+                    op_editor::handle_named_key(this, "right", cx);
+                    return;
+                }
                 if this.disasm_edit.is_some()
                     || this.hex_edit.is_some()
                     || this.palette_open
@@ -1589,6 +1852,24 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleChangesDialog, _w, cx| {
                 this.toggle_changes_dialog(cx);
             }))
+            .on_action(cx.listener(|this, _: &ClassDeclCommit, _w, cx| {
+                this.commit_class_decl_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClassDeclCancel, _w, cx| {
+                this.cancel_class_decl_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldCommit, _w, cx| {
+                this.commit_field_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldCancel, _w, cx| {
+                this.cancel_field_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MethodCommit, _w, cx| {
+                this.commit_method_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MethodCancel, _w, cx| {
+                this.cancel_method_edit(cx);
+            }))
             // Enter activates the palette when it's open. Bound
             // globally because the action keymap consumes Enter
             // before our on_key_down listener has a chance to see it.
@@ -1611,11 +1892,54 @@ impl Render for Shell {
                     this.commit_hex_edit(cx);
                     return;
                 }
+                // The inline op-edit's Enter has to win against the
+                // listing-row "edit selected line" handler below.
+                // Without this, the action keymap routes Enter
+                // straight past us into `edit_selected_listing_row`
+                // and the op-edit input never sees it. The action
+                // binding is plain `enter` only (no modifiers), so
+                // Cmd-Enter still flows through the on_key_down
+                // listener and gets the "commit + insert below"
+                // treatment there.
+                if this.op_edit.is_some() {
+                    // Enter inside the op editor: if the
+                    // autocomplete dropdown is open, accept the
+                    // highlighted suggestion. Only commit the
+                    // edit when there's nothing to accept —
+                    // otherwise pressing Enter to pick e.g. a
+                    // register would also try to parse the
+                    // half-finished line.
+                    let has_suggestions = this
+                        .op_edit
+                        .as_ref()
+                        .map_or(false, |e| !e.suggestions.is_empty());
+                    if has_suggestions {
+                        this.accept_op_edit_suggestion(cx);
+                    } else {
+                        this.commit_op_edit(cx);
+                    }
+                    return;
+                }
                 if this.palette_open {
                     this.palette_activate(cx);
                     return;
                 }
                 if this.hex_open_edit_at_selection(cx) {
+                    return;
+                }
+                // If the selected row in the active smali tab is a
+                // class-declaration line, Enter opens the class-decl
+                // popover — mirrors the double-click behaviour.
+                if this.smali_open_class_decl_at_selection(cx) {
+                    return;
+                }
+                if this.smali_open_field_at_selection(cx) {
+                    return;
+                }
+                if this.smali_open_method_at_selection(cx) {
+                    return;
+                }
+                if this.smali_open_op_edit_at_selection(cx) {
                     return;
                 }
                 this.edit_selected_listing_row(cx);
@@ -1642,6 +1966,32 @@ impl Render for Shell {
                 }
                 if this.hex_edit.is_some() {
                     this.hex_edit_handle_key(k, cx);
+                    return;
+                }
+                // Annotation stack sits on top of any parent
+                // popover, so it grabs keys first when active.
+                if this
+                    .annotation_stack
+                    .as_ref()
+                    .map_or(false, |s| !s.frames.is_empty())
+                {
+                    annotation_popover::handle_key(this, k, cx);
+                    return;
+                }
+                if this.class_decl_edit.is_some() {
+                    class_decl_popover::handle_key(this, k, cx);
+                    return;
+                }
+                if this.field_edit.is_some() {
+                    field_popover::handle_key(this, k, cx);
+                    return;
+                }
+                if this.method_edit.is_some() {
+                    method_popover::handle_key(this, k, cx);
+                    return;
+                }
+                if this.op_edit.is_some() {
+                    op_editor::handle_key(this, k, cx);
                     return;
                 }
                 if !this.palette_open {
@@ -1692,7 +2042,22 @@ impl Render for Shell {
         if let Some(o) = string_edit_overlay {
             root = root.child(o);
         }
+        if let Some(o) = class_decl_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = field_edit_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = method_edit_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = annotation_overlay {
+            root = root.child(o);
+        }
         if let Some(o) = disasm_edit_suggestions_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = op_edit_suggestions_overlay {
             root = root.child(o);
         }
         root

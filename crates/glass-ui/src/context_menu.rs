@@ -116,6 +116,32 @@ pub enum ContextMenuItem {
         vaddr: u64,
         label: SharedString,
     },
+    /// "Revert class edit" — drops the staged smali edit for a
+    /// class. Only shown when the active class has a staged edit.
+    RevertSmaliClassEdit {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        label: SharedString,
+    },
+    /// "Revert field edit" — restores a single field on a
+    /// staged class to its original lifted version. If that
+    /// leaves the class as a whole equal to its original, the
+    /// class-level staged edit is dropped too.
+    RevertSmaliFieldEdit {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        field_name: String,
+        field_signature_jni: String,
+        label: SharedString,
+    },
+    /// "Revert method edit" — analogous to RevertSmaliFieldEdit.
+    RevertSmaliMethodEdit {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -215,6 +241,15 @@ pub fn render_context_menu(
                 (label.to_string(), SharedString::from(""))
             }
             ContextMenuItem::RevertDisasmEdit { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::RevertSmaliClassEdit { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::RevertSmaliFieldEdit { label, .. } => {
+                (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::RevertSmaliMethodEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))
             }
         };

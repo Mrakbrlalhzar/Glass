@@ -157,6 +157,14 @@ fn snapshot_apk_with_progress(
     let mut labels: Vec<SharedString> = Vec::new();
     let mut kinds: Vec<LeafKind> = Vec::new();
     let mut roots: Vec<Node> = Vec::new();
+    // Typed parsed classes, keyed by `(dex-artifact-id, class_jni)`.
+    // Kept on the bundle so the smali editor has a typed value to
+    // clone before modifying; the export-patched path also falls
+    // back to these for unedited classes when re-emitting a DEX.
+    let mut smali_classes: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        ::smali::types::SmaliClass,
+    > = std::collections::HashMap::new();
 
     // Manifest leaf at the very top — first thing a reverser usually
     // looks at. Only emit when we actually parsed a manifest.
@@ -188,9 +196,13 @@ fn snapshot_apk_with_progress(
     }
 
     let mut processed = 0usize;
-    for dex in &apk.dex_files {
+    for (dex_index, dex) in apk.dex_files.iter().enumerate() {
         let classes = dex.classes()?;
         let dex_origin = SharedString::from(dex.name.clone());
+        // Artifact id for this DEX — index matches the push order
+        // a few lines above where we pushed `from_bytes(&dex.bytes)`
+        // into `artifact_ids`.
+        let dex_aid = artifact_ids[dex_index].clone();
         let mut pkg_root = PkgBuilder::default();
         for class in classes {
             let id = LeafId(bodies.len());
@@ -202,6 +214,8 @@ fn snapshot_apk_with_progress(
                 parts.last().cloned().unwrap_or_else(|| jni.clone()),
             ));
             kinds.push(LeafKind::SmaliClass { class_jni: jni.clone() });
+            // Cache the typed class for the editor + export paths.
+            smali_classes.insert((dex_aid.clone(), jni.clone()), class.clone());
             pkg_root.insert(&parts, id);
             processed += 1;
             // Updating shared state every class would thrash the lock. The
@@ -344,6 +358,8 @@ fn snapshot_apk_with_progress(
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
+        smali_classes: Arc::new(smali_classes),
+        smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
     })
 }
 
@@ -552,6 +568,10 @@ fn snapshot_ipa_with_progress(
     }
     let bundle_id = glass_db::BundleId::from_raw(*bundle_hasher.finalize().as_bytes());
 
+    let smali_classes: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        ::smali::types::SmaliClass,
+    > = std::collections::HashMap::new();
     Ok(LoadedBundle {
         title: format!("Glass — {}", ipa.path.display()),
         tree: Arc::new(Tree { roots }),
@@ -574,6 +594,8 @@ fn snapshot_ipa_with_progress(
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
+        smali_classes: Arc::new(smali_classes),
+        smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
     })
 }
 
@@ -796,6 +818,8 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         // loader returns; the loader itself doesn't carry the DB.
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
+        smali_classes: Arc::new(std::collections::HashMap::new()),
+        smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
     })
 }
 

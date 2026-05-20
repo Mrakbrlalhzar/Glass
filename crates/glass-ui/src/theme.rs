@@ -563,6 +563,11 @@ const SEED_THEMES: &[SeedTheme] = &[
             "aabfd9bbe0c12a3779641e7f7b43308f73550a755b00eed4699a1e6361c86ffb",
         ],
     },
+    SeedTheme {
+        name: "deep-blue.json",
+        body: include_str!("../../../docs/themes/deep-blue.json"),
+        prior_hashes: &[],
+    },
 ];
 
 /// Reconcile the on-disk Themes dir with the bundled reference
@@ -750,7 +755,7 @@ mod tests {
         // Both reference JSONs in docs/themes/ should deserialise
         // cleanly into a Theme — this is the contract that ships
         // alongside the docs.
-        for fname in ["glass-dark.json", "sepia.json"] {
+        for fname in ["glass-dark.json", "sepia.json", "deep-blue.json"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..").join("..").join("docs").join("themes").join(fname);
             let bytes = std::fs::read(&path)
@@ -791,6 +796,7 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n == "glass-dark.json"));
         assert!(names.iter().any(|n| n == "sepia.json"));
+        assert!(names.iter().any(|n| n == "deep-blue.json"));
     }
 
     #[test]

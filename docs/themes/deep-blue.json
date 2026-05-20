@@ -1,0 +1,86 @@
+{
+  "name": "Deep Blue",
+  "description": "Deep navy palette inspired by the VS Code Dark+ blue variant.",
+  "shell": {
+    "bg":          "#1b2440",
+    "panel":       "#222c4a",
+    "panel_alt":   "#283357",
+    "border":      "#34406b",
+    "border_alt":  "#2a345a",
+    "text":        "#d6dcf0",
+    "text_bright": "#f4f6ff",
+    "text_dim":    "#7d8ab3",
+    "accent":      "#5a8cff"
+  },
+  "disasm": {
+    "address":        "#7d8ab3",
+    "bytes":          "#5a6892",
+    "mnemonic":       "#7fb8ff",
+    "register":       "#b5c8ff",
+    "immediate":      "#f4b76a",
+    "address_op":     "#f5d98c",
+    "shift":          "#b8c0dc",
+    "condition":      "#c8a5ff",
+    "punct":          "#7d8ab3",
+    "comment":        "#7aae8a",
+    "symbol_header":  "#fff0a8",
+    "bb_separator":   "#34406b",
+    "plain":          "#d6dcf0"
+  },
+  "hex": {
+    "bytes":           "#5a6892",
+    "selected_bg":     "#5a8cff",
+    "field_bg":        "#243663",
+    "field_selection": "#3d5aa0",
+    "error_text":      "#ff8a8a",
+    "diff_tint":       "#1c4a3c80",
+    "selection_text":  "#ffffff"
+  },
+  "cfg": {
+    "block_exit":   "#3c2c3a",
+    "block_normal": "#2a345a",
+    "block_border": "#6a78a8"
+  },
+  "smali": {
+    "directive":     "#ffae7f",
+    "modifier":      "#c8a5ff",
+    "label":         "#ff9fcf",
+    "string":        "#b4e088",
+    "type_":         "#f5d98c",
+    "type_external": "#9a8a5a"
+  },
+  "state": {
+    "row_selected":     "#324070",
+    "committed_change": "#c8e8d4",
+    "committed_bg":     "#1c4a3c",
+    "committed_hover":  "#276652"
+  },
+  "modals": {
+    "overlay_light":    "#000000bb",
+    "overlay_dark":     "#000000cc",
+    "palette_selected": "#3d5aa0ff",
+    "palette_hover":    "#3d5aa0aa"
+  },
+  "errors": {
+    "icon":      "#ff7474",
+    "highlight": "#ff9090",
+    "severe":    "#ffa0a0"
+  },
+  "hovers": {
+    "standard": "#2e3a64",
+    "tab":      "#475590",
+    "delete":   "#2a3458"
+  },
+  "refs": {
+    "dex_ref":        "#b8cdff",
+    "xref_addr":      "#a8b2d4",
+    "edit_indicator": "#7fb8ff"
+  },
+  "window_tints": [
+    "#1b2440",
+    "#1e2a4a",
+    "#1e3040",
+    "#2a2444",
+    "#241e3a"
+  ]
+}

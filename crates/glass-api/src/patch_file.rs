@@ -47,13 +47,42 @@ use std::path::{Path, PathBuf};
 use crate::export::{EditMap, EditPatch};
 use glass_db::ArtifactId;
 
-pub const PATCH_FILE_VERSION: u32 = 1;
+/// File-format version. Bumped on incompatible additions.
+///
+/// v1: byte-level `edits` only.
+/// v2: adds `smali_edits` for typed DEX class rewrites. v1 files
+///     still parse (the new field defaults to empty); writers
+///     emit v2 unconditionally.
+pub const PATCH_FILE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchFile {
     pub version: u32,
     pub source_path: Option<PathBuf>,
     pub edits: Vec<PatchEntry>,
+    /// Typed smali-class rewrites. Each entry replaces the
+    /// matching class in the DEX identified by `artifact`. The
+    /// exporter re-emits the entire DEX via `DexFile::from_smali`
+    /// — see `export::SmaliEditMap`.
+    #[serde(default)]
+    pub smali_edits: Vec<SmaliPatchEntry>,
+}
+
+/// One typed smali class replacement.
+///
+/// `body` is the full smali text for the class (everything you'd
+/// get from `glass smali --class ...`). Parsed at export time via
+/// `smali::types::SmaliClass::from_smali`; a malformed body is
+/// rejected with a diagnostic rather than silently skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmaliPatchEntry {
+    /// 64-char hex artifact id of the DEX (`classes.dex` /
+    /// `classes2.dex` / …) that owns this class.
+    pub artifact: String,
+    /// JNI signature of the class — `Lcom/example/Foo;`.
+    pub class_jni: String,
+    /// Full smali body of the class.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +110,7 @@ impl Default for PatchFile {
             version: PATCH_FILE_VERSION,
             source_path: None,
             edits: Vec::new(),
+            smali_edits: Vec::new(),
         }
     }
 }
@@ -141,6 +171,61 @@ impl PatchFile {
         let before = self.edits.len();
         self.edits.retain(|e| !(e.artifact == artifact && e.vaddr == vaddr));
         self.edits.len() != before
+    }
+
+    /// Add or replace the smali entry for `(artifact, class_jni)`.
+    pub fn upsert_smali(&mut self, entry: SmaliPatchEntry) {
+        if let Some(slot) = self.smali_edits.iter_mut().find(|e| {
+            e.artifact == entry.artifact && e.class_jni == entry.class_jni
+        }) {
+            *slot = entry;
+        } else {
+            self.smali_edits.push(entry);
+        }
+    }
+
+    /// Remove the smali entry for `(artifact, class_jni)` if any.
+    pub fn remove_smali(&mut self, artifact: &str, class_jni: &str) -> bool {
+        let before = self.smali_edits.len();
+        self.smali_edits
+            .retain(|e| !(e.artifact == artifact && e.class_jni == class_jni));
+        self.smali_edits.len() != before
+    }
+
+    /// Build a [`SmaliEditMap`](crate::export::SmaliEditMap) by
+    /// parsing each body via `SmaliClass::from_smali`. Returns the
+    /// first parse / artifact-id error rather than skipping —
+    /// silently dropping a typed edit at export time would be
+    /// confusing.
+    pub fn to_smali_edit_map(&self) -> Result<crate::export::SmaliEditMap> {
+        let mut map: crate::export::SmaliEditMap = std::collections::HashMap::new();
+        for e in &self.smali_edits {
+            let aid = parse_artifact_id(&e.artifact).with_context(|| {
+                format!(
+                    "smali edit for {}: bad artifact id {:?}",
+                    e.class_jni, e.artifact
+                )
+            })?;
+            let class = smali::types::SmaliClass::from_smali(&e.body).map_err(|err| {
+                anyhow::anyhow!(
+                    "smali edit for {} on artifact {}: parse failed: {err:?}",
+                    e.class_jni,
+                    e.artifact
+                )
+            })?;
+            // Defend against the body declaring a different class
+            // than the entry advertises — without this check, a
+            // typo lets you silently overwrite the wrong class.
+            let body_jni = class.name.as_jni_type();
+            if body_jni != e.class_jni {
+                anyhow::bail!(
+                    "smali edit body declares class {body_jni:?} but entry says {:?}",
+                    e.class_jni
+                );
+            }
+            map.entry(aid).or_default().insert(e.class_jni.clone(), class);
+        }
+        Ok(map)
     }
 
     /// Build an `EditMap` (the export pipeline's input) from
@@ -238,6 +323,28 @@ pub fn schema() -> serde_json::Value {
                         "source_text": {
                             "type": "string",
                             "description": "What the user originally typed (e.g. 'mov w0, #1' or 'hello world'). Optional."
+                        }
+                    }
+                }
+            },
+            "smali_edits": {
+                "type": "array",
+                "description": "Typed smali class rewrites. Each entry replaces the matching class in the named DEX artifact at `export-patched` time.",
+                "items": {
+                    "type": "object",
+                    "required": ["artifact", "class_jni", "body"],
+                    "properties": {
+                        "artifact": {
+                            "type": "string",
+                            "description": "64-char hex DEX artifact id (`classes.dex` / `classes2.dex` / …)."
+                        },
+                        "class_jni": {
+                            "type": "string",
+                            "description": "JNI signature of the class, e.g. `Lcom/example/Foo;`. Must match the class declared in `body`."
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Full smali text for the class. Same shape `glass smali --class …` returns."
                         }
                     }
                 }

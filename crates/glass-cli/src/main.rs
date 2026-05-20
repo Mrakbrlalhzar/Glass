@@ -85,6 +85,25 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         Cmd::Smali { path, class } => {
             Some(verbs::smali(path.clone(), class.clone(), format))
         }
+        Cmd::SmaliSet { path, class, body, file, patches } => {
+            let source = match (body.clone(), file.clone()) {
+                (Some(s), None) => verbs::SmaliBodySource::Inline(s),
+                (None, Some(p)) => verbs::SmaliBodySource::File(p),
+                (None, None) => verbs::SmaliBodySource::Stdin,
+                (Some(_), Some(_)) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "--body and --file are mutually exclusive"
+                    )));
+                }
+            };
+            Some(verbs::smali_set(
+                path.clone(),
+                class.clone(),
+                source,
+                patches.clone(),
+                format,
+            ))
+        }
         Cmd::Methods { path, class } => {
             Some(verbs::methods(path.clone(), class.clone(), format))
         }
@@ -320,6 +339,28 @@ enum Cmd {
         /// Class — JNI (`Lcom/foo/Bar;`) or Java (`com.foo.Bar`).
         #[arg(long)]
         class: String,
+    },
+    /// Stage a typed rewrite of one DEX class. The body is the
+    /// full smali text — same shape `glass smali` returns.
+    /// Reuses the patch file used by `glass patch` so byte and
+    /// smali edits coexist; `glass export-patched` applies both.
+    SmaliSet {
+        path: PathBuf,
+        /// Class to replace — JNI (`Lcom/foo/Bar;`) or Java
+        /// (`com.foo.Bar`).
+        #[arg(long)]
+        class: String,
+        /// Inline smali body. Mutually exclusive with `--file`.
+        /// If neither is given, the body is read from stdin.
+        #[arg(long, conflicts_with = "file")]
+        body: Option<String>,
+        /// Path to a `.smali` file containing the body. Mutually
+        /// exclusive with `--body`.
+        #[arg(long, conflicts_with = "body")]
+        file: Option<PathBuf>,
+        /// Patch file to read / write. Created if absent.
+        #[arg(long)]
+        patches: PathBuf,
     },
     /// List methods declared by a class.
     Methods {
@@ -712,6 +753,7 @@ fn main() -> Result<()> {
         | Cmd::CallsFrom { .. }
         | Cmd::Classes { .. }
         | Cmd::Smali { .. }
+        | Cmd::SmaliSet { .. }
         | Cmd::Methods { .. }
         | Cmd::Fields { .. }
         | Cmd::MethodCalls { .. }

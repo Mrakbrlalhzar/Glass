@@ -94,6 +94,12 @@ impl Shell {
             colour_picker: None,
             disasm_edit: None,
             hex_edit: None,
+            class_decl_edit: None,
+            field_edit: None,
+            method_edit: None,
+            op_edit: None,
+            annotation_stack: None,
+            external_edit: None,
             changes_dialog_open: false,
             changes_dialog_confirm_abandon: false,
             export_status: None,
@@ -781,8 +787,13 @@ impl Shell {
                     );
                 }
             }
-            // SmaliClass: pre-built line cache.
-            TabKind::SmaliClass { .. } => {
+            // SmaliClass: pre-built line cache. If the user has
+            // staged a typed edit for this class, re-render from the
+            // modified `SmaliClass` rather than the original
+            // `bundle.bodies[leaf]` string. Renderer falls back to the
+            // pre-rendered body for unedited classes.
+            TabKind::SmaliClass { class_jni } => {
+                let class_jni = class_jni.clone();
                 let Some(leaf) = self.tabs.get(active).and_then(|t| {
                     bundle.resolve(&t.kind.to_state())
                 }) else {
@@ -790,28 +801,60 @@ impl Shell {
                 };
                 let tab = self.tabs.get_mut(active).unwrap();
                 if tab.lines.is_none() {
-                    let lines: Vec<SharedString> = bundle
-                        .bodies
-                        .get(leaf.0)
-                        .map(|s| {
-                            s.lines()
-                                .map(|l| SharedString::from(l.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    let edited_text = bundle
+                        .smali_classes
+                        .iter()
+                        .find_map(|((aid, jni), _)| {
+                            if jni == &class_jni {
+                                bundle
+                                    .smali_edits
+                                    .get(aid, jni)
+                                    .map(|e| e.modified.to_smali())
+                            } else {
+                                None
+                            }
+                        });
+                    let lines: Vec<SharedString> = if let Some(text) = edited_text {
+                        text.lines()
+                            .map(|l| SharedString::from(l.to_string()))
+                            .collect()
+                    } else {
+                        bundle
+                            .bodies
+                            .get(leaf.0)
+                            .map(|s| {
+                                s.lines()
+                                    .map(|l| SharedString::from(l.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
                     tab.scroll =
                         ListState::new(lines.len(), ListAlignment::Top, px(2000.));
                     tab.lines = Some(Arc::new(lines));
                 }
                 // Consume any pending deep-link line target now that
                 // the body's line count is known (so scroll-to clamps
-                // correctly).
+                // correctly). An explicit deep-link target wins over
+                // the scroll-restore snapshot — the user asked to
+                // jump.
                 if let Some(line_no) = tab.pending_smali_scroll_line.take() {
                     let len = tab.lines.as_ref().map(|v| v.len()).unwrap_or(0);
                     if line_no < len {
                         scroll_into_view_with_context(&tab.scroll, line_no);
                         tab.selected_row = Some(line_no);
                     }
+                    // A deep-link supersedes any prior restore.
+                    tab.pending_scroll_restore = None;
+                } else if let Some(offset) = tab.pending_scroll_restore.take() {
+                    // Clamp item_ix to the new line count so a
+                    // shortened body doesn't scroll past the end.
+                    let len = tab.lines.as_ref().map(|v| v.len()).unwrap_or(0);
+                    let clamped_ix = offset.item_ix.min(len.saturating_sub(1));
+                    tab.scroll.scroll_to(ListOffset {
+                        item_ix: clamped_ix,
+                        offset_in_item: offset.offset_in_item,
+                    });
                 }
             }
             // CFG: the data is built lazily on first paint inside
@@ -1285,6 +1328,12 @@ impl Shell {
                 glass_db::AnnotationKey::MethodLine(c, m, line) => {
                     idx.at_method_line(&format!("{c}->{m}"), *line)
                 }
+                glass_db::AnnotationKey::OpIndex {
+                    class_jni, method_decl, op_index,
+                } => idx.at_op_index(
+                    &format!("{class_jni}->{method_decl}"),
+                    *op_index,
+                ),
             })
             .cloned()
             .unwrap_or_default();
@@ -1364,21 +1413,85 @@ impl Shell {
             },
         ];
         if let Some(artifact) = dex_artifact {
-            // MethodLine keys carry the line offset relative to
-            // the `.method` line — line_offset == 0 targets the
-            // header itself (the natural fallback for native
-            // methods, which have no body).
-            let key = glass_db::AnnotationKey::MethodLine(
-                class_jni.clone(),
-                method_decl.clone(),
-                line_offset,
-            );
-            let existing = self
-                .bundle()
-                .and_then(|b| b.annotations.get(&artifact))
-                .and_then(|idx| idx.at_method_line(&method_key, line_offset))
-                .cloned()
-                .unwrap_or_default();
+            // Translate the row's line offset into an op index
+            // through the parsed SmaliMethod. Line offset 0 is
+            // the `.method` header — keep that as a Method key
+            // (no op). Anything else maps to an op via the
+            // shared `line_offset_to_op_index` helper.
+            //
+            // Falls back to `MethodLine` only if we couldn't
+            // find the SmaliMethod (e.g. a class that lifted
+            // raw but didn't parse). In practice that's rare
+            // and the fallback at least preserves the original
+            // semantics for the duration of this session.
+            let (key, existing) = if line_offset == 0 {
+                let k = glass_db::AnnotationKey::Method(
+                    class_jni.clone(),
+                    method_decl.clone(),
+                );
+                let e = self
+                    .bundle()
+                    .and_then(|b| b.annotations.get(&artifact))
+                    .and_then(|idx| idx.at_method(&method_key))
+                    .cloned()
+                    .unwrap_or_default();
+                (k, e)
+            } else {
+                let op_index = self
+                    .bundle()
+                    .and_then(|b| {
+                        b.smali_classes.iter().find_map(|((_aid, jni), c)| {
+                            if jni == &class_jni {
+                                c.methods.iter().find(|m| {
+                                    format!(
+                                        "{}{}",
+                                        m.name,
+                                        m.signature.to_jni()
+                                    ) == method_decl
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .and_then(|m| {
+                        crate::annotations::line_offset_to_op_index(m, line_offset)
+                    });
+                match op_index {
+                    Some(op_index) => {
+                        let k = glass_db::AnnotationKey::OpIndex {
+                            class_jni: class_jni.clone(),
+                            method_decl: method_decl.clone(),
+                            op_index,
+                        };
+                        let e = self
+                            .bundle()
+                            .and_then(|b| b.annotations.get(&artifact))
+                            .and_then(|idx| {
+                                idx.at_op_index(&method_key, op_index)
+                            })
+                            .cloned()
+                            .unwrap_or_default();
+                        (k, e)
+                    }
+                    None => {
+                        let k = glass_db::AnnotationKey::MethodLine(
+                            class_jni.clone(),
+                            method_decl.clone(),
+                            line_offset,
+                        );
+                        let e = self
+                            .bundle()
+                            .and_then(|b| b.annotations.get(&artifact))
+                            .and_then(|idx| {
+                                idx.at_method_line(&method_key, line_offset)
+                            })
+                            .cloned()
+                            .unwrap_or_default();
+                        (k, e)
+                    }
+                }
+            };
             let comment_label = if existing.comment.is_some() {
                 "Edit comment…"
             } else {
@@ -1472,10 +1585,34 @@ impl Shell {
         ];
         if !existing.is_empty() {
             items.push(ContextMenuItem::ClearAnnotation {
-                artifact,
+                artifact: artifact.clone(),
                 key,
                 label: SharedString::from(format!("Clear annotation ({label})")),
             });
+        }
+        // If the active class has a staged structural edit, offer
+        // a Revert. Walk smali_classes to find the matching artifact
+        // — there's typically just one entry per jni, but APKs can
+        // legally ship the same class in multiple DEX files.
+        if let Some(bundle) = self.bundle() {
+            let revert_targets: Vec<glass_db::ArtifactId> = bundle
+                .smali_classes
+                .iter()
+                .filter_map(|((aid, jni), _)| {
+                    if jni == &class_jni && bundle.smali_edits.get(aid, jni).is_some() {
+                        Some(aid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for aid in revert_targets {
+                items.push(ContextMenuItem::RevertSmaliClassEdit {
+                    artifact: aid,
+                    class_jni: class_jni.clone(),
+                    label: SharedString::from(format!("Revert class edit ({label})")),
+                });
+            }
         }
         self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
@@ -1559,9 +1696,10 @@ impl Shell {
     /// in new tab; both navigate to the method's smali. (Smali tabs
     /// dedupe by class so "new tab" reuses an existing class tab —
     /// see the comment in `activate_follow`.)
-    /// Right-click on a `.field` line in a smali listing — shows
-    /// "References to field" only. (Fields have no follow target;
-    /// they're just storage locations.)
+    /// Right-click on a `.field` line in a smali listing.
+    /// Always shows "References to field"; when the active class
+    /// has a staged edit that touches this specific field, adds
+    /// "Revert field edit" too.
     pub(crate) fn open_field_context_menu(
         &mut self,
         field_ref: String,
@@ -1569,10 +1707,127 @@ impl Shell {
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let label = SharedString::from(display);
-        let items = vec![ContextMenuItem::RefsToField { field_ref, label }];
+        let label = SharedString::from(display.clone());
+        let mut items =
+            vec![ContextMenuItem::RefsToField { field_ref: field_ref.clone(), label }];
+        // Field is edited if it appears in `edited_fields` for
+        // the artifact that owns the active class. We need the
+        // artifact id, the field's (name, sig), and a way to
+        // know that the class is staged at all.
+        if let Some((artifact, class_jni, name, sig)) =
+            self.resolve_edited_field(&field_ref)
+        {
+            items.push(ContextMenuItem::RevertSmaliFieldEdit {
+                artifact,
+                class_jni,
+                field_name: name,
+                field_signature_jni: sig,
+                label: SharedString::from(format!("Revert field edit ({display})")),
+            });
+        }
         self.context_menu = Some(ContextMenuState { position, items });
         cx.notify();
+    }
+
+    /// Right-click on a `.method` header in a smali listing.
+    /// Shows the existing method options (callers + call-graph)
+    /// plus, when the active class has a staged edit that
+    /// touches this method, "Revert method edit".
+    pub(crate) fn open_method_header_context_menu(
+        &mut self,
+        method_name: String,
+        method_signature_jni: String,
+        display: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let label = SharedString::from(display.clone());
+        let Some(active) = self.active_tab else { return };
+        let class_jni = match self.tabs.get(active).map(|t| &t.kind) {
+            Some(TabKind::SmaliClass { class_jni }) => class_jni.clone(),
+            _ => return,
+        };
+        // Pre-fetch the artifact so we can decide whether to
+        // offer Revert. The other menu items don't need it.
+        let artifact = self.bundle().and_then(|b| {
+            b.smali_classes.keys().find_map(|(aid, jni)| {
+                if jni == &class_jni { Some(aid.clone()) } else { None }
+            })
+        });
+        let mut items: Vec<ContextMenuItem> = Vec::new();
+        // Reuse the existing dex-callgraph / callers-of-method
+        // entry points so the "Show call graph" menu item stays
+        // available.
+        let method_decl =
+            format!("{method_name}{method_signature_jni}");
+        items.push(ContextMenuItem::ShowDexCallGraph {
+            class_jni: class_jni.clone(),
+            method_decl: method_decl.clone(),
+            label: label.clone(),
+        });
+        items.push(ContextMenuItem::CallersOfMethod {
+            method_key: format!("{class_jni}->{method_decl}"),
+            label: label.clone(),
+        });
+        if let Some(artifact) = artifact {
+            if self
+                .bundle()
+                .and_then(|b| {
+                    b.smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .map(|c| {
+                            b.smali_edits
+                                .edited_methods(&artifact, &class_jni, c)
+                                .into_iter()
+                                .any(|(n, s)| {
+                                    n == method_name && s == method_signature_jni
+                                })
+                        })
+                })
+                .unwrap_or(false)
+            {
+                items.push(ContextMenuItem::RevertSmaliMethodEdit {
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    label: SharedString::from(format!(
+                        "Revert method edit ({display})"
+                    )),
+                });
+            }
+        }
+        self.context_menu = Some(ContextMenuState { position, items });
+        cx.notify();
+    }
+
+    /// Given a `field_ref` like `Lcom/Foo;->count:I`, find the
+    /// owning artifact and return `(artifact, class_jni, name, sig)`
+    /// when that field is currently edited. Returns `None` if
+    /// the class isn't loaded, the ref doesn't parse, or the
+    /// field isn't in the edited set.
+    fn resolve_edited_field(
+        &self,
+        field_ref: &str,
+    ) -> Option<(glass_db::ArtifactId, String, String, String)> {
+        let (class_jni, rest) = field_ref.split_once("->")?;
+        let (name, sig) = rest.split_once(':')?;
+        let bundle = self.bundle()?;
+        let (artifact, original) =
+            bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+                if jni == class_jni { Some((aid.clone(), c.clone())) } else { None }
+            })?;
+        let edited = bundle
+            .smali_edits
+            .edited_fields(&artifact, class_jni, &original);
+        if edited
+            .into_iter()
+            .any(|(n, s)| n == name && s == sig)
+        {
+            Some((artifact, class_jni.to_string(), name.to_string(), sig.to_string()))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn open_smali_link_context_menu(
@@ -1673,6 +1928,39 @@ impl Shell {
             ContextMenuItem::RevertDisasmEdit { artifact, vaddr, .. } => {
                 self.revert_disasm_edit(artifact, vaddr, cx);
             }
+            ContextMenuItem::RevertSmaliClassEdit { artifact, class_jni, .. } => {
+                self.revert_smali_class_edit(artifact, class_jni, cx);
+            }
+            ContextMenuItem::RevertSmaliFieldEdit {
+                artifact,
+                class_jni,
+                field_name,
+                field_signature_jni,
+                ..
+            } => {
+                self.revert_smali_field_edit(
+                    artifact,
+                    class_jni,
+                    field_name,
+                    field_signature_jni,
+                    cx,
+                );
+            }
+            ContextMenuItem::RevertSmaliMethodEdit {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                ..
+            } => {
+                self.revert_smali_method_edit(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    cx,
+                );
+            }
         }
     }
 
@@ -1695,6 +1983,9 @@ impl Shell {
             glass_db::AnnotationKey::MethodLine(c, m, line) => {
                 format!("{c}->{m}#{line}")
             }
+            glass_db::AnnotationKey::OpIndex {
+                class_jni, method_decl, op_index,
+            } => format!("{class_jni}->{method_decl}#op{op_index}"),
         };
         let chip = match facet {
             crate::AnnotationFacet::Rename => format!("Rename {key_label}"),
@@ -2348,6 +2639,46 @@ impl Shell {
                 let target_line = header_line + line_offset as usize;
                 self.goto_smali_method(leaf, target_line, cx);
             }
+            glass_db::AnnotationKey::OpIndex {
+                class_jni,
+                method_decl,
+                op_index,
+            } => {
+                // Resolve the class's leaf + the method header line,
+                // then render the method and walk to find the line
+                // offset where op `op_index` lands.
+                let method_key = format!("{class_jni}->{method_decl}");
+                let Some((leaf, header_line)) =
+                    bundle.method_lines.get(&method_key).copied()
+                else {
+                    if let Some(leaf) = bundle.resolve(&glass_db::TabState::SmaliClass {
+                        class_jni: class_jni.clone(),
+                        scroll_line: 0,
+                    }) {
+                        self.open_leaf(leaf, cx);
+                    }
+                    return;
+                };
+                // Find the SmaliMethod so we can map op index back
+                // to a line offset.
+                let target_line = bundle.smali_classes.iter().find_map(
+                    |((_aid, jni), c)| {
+                        if jni != &class_jni {
+                            return None;
+                        }
+                        let m = c.methods.iter().find(|m| {
+                            format!("{}{}", m.name, m.signature.to_jni())
+                                == method_decl
+                        })?;
+                        crate::annotations::op_index_to_line_offset(m, op_index)
+                            .map(|off| header_line + off as usize)
+                    },
+                );
+                match target_line {
+                    Some(line) => self.goto_smali_method(leaf, line, cx),
+                    None => self.open_leaf(leaf, cx),
+                }
+            }
         }
     }
 
@@ -2802,6 +3133,96 @@ impl Shell {
     /// the user expects a fresh tab.
     /// Open (or focus) the SmaliClass tab for `target_leaf` and scroll
     /// it so `line_no` is the selected, near-top row.
+    /// Jump to the smali tab for `(artifact, class_jni)` and close
+    /// the changes dialog. The artifact id isn't strictly needed —
+    /// the bundle's leaf list keys on jni only — but the caller has
+    /// it from the staged edit and we keep the same shape as
+    /// `revert_smali_class_edit` for symmetry.
+    pub(crate) fn navigate_to_smali_class(
+        &mut self,
+        _artifact: glass_db::ArtifactId,
+        class_jni: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bundle) = self.bundle() else { return };
+        let leaf = bundle
+            .resolve(&glass_db::TabState::SmaliClass {
+                class_jni: class_jni.clone(),
+                scroll_line: 0,
+            });
+        let Some(leaf) = leaf else { return };
+        self.open_leaf(leaf, cx);
+        if let Some(active) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(active) {
+                tab.selected_row = Some(0);
+                tab.pending_smali_scroll_line = Some(0);
+            }
+        }
+        self.changes_dialog_open = false;
+        cx.notify();
+        self.save_state();
+    }
+
+    /// Navigate to a specific field or method inside a smali
+    /// class. Opens the class's tab and scrolls so the matching
+    /// `.field` / `.method` line is the selected row. Falls
+    /// back to opening the class at line 0 if no matching member
+    /// is found (e.g. the class lines haven't been built yet).
+    pub(crate) fn navigate_to_smali_member(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        kind: SmaliMemberKind,
+        cx: &mut Context<Self>,
+    ) {
+        // Reuse the existing open path to ensure the tab exists
+        // and tab.lines is populated.
+        self.navigate_to_smali_class(artifact, class_jni, cx);
+        let Some(active) = self.active_tab else { return };
+        // Find the matching `.field` or `.method` row in the
+        // freshly-rendered line cache. If lines aren't built yet
+        // (first paint), `ensure_active_tab_lines` will fill
+        // them shortly — leaving row 0 selected is fine for
+        // that frame.
+        let Some(tab) = self.tabs.get(active) else { return };
+        let Some(lines) = tab.lines.as_ref() else { return };
+        let target_row = lines.iter().position(|line| {
+            let t = line.trim_start();
+            match &kind {
+                SmaliMemberKind::Field { name, signature } => {
+                    if !t.starts_with(".field ") {
+                        return false;
+                    }
+                    // `name:sig` token must appear last on the line
+                    // (before any `= initial`).
+                    let head = match t.find(" = ") {
+                        Some(eq) => &t[..eq],
+                        None => t,
+                    };
+                    head.split_whitespace().last().map_or(false, |tok| {
+                        tok == format!("{name}:{signature}").as_str()
+                    })
+                }
+                SmaliMemberKind::Method { name, signature } => {
+                    if !t.starts_with(".method ") {
+                        return false;
+                    }
+                    // `nameSig` token must appear last on the line.
+                    let token = t.split_whitespace().last().unwrap_or("");
+                    token == format!("{name}{signature}")
+                }
+            }
+        });
+        if let Some(row) = target_row {
+            if let Some(tab) = self.tabs.get_mut(active) {
+                tab.selected_row = Some(row);
+                tab.pending_smali_scroll_line = Some(row);
+            }
+            cx.notify();
+            self.save_state();
+        }
+    }
+
     pub(crate) fn goto_smali_method(
         &mut self,
         target_leaf: LeafId,
@@ -3665,6 +4086,131 @@ impl Shell {
         }
     }
 
+    // ---- Class-declaration popover ----------------------------------
+
+    /// If the active smali tab's selected row is part of the class
+    /// declaration (`.class`, `.super`, `.implements`, `.source`),
+    /// open the popover and return `true`. Otherwise return `false`
+    /// so the caller can try another Enter behaviour.
+    pub(crate) fn smali_open_class_decl_at_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+            return false;
+        }
+        let Some(row) = tab.selected_row else { return false };
+        let Some(lines) = tab.lines.as_ref() else { return false };
+        let mask = crate::class_decl_popover::class_decl_row_mask(lines.as_slice());
+        if !mask.get(row).copied().unwrap_or(false) {
+            return false;
+        }
+        self.open_class_decl_edit(cx);
+        true
+    }
+
+    /// Open the class-decl editor for the currently-active smali
+    /// tab. Looks up the typed `SmaliClass` (preferring any staged
+    /// edit) and seeds the popover state with its current values.
+    pub(crate) fn open_class_decl_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(bundle) = self.bundle() else { return };
+        let Some(active) = self.active_tab else { return };
+        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
+            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        // Find the (artifact, jni) pair that owns this class — we
+        // index `smali_classes` by both, so walk to recover the
+        // artifact id for the picked jni.
+        let owner = bundle
+            .smali_classes
+            .iter()
+            .find_map(|((aid, jni), c)| {
+                if jni == &class_jni {
+                    Some((aid.clone(), c.clone()))
+                } else {
+                    None
+                }
+            });
+        let Some((artifact, original)) = owner else { return };
+        // If an edit is staged, seed from that instead so re-opening
+        // shows the in-progress edits.
+        let class = bundle
+            .smali_edits
+            .get(&artifact, &class_jni)
+            .map(|e| e.modified.clone())
+            .unwrap_or(original);
+        self.class_decl_edit = Some(
+            crate::class_decl_popover::ClassDeclEditState::from_class(artifact, class_jni, &class),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_class_decl_edit(&mut self, cx: &mut Context<Self>) {
+        if self.class_decl_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Save the in-progress class-decl form into the bundle's
+    /// `smali_edits` registry. Invalidates the active smali tab's
+    /// line cache so the next paint re-renders from the modified
+    /// class.
+    pub(crate) fn commit_class_decl_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.class_decl_edit.take() else { return };
+        if state.validate().is_err() {
+            // Validation should already gate the Save button, but
+            // a key-route can also reach here. Put the state back
+            // and notify so the validation message shows.
+            self.class_decl_edit = Some(state);
+            cx.notify();
+            return;
+        }
+        let artifact = state.artifact.clone();
+        let class_jni = state.class_jni.clone();
+        // Build the modified SmaliClass from the original. We have
+        // to pull `original` out of `bundle.smali_classes` while
+        // we hold an immutable view, then transition to a mutable
+        // borrow to stage the edit. Clone to avoid the borrow split.
+        let modified = {
+            let Some(bundle) = self.bundle() else {
+                self.class_decl_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            let key = (artifact.clone(), class_jni.clone());
+            let Some(original) = bundle.smali_classes.get(&key) else {
+                self.class_decl_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            state.build_modified(original)
+        };
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.smali_edits.insert(crate::smali_edits::SmaliEdit {
+                key: crate::smali_edits::SmaliEditKey {
+                    artifact,
+                    class_jni: class_jni.clone(),
+                },
+                modified,
+            });
+        }
+        // Invalidate the active smali tab's line cache so the
+        // next paint re-renders from the modified class.
+        if let Some(active) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(active) {
+                if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+                    tab.lines = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
     // ---- Changes dialog ----------------------------------------------
 
     pub(crate) fn toggle_changes_dialog(&mut self, cx: &mut Context<Self>) {
@@ -3695,9 +4241,21 @@ impl Shell {
     pub(crate) fn abandon_all_disasm_edits(&mut self, cx: &mut Context<Self>) {
         if let Some(b) = self.bundle_mut() {
             b.edits.clear();
+            b.smali_edits.clear();
         }
         self.changes_dialog_confirm_abandon = false;
         self.changes_dialog_open = false;
+        // Smali tabs cache their rendered lines — invalidate every
+        // smali tab so the next paint re-renders from the original
+        // class body. Snapshot scroll first so the user lands
+        // where they were once the lines are rebuilt.
+        for tab in &mut self.tabs {
+            if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+                tab.pending_scroll_restore =
+                    Some(tab.scroll.logical_scroll_top());
+                tab.lines = None;
+            }
+        }
         cx.notify();
     }
 
@@ -3713,13 +4271,1840 @@ impl Shell {
         cx.notify();
     }
 
+    /// Drop the staged smali-class edit for `(artifact, class_jni)`
+    /// and invalidate any open smali tab for the same class so the
+    /// next paint re-renders from the original body.
+    pub(crate) fn revert_smali_class_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(b) = self.bundle_mut() {
+            b.smali_edits.remove(&artifact, &class_jni);
+        }
+        for tab in &mut self.tabs {
+            if let TabKind::SmaliClass { class_jni: jni } = &tab.kind {
+                if jni == &class_jni {
+                    tab.pending_scroll_restore =
+                        Some(tab.scroll.logical_scroll_top());
+                    tab.lines = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Revert a single field's staged changes. Restores that
+    /// field to its original lifted version inside the staged
+    /// class. If the result happens to equal the original class
+    /// in full, the class-level staged edit is dropped entirely.
+    pub(crate) fn revert_smali_field_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        field_name: String,
+        field_signature_jni: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.revert_member_edit(
+            artifact,
+            class_jni,
+            cx,
+            |original, modified| {
+                let Some(orig_field) = original.fields.iter().find(|f| {
+                    f.name == field_name
+                        && f.signature.to_jni() == field_signature_jni
+                }) else {
+                    return;
+                };
+                if let Some(slot) = modified.fields.iter_mut().position(|f| {
+                    f.name == field_name
+                        && f.signature.to_jni() == field_signature_jni
+                }) {
+                    modified.fields[slot] = orig_field.clone();
+                }
+            },
+        );
+    }
+
+    /// Revert a single method's staged changes. Symmetric to
+    /// `revert_smali_field_edit`.
+    pub(crate) fn revert_smali_method_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.revert_member_edit(
+            artifact,
+            class_jni,
+            cx,
+            |original, modified| {
+                let Some(orig_method) = original.methods.iter().find(|m| {
+                    m.name == method_name
+                        && m.signature.to_jni() == method_signature_jni
+                }) else {
+                    return;
+                };
+                if let Some(slot) = modified.methods.iter_mut().position(|m| {
+                    m.name == method_name
+                        && m.signature.to_jni() == method_signature_jni
+                }) {
+                    modified.methods[slot] = orig_method.clone();
+                }
+            },
+        );
+    }
+
+    /// Shared revert helper for fields and methods. Takes a
+    /// closure that mutates the staged class to roll back one
+    /// member, then either re-stages the trimmed class or drops
+    /// the class edit entirely when it becomes a no-op.
+    fn revert_member_edit<F>(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        cx: &mut Context<Self>,
+        mutate: F,
+    )
+    where
+        F: FnOnce(&smali::types::SmaliClass, &mut smali::types::SmaliClass),
+    {
+        let (original, mut modified) = {
+            let Some(bundle) = self.bundle() else { return };
+            let Some(original) = bundle
+                .smali_classes
+                .get(&(artifact.clone(), class_jni.clone()))
+                .cloned()
+            else {
+                return;
+            };
+            let modified = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .unwrap_or_else(|| original.clone());
+            (original, modified)
+        };
+        mutate(&original, &mut modified);
+        // If the result is identity-equal to the original (via
+        // writer output, same trick the class-decl tint uses),
+        // drop the edit entirely. Otherwise re-stage.
+        if original.to_smali() == modified.to_smali() {
+            self.revert_smali_class_edit(artifact, class_jni, cx);
+            return;
+        }
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    // ---- Field popover -------------------------------------------------
+
+    /// Enter-on-row entry point. If the selected row in the active
+    /// smali tab is a `.field` line, opens the field popover and
+    /// returns `true` so the caller short-circuits the normal Enter
+    /// chain.
+    pub(crate) fn smali_open_field_at_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+            return false;
+        }
+        let Some(row) = tab.selected_row else { return false };
+        let line = tab
+            .lines
+            .as_ref()
+            .and_then(|v| v.get(row))
+            .cloned();
+        let Some(line) = line else { return false };
+        if !crate::field_popover::line_is_field_decl(line.as_ref()) {
+            return false;
+        }
+        self.open_field_edit_for_line(line.as_ref(), cx)
+    }
+
+    /// Double-click / Enter handler called once we already know the
+    /// row text is a `.field` line. Parses the field name +
+    /// signature out of the line text to identify which field in
+    /// the active class to open. Returns whether the popover opened.
+    pub(crate) fn open_field_edit_for_line(
+        &mut self,
+        line: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(bundle) = self.bundle() else { return false };
+        let Some(active) = self.active_tab else { return false };
+        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
+            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        // Recover (name, signature) from the `.field` line —
+        // shape is `.field <mods> <name>:<sig>[ = <init>]`.
+        let Some((field_name, field_sig)) = parse_field_decl_line(line) else {
+            return false;
+        };
+        // Find the owning artifact + class. Prefer the staged
+        // edit so re-opening shows in-progress edits.
+        let owner = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+            if jni == &class_jni {
+                Some((aid.clone(), c.clone()))
+            } else {
+                None
+            }
+        });
+        let Some((artifact, original)) = owner else { return false };
+        let class = bundle
+            .smali_edits
+            .get(&artifact, &class_jni)
+            .map(|e| e.modified.clone())
+            .unwrap_or(original);
+        let field = class.fields.iter().find(|f| {
+            f.name == field_name && f.signature.to_jni() == field_sig
+        });
+        let Some(field) = field else { return false };
+        self.field_edit = Some(crate::field_popover::FieldEditState::from_field(
+            artifact, class_jni, &class, field,
+        ));
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn cancel_field_edit(&mut self, cx: &mut Context<Self>) {
+        if self.field_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Save the in-progress field form into the bundle's
+    /// `smali_edits` registry. Replaces the matching field on a
+    /// clone of the parent class; if a class edit already exists,
+    /// the new field overlay is layered on top of it.
+    pub(crate) fn commit_field_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.field_edit.take() else { return };
+        if state.validate().is_err() {
+            self.field_edit = Some(state);
+            cx.notify();
+            return;
+        }
+        let artifact = state.artifact.clone();
+        let class_jni = state.class_jni.clone();
+        let modified = {
+            let Some(bundle) = self.bundle() else {
+                self.field_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            // Start from the staged class if any, else the original.
+            let base = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .or_else(|| {
+                    bundle
+                        .smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .cloned()
+                });
+            let Some(base) = base else {
+                self.field_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            match state.build_modified(&base) {
+                Some(c) => c,
+                None => {
+                    self.field_edit = Some(state);
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.smali_edits.insert(crate::smali_edits::SmaliEdit {
+                key: crate::smali_edits::SmaliEditKey {
+                    artifact,
+                    class_jni: class_jni.clone(),
+                },
+                modified,
+            });
+        }
+        if let Some(active) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(active) {
+                if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+                    tab.lines = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    // ---- Per-op inline editor -----------------------------------------
+
+    /// Enter-on-row entry point. Opens the per-op editor when
+    /// the selected row sits inside a method body (not on the
+    /// `.method` header itself — that's the method-header
+    /// popover's territory). Returns `true` to short-circuit
+    /// the normal Enter chain.
+    pub(crate) fn smali_open_op_edit_at_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+            return false;
+        }
+        let Some(row) = tab.selected_row else { return false };
+        self.open_op_edit_for_row(row, cx)
+    }
+
+    /// Open the inline op editor on `row_index` in the active
+    /// smali tab. Returns whether it opened — `false` if the row
+    /// isn't inside a method body, the method can't be resolved,
+    /// or no class is loaded.
+    pub(crate) fn open_op_edit_for_row(
+        &mut self,
+        row_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.op_edit.is_some() {
+            // Already editing — don't stack edits.
+            return false;
+        }
+        let Some(active) = self.active_tab else { return false };
+        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
+            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        let Some(lines) = tab.lines.as_ref() else { return false };
+        let Some(line_text) = lines.get(row_index).cloned() else { return false };
+        // Find the enclosing `.method` row. If the user clicked
+        // the header itself, defer to the method-header popover
+        // by returning false.
+        let mut header_row = None;
+        for j in (0..=row_index).rev() {
+            let Some(l) = lines.get(j) else { continue };
+            let t = l.trim_start();
+            if t.starts_with(".method ") {
+                header_row = Some(j);
+                break;
+            }
+            if t.starts_with(".end method") {
+                // Past the previous method's tail — not in a body.
+                return false;
+            }
+        }
+        let Some(header_row) = header_row else { return false };
+        if row_index == header_row {
+            return false;
+        }
+        // Don't open an editor on `.end method` — that line is
+        // structural; the user can use the method popover or the
+        // external editor for big changes.
+        if line_text.trim_start().starts_with(".end method") {
+            return false;
+        }
+        let line_offset_within_method = row_index - header_row;
+        // Resolve the artifact + (name, sig) of the method via
+        // the row's scope mask. Cheap to recompute here so we
+        // don't have to thread the mask through the call.
+        let scope = crate::smali_row_scope::compute(lines.as_slice());
+        let Some(crate::smali_row_scope::RowScope::Method { name, signature }) =
+            scope.get(row_index)
+        else {
+            return false;
+        };
+        let method_name = name.clone();
+        let method_signature_jni = signature.clone();
+        // Recover the artifact id from `smali_classes`.
+        let Some(bundle) = self.bundle() else { return false };
+        let Some(artifact) = bundle.smali_classes.keys().find_map(|(aid, jni)| {
+            if jni == &class_jni { Some(aid.clone()) } else { None }
+        }) else {
+            return false;
+        };
+        let initial = line_text.trim_start_matches(['\t', ' ']).to_string();
+        self.op_edit = Some(crate::op_editor::OpEditState {
+            artifact,
+            class_jni,
+            method_name,
+            method_signature_jni,
+            row_index,
+            line_offset_within_method,
+            is_new_line: false,
+            input: crate::text_input::TextInput::from_text(initial),
+            error: None,
+            suggestions: Vec::new(),
+            suggestion_selected: 0,
+        });
+        cx.notify();
+        self.refresh_op_edit_suggestions(cx);
+        true
+    }
+
+    pub(crate) fn cancel_op_edit(&mut self, cx: &mut Context<Self>) {
+        if self.op_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Common path for Enter (replace in place) and Cmd-Enter
+    /// (insert below). `insert_after` distinguishes the two.
+    /// Shift every `OpIndex` annotation on `(artifact, class,
+    /// method_decl)` whose `op_index >= shift_from` by `delta`.
+    /// Used by the per-op editor when inserting or deleting an
+    /// op shifts later ops' indices.
+    ///
+    /// Persists through `glass_db` and refreshes the in-memory
+    /// index for the artifact in one go.
+    fn shift_op_index_annotations(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        method_decl: &str,
+        shift_from: u32,
+        delta: i64,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(db) = self.db_ref() else { return };
+        let Ok(entries) = db.load_annotations(artifact) else { return };
+        for (key, ann) in entries {
+            if let glass_db::AnnotationKey::OpIndex {
+                class_jni: ck,
+                method_decl: mk,
+                op_index,
+            } = &key
+            {
+                if ck != class_jni || mk != method_decl || *op_index < shift_from {
+                    continue;
+                }
+                let new_idx_i64 = *op_index as i64 + delta;
+                if new_idx_i64 < 0 {
+                    // Deletion swallowed the slot — drop the
+                    // annotation entirely.
+                    db.clear_annotation(artifact.clone(), key);
+                    continue;
+                }
+                let new_idx = new_idx_i64 as u32;
+                let new_key = glass_db::AnnotationKey::OpIndex {
+                    class_jni: ck.clone(),
+                    method_decl: mk.clone(),
+                    op_index: new_idx,
+                };
+                // Order matters: clear old before set new, in
+                // case shift collapses two distinct keys into the
+                // same one (shouldn't happen with a single
+                // insertion, but cheap to be safe).
+                db.clear_annotation(artifact.clone(), key);
+                db.set_annotation(artifact.clone(), new_key, ann);
+            }
+        }
+        let _ = db.flush();
+        // Rebuild this artifact's in-memory index from the
+        // freshly-updated DB so the smali tab re-renders with
+        // the right dots / colours.
+        let _ = self.refresh_artifact_annotations(artifact);
+    }
+
+    fn finish_op_edit(&mut self, insert_after: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.op_edit.as_ref() else { return };
+        let artifact = state.artifact.clone();
+        let class_jni = state.class_jni.clone();
+        let method_name = state.method_name.clone();
+        let method_signature_jni = state.method_signature_jni.clone();
+        let line_offset = state.line_offset_within_method;
+        let row_index = state.row_index;
+        let new_line = state.input.text().to_string();
+        // Locate the original method on the staged-or-original
+        // class, splice the user's line in, round-trip via a
+        // synthetic class, then write the new ops back onto the
+        // real class.
+        let mut staged = match self.staged_or_original_class(&artifact, &class_jni) {
+            Some(c) => c,
+            None => return,
+        };
+        let method_idx = match staged.methods.iter().position(|m| {
+            m.name == method_name
+                && m.signature.to_jni() == method_signature_jni
+        }) {
+            Some(i) => i,
+            None => return,
+        };
+        let method_text = staged.methods[method_idx].to_string();
+        let new_body = crate::op_editor::splice_method_body(
+            &method_text,
+            line_offset,
+            &new_line,
+            insert_after,
+        );
+        let wrapper = crate::op_editor::wrap_in_synthetic_class(&new_body, &class_jni);
+        let parsed = match glass_api::parse_smali_class(&wrapper) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_op_edit_error(format!("{e:#}"), cx);
+                return;
+            }
+        };
+        // The synthetic class contains exactly one method.
+        let Some(new_method) = parsed.methods.into_iter().next() else {
+            self.set_op_edit_error(
+                "parsed body had no methods (smali parser quirk?)".to_string(),
+                cx,
+            );
+            return;
+        };
+        // Preserve the original method's identifying metadata so
+        // subsequent lookups by (name, signature) still resolve.
+        let original = staged.methods[method_idx].clone();
+        let old_op_count = original.ops.len();
+        let new_op_count = new_method.ops.len();
+        let method_decl = format!("{}{}", original.name, original.signature.to_jni());
+        // Locate the op the edit landed on *before* we move
+        // `original` into the assignment below — we need its
+        // unchanged shape to map the user's line offset back
+        // to an op index.
+        let edited_op_index = crate::annotations::line_offset_to_op_index(
+            &original,
+            line_offset as u32,
+        )
+        .unwrap_or(0);
+        staged.methods[method_idx] = smali::types::SmaliMethod {
+            name: original.name,
+            modifiers: original.modifiers,
+            constructor: original.constructor,
+            signature: original.signature,
+            locals: new_method.locals,
+            registers: new_method.registers.or(original.registers),
+            params: original.params,
+            annotations: original.annotations,
+            ops: new_method.ops,
+        };
+        // Re-key OpIndex annotations whose indices shifted. For
+        // a pure replace, `delta == 0` and there's nothing to
+        // do. Insert-after raises the count by 1; a future
+        // delete path would lower it.
+        let delta: i64 = new_op_count as i64 - old_op_count as i64;
+        if delta != 0 {
+            // Insert-after pushes everything from edited_op + 1
+            // onwards by `delta`. Delete would remove the slot
+            // at edited_op itself; same shift formula.
+            let shift_from = if delta > 0 {
+                edited_op_index.saturating_add(1)
+            } else {
+                edited_op_index
+            };
+            self.shift_op_index_annotations(
+                &artifact,
+                &class_jni,
+                &method_decl,
+                shift_from,
+                delta,
+                cx,
+            );
+        }
+        self.stage_smali_class_edit(artifact, class_jni, staged, cx);
+        // Drop the editor state — the row underneath has just
+        // been re-rendered by stage_smali_class_edit invalidating
+        // tab.lines, so any inline TextInput would be paired
+        // against stale row indices.
+        if !insert_after {
+            self.op_edit = None;
+            cx.notify();
+            return;
+        }
+        // For Cmd-Enter, re-open the editor on the new (blank)
+        // line one row below the one we just edited. Lines are
+        // re-rendered, so the row index advances by exactly one.
+        let new_row = row_index + 1;
+        if let Some(state) = self.op_edit.as_mut() {
+            state.row_index = new_row;
+            state.line_offset_within_method = line_offset + 1;
+            state.is_new_line = true;
+            state.input = crate::text_input::TextInput::new();
+            state.error = None;
+            state.suggestions.clear();
+            state.suggestion_selected = 0;
+        }
+        cx.notify();
+        self.refresh_op_edit_suggestions(cx);
+    }
+
+    pub(crate) fn commit_op_edit(&mut self, cx: &mut Context<Self>) {
+        self.finish_op_edit(false, cx);
+    }
+
+    pub(crate) fn commit_op_edit_and_insert_below(&mut self, cx: &mut Context<Self>) {
+        self.finish_op_edit(true, cx);
+    }
+
+    /// Recompute the autocomplete suggestion list for the
+    /// editor's current cursor. Called after every keystroke and
+    /// cursor move. Cheap enough to do synchronously — the
+    /// largest source (per-bundle class list) is filtered by
+    /// prefix and capped at 12 entries.
+    pub(crate) fn refresh_op_edit_suggestions(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.op_edit.as_ref() else { return };
+        let ctx = crate::op_editor::classify_cursor(
+            state.input.text(),
+            state.input.cursor(),
+        );
+        let suggestions = self.build_op_suggestions(ctx, &state.class_jni);
+        if let Some(state) = self.op_edit.as_mut() {
+            state.suggestions = suggestions;
+            if state.suggestion_selected >= state.suggestions.len() {
+                state.suggestion_selected = 0;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Build a suggestion list for `ctx`. Pure: doesn't touch
+    /// `self.op_edit`. Bundle-aware sources walk the loaded
+    /// classes / methods / fields; static sources (opcodes,
+    /// registers) are hard-coded.
+    fn build_op_suggestions(
+        &self,
+        ctx: crate::op_editor::OpCursorContext,
+        active_class_jni: &str,
+    ) -> Vec<crate::op_editor::OpSuggestion> {
+        use crate::op_editor::{OpCursorContext, OpSuggestion, OpSuggestionKind};
+        const MAX: usize = 50;
+        match ctx {
+            OpCursorContext::None => Vec::new(),
+            OpCursorContext::Opcode { partial, replace_range } => {
+                crate::op_editor::OPCODE_LIST
+                    .iter()
+                    .filter(|m| m.starts_with(&partial))
+                    .take(MAX)
+                    .map(|m| OpSuggestion {
+                        label: SharedString::from(m.to_string()),
+                        detail: SharedString::from("opcode"),
+                        commit_text: m.to_string(),
+                        replace_range,
+                        kind: OpSuggestionKind::Opcode,
+                    })
+                    .collect()
+            }
+            OpCursorContext::Register { partial, replace_range } => {
+                let mut out = Vec::new();
+                for i in 0..=15u8 {
+                    let name = format!("v{i}");
+                    if name.starts_with(&partial) {
+                        out.push(OpSuggestion {
+                            label: SharedString::from(name.clone()),
+                            detail: SharedString::from("local"),
+                            commit_text: name,
+                            replace_range,
+                            kind: OpSuggestionKind::Register,
+                        });
+                    }
+                }
+                for i in 0..=7u8 {
+                    let name = format!("p{i}");
+                    if name.starts_with(&partial) {
+                        out.push(OpSuggestion {
+                            label: SharedString::from(name.clone()),
+                            detail: SharedString::from("param"),
+                            commit_text: name,
+                            replace_range,
+                            kind: OpSuggestionKind::Register,
+                        });
+                    }
+                }
+                out
+            }
+            OpCursorContext::Type { partial, replace_range } => {
+                let Some(bundle) = self.bundle() else { return Vec::new() };
+                let mut out: Vec<OpSuggestion> = bundle
+                    .smali_classes
+                    .keys()
+                    .filter_map(|(_aid, jni)| {
+                        if jni.starts_with(&partial) {
+                            Some(OpSuggestion {
+                                label: SharedString::from(jni.clone()),
+                                detail: SharedString::from("internal class"),
+                                commit_text: jni.clone(),
+                                replace_range,
+                                kind: OpSuggestionKind::Type,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                // Common Java/Android types as a fallback — these
+                // aren't in the loaded DEX but typed-by-hand
+                // refs to them are very common.
+                for stock in COMMON_EXTERNAL_TYPES {
+                    if stock.starts_with(&partial)
+                        && !out.iter().any(|s| s.commit_text == *stock)
+                    {
+                        out.push(OpSuggestion {
+                            label: SharedString::from(*stock),
+                            detail: SharedString::from("stdlib"),
+                            commit_text: stock.to_string(),
+                            replace_range,
+                            kind: OpSuggestionKind::Type,
+                        });
+                    }
+                }
+                out.sort_by(|a, b| a.label.cmp(&b.label));
+                out.truncate(MAX);
+                out
+            }
+            OpCursorContext::MethodRef {
+                class_jni,
+                partial,
+                replace_range,
+            } => {
+                let class = class_jni
+                    .as_deref()
+                    .unwrap_or(active_class_jni);
+                self.suggestions_for_method_ref(class, &partial, replace_range, MAX)
+            }
+            OpCursorContext::FieldRef {
+                class_jni,
+                partial,
+                replace_range,
+            } => {
+                let class = class_jni
+                    .as_deref()
+                    .unwrap_or(active_class_jni);
+                self.suggestions_for_field_ref(class, &partial, replace_range, MAX)
+            }
+        }
+    }
+
+    fn suggestions_for_method_ref(
+        &self,
+        class_jni: &str,
+        partial: &str,
+        replace_range: (usize, usize),
+        max: usize,
+    ) -> Vec<crate::op_editor::OpSuggestion> {
+        use crate::op_editor::{OpSuggestion, OpSuggestionKind};
+        let Some(bundle) = self.bundle() else { return Vec::new() };
+        // Find the class — prefer the staged version so newly
+        // added methods show up immediately.
+        let class = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+            if jni == class_jni {
+                let staged = bundle.smali_edits.get(aid, jni).map(|e| e.modified.clone());
+                Some(staged.unwrap_or_else(|| c.clone()))
+            } else {
+                None
+            }
+        });
+        let Some(class) = class else { return Vec::new() };
+        class
+            .methods
+            .iter()
+            .filter_map(|m| {
+                let display = format!("{}{}", m.name, m.signature.to_jni());
+                if display.starts_with(partial) {
+                    Some(OpSuggestion {
+                        label: SharedString::from(display.clone()),
+                        detail: SharedString::from("method"),
+                        commit_text: display,
+                        replace_range,
+                        kind: OpSuggestionKind::MethodRef,
+                    })
+                } else {
+                    None
+                }
+            })
+            .take(max)
+            .collect()
+    }
+
+    fn suggestions_for_field_ref(
+        &self,
+        class_jni: &str,
+        partial: &str,
+        replace_range: (usize, usize),
+        max: usize,
+    ) -> Vec<crate::op_editor::OpSuggestion> {
+        use crate::op_editor::{OpSuggestion, OpSuggestionKind};
+        let Some(bundle) = self.bundle() else { return Vec::new() };
+        let class = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+            if jni == class_jni {
+                let staged = bundle.smali_edits.get(aid, jni).map(|e| e.modified.clone());
+                Some(staged.unwrap_or_else(|| c.clone()))
+            } else {
+                None
+            }
+        });
+        let Some(class) = class else { return Vec::new() };
+        class
+            .fields
+            .iter()
+            .filter_map(|f| {
+                let display = format!("{}:{}", f.name, f.signature.to_jni());
+                if display.starts_with(partial) {
+                    Some(OpSuggestion {
+                        label: SharedString::from(display.clone()),
+                        detail: SharedString::from("field"),
+                        commit_text: display,
+                        replace_range,
+                        kind: OpSuggestionKind::FieldRef,
+                    })
+                } else {
+                    None
+                }
+            })
+            .take(max)
+            .collect()
+    }
+
+    /// Accept the currently-highlighted suggestion. Splices its
+    /// `commit_text` into the input over the suggestion's
+    /// `replace_range`. No-op if there's no suggestion list.
+    pub(crate) fn accept_op_edit_suggestion(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.op_edit.as_mut() else { return };
+        let Some(sugg) = state.suggestions.get(state.suggestion_selected).cloned()
+        else {
+            return;
+        };
+        let text = state.input.text().to_string();
+        let (start, end) = sugg.replace_range;
+        let start = start.min(text.len());
+        let end = end.min(text.len()).max(start);
+        let mut new_text = String::with_capacity(
+            text.len() - (end - start) + sugg.commit_text.len(),
+        );
+        new_text.push_str(&text[..start]);
+        new_text.push_str(&sugg.commit_text);
+        new_text.push_str(&text[end..]);
+        let new_cursor = start + sugg.commit_text.len();
+        state.input.set_text(new_text);
+        state.input.set_cursor_pos(new_cursor, false);
+        state.error = None;
+        cx.notify();
+        // Refresh — the new cursor may have entered a different
+        // context (e.g. after picking an opcode the next slot is
+        // a register).
+        self.refresh_op_edit_suggestions(cx);
+    }
+
+    /// Click handler for the dropdown rows — selects the row
+    /// and accepts it in one shot.
+    pub(crate) fn click_op_edit_suggestion(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.op_edit.as_mut() {
+            if index < state.suggestions.len() {
+                state.suggestion_selected = index;
+            }
+        }
+        self.accept_op_edit_suggestion(cx);
+    }
+
+    fn set_op_edit_error(&mut self, msg: String, cx: &mut Context<Self>) {
+        if let Some(state) = self.op_edit.as_mut() {
+            state.error = Some(msg);
+        }
+        cx.notify();
+    }
+
+    /// Helper: return a clone of the staged class for `(artifact,
+    /// class_jni)` if any, else the original lifted class.
+    /// Returns `None` if neither is loaded.
+    fn staged_or_original_class(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+    ) -> Option<smali::types::SmaliClass> {
+        let bundle = self.bundle()?;
+        bundle
+            .smali_edits
+            .get(artifact, class_jni)
+            .map(|e| e.modified.clone())
+            .or_else(|| {
+                bundle
+                    .smali_classes
+                    .get(&(artifact.clone(), class_jni.to_string()))
+                    .cloned()
+            })
+    }
+
+    // ---- Method header popover ----------------------------------------
+
+    /// Enter-on-row entry point. If the selected row in the active
+    /// smali tab is a `.method` header, opens the method popover
+    /// and returns `true` so the caller short-circuits the normal
+    /// Enter chain.
+    pub(crate) fn smali_open_method_at_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get(active) else { return false };
+        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+            return false;
+        }
+        let Some(row) = tab.selected_row else { return false };
+        let line = tab.lines.as_ref().and_then(|v| v.get(row)).cloned();
+        let Some(line) = line else { return false };
+        if !crate::method_popover::line_is_method_decl(line.as_ref()) {
+            return false;
+        }
+        self.open_method_edit_for_line(line.as_ref(), cx)
+    }
+
+    /// Double-click / Enter handler called once we already know
+    /// the row text is a `.method` line. Parses the method name +
+    /// signature out of the line text and opens the popover.
+    /// Returns whether it opened.
+    pub(crate) fn open_method_edit_for_line(
+        &mut self,
+        line: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(bundle) = self.bundle() else { return false };
+        let Some(active) = self.active_tab else { return false };
+        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
+            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let Some((method_name, method_sig)) = parse_method_decl_line(line) else {
+            return false;
+        };
+        let owner = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+            if jni == &class_jni {
+                Some((aid.clone(), c.clone()))
+            } else {
+                None
+            }
+        });
+        let Some((artifact, original)) = owner else { return false };
+        let class = bundle
+            .smali_edits
+            .get(&artifact, &class_jni)
+            .map(|e| e.modified.clone())
+            .unwrap_or(original);
+        let method = class.methods.iter().find(|m| {
+            m.name == method_name && m.signature.to_jni() == method_sig
+        });
+        let Some(method) = method else { return false };
+        self.method_edit = Some(crate::method_popover::MethodEditState::from_method(
+            artifact, class_jni, &class, method,
+        ));
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn cancel_method_edit(&mut self, cx: &mut Context<Self>) {
+        if self.method_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Save the in-progress method header form. Replaces the
+    /// matching method in the staged-or-original class with the
+    /// new metadata; body / params / annotations are preserved
+    /// from the original.
+    pub(crate) fn commit_method_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.method_edit.take() else { return };
+        if state.validate().is_err() {
+            self.method_edit = Some(state);
+            cx.notify();
+            return;
+        }
+        let artifact = state.artifact.clone();
+        let class_jni = state.class_jni.clone();
+        let modified = {
+            let Some(bundle) = self.bundle() else {
+                self.method_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            let base = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .or_else(|| {
+                    bundle
+                        .smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .cloned()
+                });
+            let Some(base) = base else {
+                self.method_edit = Some(state);
+                cx.notify();
+                return;
+            };
+            match state.build_modified(&base) {
+                Some(c) => c,
+                None => {
+                    self.method_edit = Some(state);
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    // ---- Annotation editor --------------------------------------------
+
+    /// Open the annotation editor against a class-level annotation.
+    /// `index == None` means the user is adding a brand-new
+    /// annotation (Save will push); `Some(i)` edits the existing
+    /// annotation at `class.annotations[i]`.
+    pub(crate) fn open_class_annotation_editor(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        // Source the existing annotation — prefer the staged class
+        // so re-opens reflect prior edits.
+        let frame = {
+            let Some(bundle) = self.bundle() else { return };
+            let class = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .or_else(|| {
+                    bundle
+                        .smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .cloned()
+                });
+            let Some(class) = class else { return };
+            match index {
+                Some(i) => match class.annotations.get(i) {
+                    Some(a) => crate::annotation_popover::AnnotationFrame::from_annotation(
+                        a, None,
+                    ),
+                    None => return,
+                },
+                None => crate::annotation_popover::AnnotationFrame::blank(None),
+            }
+        };
+        self.annotation_stack = Some(crate::annotation_popover::AnnotationStack {
+            root_target: crate::annotation_popover::AnnotationTarget::ClassAnnotation {
+                artifact,
+                class_jni,
+                index,
+            },
+            frames: vec![frame],
+        });
+        cx.notify();
+    }
+
+    /// Open the annotation editor against a field annotation.
+    pub(crate) fn open_field_annotation_editor(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        field_name: String,
+        field_signature_jni: String,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let frame = {
+            let Some(bundle) = self.bundle() else { return };
+            let class = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .or_else(|| {
+                    bundle
+                        .smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .cloned()
+                });
+            let Some(class) = class else { return };
+            let field = class.fields.iter().find(|f| {
+                f.name == field_name && f.signature.to_jni() == field_signature_jni
+            });
+            let Some(field) = field else { return };
+            match index {
+                Some(i) => match field.annotations.get(i) {
+                    Some(a) => crate::annotation_popover::AnnotationFrame::from_annotation(
+                        a, None,
+                    ),
+                    None => return,
+                },
+                None => crate::annotation_popover::AnnotationFrame::blank(None),
+            }
+        };
+        self.annotation_stack = Some(crate::annotation_popover::AnnotationStack {
+            root_target: crate::annotation_popover::AnnotationTarget::FieldAnnotation {
+                artifact,
+                class_jni,
+                field_name,
+                field_signature_jni,
+                index,
+            },
+            frames: vec![frame],
+        });
+        cx.notify();
+    }
+
+    /// Open the annotation editor against a method annotation.
+    pub(crate) fn open_method_annotation_editor(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let frame = {
+            let Some(bundle) = self.bundle() else { return };
+            let class = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .or_else(|| {
+                    bundle
+                        .smali_classes
+                        .get(&(artifact.clone(), class_jni.clone()))
+                        .cloned()
+                });
+            let Some(class) = class else { return };
+            let method = class.methods.iter().find(|m| {
+                m.name == method_name
+                    && m.signature.to_jni() == method_signature_jni
+            });
+            let Some(method) = method else { return };
+            match index {
+                Some(i) => match method.annotations.get(i) {
+                    Some(a) => crate::annotation_popover::AnnotationFrame::from_annotation(
+                        a, None,
+                    ),
+                    None => return,
+                },
+                None => crate::annotation_popover::AnnotationFrame::blank(None),
+            }
+        };
+        self.annotation_stack = Some(crate::annotation_popover::AnnotationStack {
+            root_target: crate::annotation_popover::AnnotationTarget::MethodAnnotation {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                index,
+            },
+            frames: vec![frame],
+        });
+        cx.notify();
+    }
+
+    /// Push a SubAnnotation frame for `elements[elem_index]` on the
+    /// top-most frame. Seeded from the snapshot already stored
+    /// there; saving the child overwrites the snapshot.
+    pub(crate) fn push_sub_annotation_frame(
+        &mut self,
+        elem_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(stack) = self.annotation_stack.as_mut() else { return };
+        let Some(top) = stack.frames.last() else { return };
+        let Some(elem) = top.elements.get(elem_index) else { return };
+        let snapshot = match &elem.value {
+            crate::annotation_popover::AnnotationValueDraft::SubAnnotation(s) => {
+                (**s).clone()
+            }
+            _ => return,
+        };
+        let frame = crate::annotation_popover::AnnotationFrame::from_annotation(
+            &snapshot,
+            Some(elem_index),
+        );
+        stack.frames.push(frame);
+        cx.notify();
+    }
+
+    /// Cancel the top-most annotation frame. If it's a child,
+    /// returns control to its parent. If it's the root, closes the
+    /// whole editor without writing anything.
+    pub(crate) fn cancel_annotation_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(stack) = self.annotation_stack.as_mut() else { return };
+        stack.frames.pop();
+        if stack.frames.is_empty() {
+            self.annotation_stack = None;
+        }
+        cx.notify();
+    }
+
+    /// Save the top-most frame.
+    ///
+    /// * Child frame — copy its draft back into the parent frame's
+    ///   `elements[parent_element_index].value` as a fresh
+    ///   `SubAnnotation` snapshot, then pop.
+    /// * Root frame — write the assembled `SmaliAnnotation` through
+    ///   the stack's `root_target` into the bundle's smali edits.
+    pub(crate) fn commit_annotation_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(stack) = self.annotation_stack.as_mut() else { return };
+        let Some(top) = stack.frames.last() else { return };
+        if top.validate().is_err() {
+            cx.notify();
+            return;
+        }
+        if stack.frames.len() > 1 {
+            // Child: copy snapshot up into parent.
+            let assembled = top.to_annotation();
+            let parent_idx = top.parent_element_index;
+            stack.frames.pop();
+            if let (Some(parent_frame), Some(elem_idx)) =
+                (stack.frames.last_mut(), parent_idx)
+            {
+                if let Some(elem) = parent_frame.elements.get_mut(elem_idx) {
+                    elem.value =
+                        crate::annotation_popover::AnnotationValueDraft::SubAnnotation(
+                            Box::new(assembled),
+                        );
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // Root: write into the bundle.
+        let assembled = top.to_annotation();
+        let target = stack.root_target.clone();
+        self.annotation_stack = None;
+        self.apply_annotation_root(target, assembled, cx);
+    }
+
+    /// Apply a freshly-assembled annotation back into the bundle's
+    /// staged class. Splits class / field paths so each is plainly
+    /// readable.
+    fn apply_annotation_root(
+        &mut self,
+        target: crate::annotation_popover::AnnotationTarget,
+        annotation: smali::types::SmaliAnnotation,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::annotation_popover::AnnotationTarget;
+        match target {
+            AnnotationTarget::ClassAnnotation { artifact, class_jni, index } => {
+                self.write_class_annotation(artifact, class_jni, index, annotation, cx);
+            }
+            AnnotationTarget::FieldAnnotation {
+                artifact,
+                class_jni,
+                field_name,
+                field_signature_jni,
+                index,
+            } => {
+                self.write_field_annotation(
+                    artifact,
+                    class_jni,
+                    field_name,
+                    field_signature_jni,
+                    index,
+                    annotation,
+                    cx,
+                );
+            }
+            AnnotationTarget::MethodAnnotation {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                index,
+            } => {
+                self.write_method_annotation(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    index,
+                    annotation,
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn write_class_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        index: Option<usize>,
+        annotation: smali::types::SmaliAnnotation,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            match index {
+                Some(i) => {
+                    if i < class.annotations.len() {
+                        class.annotations[i] = annotation;
+                    } else {
+                        class.annotations.push(annotation);
+                    }
+                }
+                None => class.annotations.push(annotation),
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    fn write_field_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        field_name: String,
+        field_signature_jni: String,
+        index: Option<usize>,
+        annotation: smali::types::SmaliAnnotation,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            if let Some(field) = class.fields.iter_mut().find(|f| {
+                f.name == field_name && f.signature.to_jni() == field_signature_jni
+            }) {
+                match index {
+                    Some(i) => {
+                        if i < field.annotations.len() {
+                            field.annotations[i] = annotation;
+                        } else {
+                            field.annotations.push(annotation);
+                        }
+                    }
+                    None => field.annotations.push(annotation),
+                }
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    fn write_method_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        index: Option<usize>,
+        annotation: smali::types::SmaliAnnotation,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            if let Some(method) = class.methods.iter_mut().find(|m| {
+                m.name == method_name && m.signature.to_jni() == method_signature_jni
+            }) {
+                match index {
+                    Some(i) => {
+                        if i < method.annotations.len() {
+                            method.annotations[i] = annotation;
+                        } else {
+                            method.annotations.push(annotation);
+                        }
+                    }
+                    None => method.annotations.push(annotation),
+                }
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    /// Helper: take the staged-or-original SmaliClass for
+    /// `(artifact, class_jni)`, hand it to `f` for mutation, and
+    /// return the mutated copy. Returns `None` if no such class is
+    /// loaded.
+    fn with_staged_class<F>(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        f: F,
+    ) -> Option<smali::types::SmaliClass>
+    where
+        F: FnOnce(&mut smali::types::SmaliClass),
+    {
+        let bundle = self.bundle()?;
+        let mut class = bundle
+            .smali_edits
+            .get(artifact, class_jni)
+            .map(|e| e.modified.clone())
+            .or_else(|| {
+                bundle
+                    .smali_classes
+                    .get(&(artifact.clone(), class_jni.to_string()))
+                    .cloned()
+            })?;
+        f(&mut class);
+        Some(class)
+    }
+
+    /// Helper: stage a modified class and invalidate any open
+    /// smali tabs viewing it.
+    fn stage_smali_class_edit(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        modified: smali::types::SmaliClass,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.smali_edits.insert(crate::smali_edits::SmaliEdit {
+                key: crate::smali_edits::SmaliEditKey {
+                    artifact,
+                    class_jni: class_jni.clone(),
+                },
+                modified,
+            });
+        }
+        for tab in &mut self.tabs {
+            if let TabKind::SmaliClass { class_jni: jni } = &tab.kind {
+                if jni == &class_jni {
+                    // Capture scroll position so we can restore the
+                    // viewport after the line cache is rebuilt —
+                    // otherwise every Enter on the op editor yanks
+                    // the user back to the top of the file.
+                    tab.pending_scroll_restore =
+                        Some(tab.scroll.logical_scroll_top());
+                    tab.lines = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a class-level annotation outright. Wired from the
+    /// "× remove" affordance on the class-decl popover's annotation
+    /// list.
+    pub(crate) fn remove_class_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            if index < class.annotations.len() {
+                class.annotations.remove(index);
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    /// Remove a field annotation outright. Wired from the field
+    /// popover's annotation list.
+    pub(crate) fn remove_field_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        field_name: String,
+        field_signature_jni: String,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            if let Some(field) = class.fields.iter_mut().find(|f| {
+                f.name == field_name && f.signature.to_jni() == field_signature_jni
+            }) {
+                if index < field.annotations.len() {
+                    field.annotations.remove(index);
+                }
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    /// Remove a method annotation outright. Wired from the method
+    /// popover's annotation list.
+    pub(crate) fn remove_method_annotation(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modified) = self.with_staged_class(&artifact, &class_jni, |class| {
+            if let Some(method) = class.methods.iter_mut().find(|m| {
+                m.name == method_name
+                    && m.signature.to_jni() == method_signature_jni
+            }) {
+                if index < method.annotations.len() {
+                    method.annotations.remove(index);
+                }
+            }
+        }) else {
+            return;
+        };
+        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+    }
+
+    /// Annotations currently attached to `(artifact, class_jni)`,
+    /// preferring the staged class when one exists. Returns
+    /// (vis, type_jni) summaries suitable for the popover row
+    /// list. Returns empty if the class isn't loaded.
+    pub(crate) fn class_annotation_summaries(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+    ) -> Vec<(String, String)> {
+        let Some(bundle) = self.bundle() else { return Vec::new() };
+        let class = bundle
+            .smali_edits
+            .get(artifact, class_jni)
+            .map(|e| e.modified.clone())
+            .or_else(|| {
+                bundle
+                    .smali_classes
+                    .get(&(artifact.clone(), class_jni.to_string()))
+                    .cloned()
+            });
+        let Some(class) = class else { return Vec::new() };
+        class
+            .annotations
+            .iter()
+            .map(|a| (a.visibility.to_str().to_string(), a.annotation_type.to_jni()))
+            .collect()
+    }
+
+    /// Same shape as `class_annotation_summaries`, scoped to a
+    /// specific field within the class.
+    pub(crate) fn field_annotation_summaries(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        field_name: &str,
+        field_signature_jni: &str,
+    ) -> Vec<(String, String)> {
+        let Some(bundle) = self.bundle() else { return Vec::new() };
+        let class = bundle
+            .smali_edits
+            .get(artifact, class_jni)
+            .map(|e| e.modified.clone())
+            .or_else(|| {
+                bundle
+                    .smali_classes
+                    .get(&(artifact.clone(), class_jni.to_string()))
+                    .cloned()
+            });
+        let Some(class) = class else { return Vec::new() };
+        let Some(field) = class.fields.iter().find(|f| {
+            f.name == field_name && f.signature.to_jni() == field_signature_jni
+        }) else {
+            return Vec::new();
+        };
+        field
+            .annotations
+            .iter()
+            .map(|a| (a.visibility.to_str().to_string(), a.annotation_type.to_jni()))
+            .collect()
+    }
+
+    /// Same shape as `field_annotation_summaries`, scoped to a
+    /// method within the class.
+    pub(crate) fn method_annotation_summaries(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        method_name: &str,
+        method_signature_jni: &str,
+    ) -> Vec<(String, String)> {
+        let Some(bundle) = self.bundle() else { return Vec::new() };
+        let class = bundle
+            .smali_edits
+            .get(artifact, class_jni)
+            .map(|e| e.modified.clone())
+            .or_else(|| {
+                bundle
+                    .smali_classes
+                    .get(&(artifact.clone(), class_jni.to_string()))
+                    .cloned()
+            });
+        let Some(class) = class else { return Vec::new() };
+        let Some(method) = class.methods.iter().find(|m| {
+            m.name == method_name && m.signature.to_jni() == method_signature_jni
+        }) else {
+            return Vec::new();
+        };
+        method
+            .annotations
+            .iter()
+            .map(|a| (a.visibility.to_str().to_string(), a.annotation_type.to_jni()))
+            .collect()
+    }
+
+    // ---- External editor ----------------------------------------------
+
+    /// Stop the live-watch session. Drops the temp file. Doesn't
+    /// touch any staged edits the watcher has already applied —
+    /// those stay in the bundle and can be reverted from the
+    /// Changes dialog like any other smali edit.
+    pub(crate) fn stop_external_edit_watch(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.external_edit.as_mut() {
+            // Signal the background poll task to exit. It'll see
+            // the flag on its next tick (<=500ms) and stop. The
+            // task itself drops the temp file when it exits — we
+            // don't delete it here in case the next tick is mid-
+            // way through a re-read.
+            state.stop_requested = true;
+        }
+        cx.notify();
+    }
+
+    /// Entry point from the toolbar Edit File button. Writes the
+    /// active smali class to a temp file, launches the OS's
+    /// registered editor for `.smali` (without waiting), and
+    /// starts a background poller that re-ingests the file on
+    /// every save until the user clicks Stop on the toolbar chip.
+    pub(crate) fn open_active_smali_in_external_editor(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if self.external_edit.is_some() {
+            return;
+        }
+        let Some(active) = self.active_tab else { return };
+        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
+            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        // Find the (artifact, current body). Prefer the staged
+        // edit so the external editor sees what's in the GUI.
+        let (artifact, body, class_display) = {
+            let Some(bundle) = self.bundle() else { return };
+            let owner = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+                if jni == &class_jni {
+                    Some((aid.clone(), c.clone()))
+                } else {
+                    None
+                }
+            });
+            let Some((artifact, original)) = owner else { return };
+            let display = original.name.as_java_type();
+            let current = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .unwrap_or(original);
+            (artifact, current.to_smali(), display)
+        };
+        let temp_path = match crate::external_editor::write_temp_file(&class_jni, &body)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("external edit: write temp failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = crate::external_editor::launch_editor(&temp_path) {
+            tracing::warn!("external edit: launch failed: {e}");
+            // Stash the path on Shell so the chip can surface a
+            // launch error even though the editor never opened —
+            // user might want to inspect / open it manually.
+            self.external_edit = Some(crate::external_editor::ExternalEditState {
+                artifact,
+                class_jni,
+                class_display,
+                temp_path,
+                last_mtime: std::time::SystemTime::UNIX_EPOCH,
+                last_error: Some(format!("launch failed: {e}")),
+                stop_requested: false,
+            });
+            cx.notify();
+            return;
+        }
+        let now = crate::external_editor::mtime(&temp_path);
+        self.external_edit = Some(crate::external_editor::ExternalEditState {
+            artifact: artifact.clone(),
+            class_jni: class_jni.clone(),
+            class_display,
+            temp_path: temp_path.clone(),
+            last_mtime: now,
+            last_error: None,
+            stop_requested: false,
+        });
+        cx.notify();
+        self.spawn_external_edit_poll(artifact, class_jni, temp_path, cx);
+    }
+
+    // PollAction is the per-tick verdict the foreground hands
+    // back to the polling task — kept private to this method.
+    /// Background polling loop. Ticks at ~500ms; on every tick
+    /// stats the temp file and, if mtime moved forward, re-reads
+    /// and re-parses on the foreground thread. Exits when the
+    /// session's `stop_requested` flag flips or the session
+    /// disappears entirely (e.g. bundle closed).
+    fn spawn_external_edit_poll(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        temp_path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                // Probe the file's mtime off the foreground so a
+                // slow disk can't stall the UI. The result we
+                // need to compare against lives on Shell, so we
+                // hand it to the foreground via `update`.
+                let observed = crate::external_editor::mtime(&temp_path);
+                let action = this.update(cx, |shell, _cx| {
+                    let Some(state) = shell.external_edit.as_ref() else {
+                        return PollAction::Exit;
+                    };
+                    if state.artifact != artifact || state.class_jni != class_jni {
+                        return PollAction::Exit;
+                    }
+                    if state.stop_requested {
+                        return PollAction::StopAndCleanup;
+                    }
+                    if observed > state.last_mtime {
+                        PollAction::Ingest(observed)
+                    } else {
+                        PollAction::Continue
+                    }
+                });
+                let action = match action {
+                    Ok(a) => a,
+                    Err(_) => return, // entity gone
+                };
+                match action {
+                    PollAction::Exit => return,
+                    PollAction::Continue => continue,
+                    PollAction::StopAndCleanup => {
+                        let _ = this.update(cx, |shell, cx| {
+                            if let Some(state) = shell.external_edit.take() {
+                                let _ = std::fs::remove_file(&state.temp_path);
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    PollAction::Ingest(new_mtime) => {
+                        let body = match std::fs::read_to_string(&temp_path) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = this.update(cx, |shell, cx| {
+                                    shell.record_external_edit_error(
+                                        &artifact,
+                                        &class_jni,
+                                        format!("reading temp file: {e}"),
+                                        new_mtime,
+                                        cx,
+                                    );
+                                });
+                                continue;
+                            }
+                        };
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.ingest_external_edit(
+                                &artifact,
+                                &class_jni,
+                                &body,
+                                new_mtime,
+                                cx,
+                            );
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Foreground handler for a single observed save. Parses and
+    /// stages on success, records the error on failure. Caller
+    /// guarantees the session is still active and matches
+    /// `(artifact, class_jni)`.
+    fn ingest_external_edit(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        body: &str,
+        observed_mtime: std::time::SystemTime,
+        cx: &mut Context<Self>,
+    ) {
+        let parsed = match glass_api::parse_smali_class(body) {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_external_edit_error(
+                    artifact,
+                    class_jni,
+                    format!("{e:#}"),
+                    observed_mtime,
+                    cx,
+                );
+                return;
+            }
+        };
+        let body_jni = glass_api::smali_class_jni(&parsed);
+        if body_jni != class_jni {
+            self.record_external_edit_error(
+                artifact,
+                class_jni,
+                format!(
+                    "body declares class {body_jni:?} but this session edits {class_jni:?}"
+                ),
+                observed_mtime,
+                cx,
+            );
+            return;
+        }
+        self.stage_smali_class_edit(artifact.clone(), class_jni.to_string(), parsed, cx);
+        if let Some(state) = self.external_edit.as_mut() {
+            state.last_mtime = observed_mtime;
+            state.last_error = None;
+        }
+        cx.notify();
+    }
+
+    fn record_external_edit_error(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        msg: String,
+        observed_mtime: std::time::SystemTime,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.external_edit.as_mut() {
+            // Only update if the session is still the same — the
+            // user might have stopped and restarted in the gap.
+            if &state.artifact == artifact && state.class_jni == class_jni {
+                state.last_error = Some(msg);
+                state.last_mtime = observed_mtime;
+            }
+        }
+        cx.notify();
+    }
+
     /// Open a save-file dialog and write a patched copy of the
     /// currently-loaded bundle there. Driven by the Changes
     /// dialog's "Export N changes…" button.
     pub(crate) fn export_patched_bundle(&mut self, cx: &mut Context<Self>) {
         use std::collections::HashMap;
         let Some(bundle) = self.bundle() else { return };
-        if bundle.edits.is_empty() {
+        if bundle.edits.is_empty() && bundle.smali_edits.is_empty() {
             return;
         }
         // Build the EditMap up-front (cheap clone of edit
@@ -3734,6 +6119,16 @@ impl Shell {
                     new_bytes: e.new_bytes.clone(),
                 },
             );
+        }
+        // Parallel map for typed smali class edits, keyed by DEX
+        // artifact id (matches the loader's hashing of raw DEX
+        // bytes).
+        let mut smali_edit_map: glass_api::SmaliEditMap = HashMap::new();
+        for e in bundle.smali_edits.entries() {
+            smali_edit_map
+                .entry(e.key.artifact.clone())
+                .or_default()
+                .insert(e.key.class_jni.clone(), e.modified.clone());
         }
         // Re-load the source bundle from disk so the exporter
         // sees fresh bytes (the in-memory ParsedArtifact is the
@@ -3790,15 +6185,17 @@ impl Shell {
             // main runloop stays responsive while we splice the
             // archive.
             let edit_map_for_task = edit_map.clone();
+            let smali_map_for_task = smali_edit_map.clone();
             let source_path_for_task = source_path.clone();
             let out_path_for_task = out_path.clone();
             let summary = cx
                 .background_executor()
                 .spawn(async move {
                     match glass_api::open(&source_path_for_task) {
-                        Ok(bundle) => match glass_api::export_to_path(
+                        Ok(bundle) => match glass_api::export_to_path_with_smali(
                             &bundle,
                             &edit_map_for_task,
+                            &smali_map_for_task,
                             &out_path_for_task,
                         ) {
                             Ok(()) => Ok(out_path_for_task),
@@ -4052,6 +6449,46 @@ where
 
 /// Suggest a filename for the patched output. We keep the source
 /// extension intact (so the patched output still looks like an
+/// Parse `(name, signature_jni)` out of a `.method` line.
+/// Smali shape: `.method <modifiers> [constructor ]<name>(<JNI-sig>)<ret>`.
+/// We split at the first `(` to recover the name, then the
+/// signature is `(args)ret` from that `(` through end-of-line.
+/// Returns `None` if the line doesn't match.
+pub(crate) fn parse_method_decl_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim_start().strip_prefix(".method ")?.trim_start();
+    // Drop modifier tokens — the name is the last whitespace-
+    // separated token *before* the `(`.
+    let paren = rest.find('(')?;
+    let head = &rest[..paren];
+    let sig_part = &rest[paren..];
+    let name = head.split_whitespace().last()?;
+    if name.is_empty() {
+        return None;
+    }
+    // `.method` lines have nothing after the return type on the
+    // same line; safe to take through end-of-string.
+    Some((name.to_string(), sig_part.to_string()))
+}
+
+/// Parse `(name, signature_jni)` out of a `.field` line.
+/// Smali shape: `.field <modifiers> <name>:<JNI-sig> [= <init>]`.
+/// Returns `None` if the line doesn't match.
+pub(crate) fn parse_field_decl_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim_start().strip_prefix(".field ")?.trim_start();
+    // `name:Sig` is the last whitespace-separated token before an
+    // optional ` = <init>`. Split off the initial first.
+    let head = match rest.find(" = ") {
+        Some(eq) => &rest[..eq],
+        None => rest,
+    };
+    let token = head.split_whitespace().last()?;
+    let (name, sig) = token.split_once(':')?;
+    if name.is_empty() || sig.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), sig.to_string()))
+}
+
 /// APK / IPA / `.so` to downstream tools) and insert
 /// `-patched` before it.
 fn patched_filename(source: &std::path::Path) -> String {
@@ -4067,6 +6504,39 @@ fn patched_filename(source: &std::path::Path) -> String {
     }
 }
 
+/// Stdlib type signatures surfaced by the op-edit autocomplete
+/// when the user is typing a class ref slot. Bundle classes
+/// always take priority — these are only appended if a prefix
+/// match isn't already in the loaded DEX. Kept short on purpose;
+/// users can type the rest out by hand.
+const COMMON_EXTERNAL_TYPES: &[&str] = &[
+    "Ljava/lang/Object;",
+    "Ljava/lang/String;",
+    "Ljava/lang/Integer;",
+    "Ljava/lang/Long;",
+    "Ljava/lang/Float;",
+    "Ljava/lang/Double;",
+    "Ljava/lang/Boolean;",
+    "Ljava/lang/Byte;",
+    "Ljava/lang/Short;",
+    "Ljava/lang/Character;",
+    "Ljava/lang/Class;",
+    "Ljava/lang/Throwable;",
+    "Ljava/lang/Exception;",
+    "Ljava/lang/RuntimeException;",
+    "Ljava/util/List;",
+    "Ljava/util/Map;",
+    "Ljava/util/Set;",
+    "Ljava/util/ArrayList;",
+    "Ljava/util/HashMap;",
+    "Ljava/util/HashSet;",
+    "Ljava/util/Iterator;",
+    "Landroid/content/Context;",
+    "Landroid/os/Bundle;",
+    "Landroid/view/View;",
+    "Landroid/util/Log;",
+];
+
 /// Register names offered by the edit-mode autocomplete when
 /// the cursor sits in a register slot. Order: zero registers,
 /// stack pointers, then numeric W/X in ascending order. The
@@ -4080,3 +6550,99 @@ const REGISTER_NAMES: &[&str] = &[
     "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", "x19",
     "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "x30",
 ];
+
+/// Kind passed to `navigate_to_smali_member` — distinguishes
+/// field navigation from method navigation. Lives at file scope
+/// so the Changes dialog can name it from its render module.
+pub(crate) enum SmaliMemberKind {
+    Field { name: String, signature: String },
+    Method { name: String, signature: String },
+}
+
+/// Per-tick verdict from the foreground to the external-edit
+/// polling task. Lives at file scope so the poll method can name
+/// the type in its match arms.
+enum PollAction {
+    /// Session is gone or its identity changed — stop polling.
+    Exit,
+    /// Nothing observed this tick.
+    Continue,
+    /// User clicked Stop — clean up the temp file and exit.
+    StopAndCleanup,
+    /// File changed; read + parse off the foreground using the
+    /// observed mtime as the new high-water mark.
+    Ingest(std::time::SystemTime),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_field_decl() {
+        let (n, s) = parse_field_decl_line(".field private count:I").unwrap();
+        assert_eq!(n, "count");
+        assert_eq!(s, "I");
+    }
+
+    #[test]
+    fn parses_field_decl_with_initial() {
+        let (n, s) =
+            parse_field_decl_line(".field public static final MAX:I = 0x7fffffff").unwrap();
+        assert_eq!(n, "MAX");
+        assert_eq!(s, "I");
+    }
+
+    #[test]
+    fn parses_field_decl_with_object_sig() {
+        let (n, s) =
+            parse_field_decl_line(".field protected name:Ljava/lang/String;").unwrap();
+        assert_eq!(n, "name");
+        assert_eq!(s, "Ljava/lang/String;");
+    }
+
+    #[test]
+    fn parses_indented_field_decl() {
+        let (n, _) = parse_field_decl_line("    .field public id:I").unwrap();
+        assert_eq!(n, "id");
+    }
+
+    #[test]
+    fn rejects_non_field_lines() {
+        assert!(parse_field_decl_line(".class public Lcom/Foo;").is_none());
+        assert!(parse_field_decl_line("    invoke-virtual {p0}, …").is_none());
+    }
+
+    #[test]
+    fn parses_simple_method_decl() {
+        let (n, s) =
+            parse_method_decl_line(".method public foo()V").unwrap();
+        assert_eq!(n, "foo");
+        assert_eq!(s, "()V");
+    }
+
+    #[test]
+    fn parses_constructor_method_decl() {
+        let (n, s) = parse_method_decl_line(
+            ".method public constructor <init>(Landroid/content/Context;)V",
+        )
+        .unwrap();
+        assert_eq!(n, "<init>");
+        assert_eq!(s, "(Landroid/content/Context;)V");
+    }
+
+    #[test]
+    fn parses_static_method_decl() {
+        let (n, s) =
+            parse_method_decl_line(".method public static bar(I)Z").unwrap();
+        assert_eq!(n, "bar");
+        assert_eq!(s, "(I)Z");
+    }
+
+    #[test]
+    fn rejects_non_method_lines() {
+        assert!(parse_method_decl_line(".class public Lcom/Foo;").is_none());
+        assert!(parse_method_decl_line(".field private count:I").is_none());
+        assert!(parse_method_decl_line("    .end method").is_none());
+    }
+}

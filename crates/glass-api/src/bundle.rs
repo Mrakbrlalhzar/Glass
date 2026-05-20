@@ -48,6 +48,16 @@ pub(crate) struct ParsedArtifact {
     pub archive_path: Option<String>,
 }
 
+/// One `classes*.dex` file inside an APK: the zip entry name
+/// (`"classes.dex"`, `"classes2.dex"`, …), the artifact id
+/// (blake3 of the raw DEX bytes — matches the id the UI uses to
+/// key smali-class edits), and the classes lifted out of it.
+pub struct DexGroup {
+    pub name: String,
+    pub artifact_id: ArtifactId,
+    pub classes: Vec<SmaliClass>,
+}
+
 /// An opened bundle plus its lazy caches.
 pub struct Bundle {
     pub(crate) source_path: PathBuf,
@@ -57,6 +67,11 @@ pub struct Bundle {
     /// Lifted DEX classes (APK only). Aggregated across every
     /// `classes*.dex` file in the bundle. Empty for IPA / Native.
     pub(crate) dex_classes: Vec<SmaliClass>,
+    /// Per-DEX grouping for the same classes — preserves the
+    /// (zip-entry-name, artifact-id) needed to re-emit a patched
+    /// DEX. Each group's `classes` is a subset of `dex_classes`
+    /// in load order.
+    pub(crate) dex_groups: Vec<DexGroup>,
     // Future caches (search index, xref maps) hang off this struct
     // as more verbs land — each behind its own RwLock<Option<Arc<...>>>
     // so cache fills serialise without blocking the reader path.
@@ -97,6 +112,11 @@ impl Bundle {
             .iter()
             .find(|a| &a.id == id)
             .and_then(|a| a.archive_path.clone())
+    }
+
+    /// Per-DEX groupings — empty for non-APK bundles.
+    pub fn dex_groups(&self) -> &[DexGroup] {
+        &self.dex_groups
     }
 
     /// Look up an artifact by label (case-sensitive exact match)
@@ -162,11 +182,17 @@ fn open_apk(path: &Path, label: String) -> Result<Bundle> {
         });
     }
     let mut dex_classes = Vec::new();
+    let mut dex_groups = Vec::with_capacity(apk.dex_files.len());
     for dex in &apk.dex_files {
         let classes = dex
             .classes()
             .with_context(|| format!("lifting smali from {}", dex.name))?;
         dex_classes.extend(classes.iter().cloned());
+        dex_groups.push(DexGroup {
+            name: dex.name.clone(),
+            artifact_id: ArtifactId::from_bytes(&dex.bytes),
+            classes: classes.to_vec(),
+        });
     }
     Ok(Bundle {
         source_path: path.to_path_buf(),
@@ -174,6 +200,7 @@ fn open_apk(path: &Path, label: String) -> Result<Bundle> {
         label,
         artifacts,
         dex_classes,
+        dex_groups,
     })
 }
 
@@ -227,6 +254,7 @@ fn open_ipa(path: &Path, label: String) -> Result<Bundle> {
         label,
         artifacts,
         dex_classes: Vec::new(),
+        dex_groups: Vec::new(),
     })
 }
 
@@ -247,5 +275,6 @@ fn open_native(path: &Path, label: String) -> Result<Bundle> {
         label,
         artifacts: vec![artifact],
         dex_classes: Vec::new(),
+        dex_groups: Vec::new(),
     })
 }

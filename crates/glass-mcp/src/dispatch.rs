@@ -310,21 +310,61 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
                 "total_edits": pf.edits.len(),
             }))?
         }
+        "smali-set" => {
+            let path = require_path(args)?;
+            let class_ref = require_str(args, "class")?;
+            let body = require_str(args, "body")?;
+            let patches_path = std::path::PathBuf::from(require_str(args, "patches")?);
+            if body.trim().is_empty() {
+                return Err(DispatchError::Other("smali body is empty".to_string()));
+            }
+            let parsed = glass_api::parse_smali_class(&body)?;
+            let bundle = glass_api::open(&path)?;
+            let (artifact_id, class_jni) =
+                bundle.resolve_smali_class(&class_ref)?;
+            let body_jni = glass_api::smali_class_jni(&parsed);
+            if body_jni != class_jni {
+                return Err(DispatchError::Other(format!(
+                    "smali body declares class {body_jni:?} but `class` resolves to {class_jni:?}"
+                )));
+            }
+            let mut pf = glass_api::PatchFile::read_or_default(&patches_path)?;
+            if pf.source_path.is_none() {
+                pf.source_path = Some(path.clone());
+            }
+            let body_bytes = body.len();
+            pf.upsert_smali(glass_api::SmaliPatchEntry {
+                artifact: artifact_id.to_hex(),
+                class_jni: class_jni.clone(),
+                body,
+            });
+            pf.write(&patches_path)?;
+            json_of(&serde_json::json!({
+                "patches": patches_path,
+                "artifact": artifact_id.to_hex(),
+                "class_jni": class_jni,
+                "body_bytes": body_bytes,
+                "total_smali_edits": pf.smali_edits.len(),
+            }))?
+        }
         "export-patched" => {
             let path = require_path(args)?;
             let patches = std::path::PathBuf::from(require_str(args, "patches")?);
             let out = std::path::PathBuf::from(require_str(args, "out")?);
             let pf = glass_api::PatchFile::read_or_default(&patches)?;
-            if pf.edits.is_empty() {
+            if pf.edits.is_empty() && pf.smali_edits.is_empty() {
                 return Err(DispatchError::Other(format!(
                     "patch file {} contains no edits",
                     patches.display()
                 )));
             }
-            let edits_applied = pf.edits.len();
+            let edits_applied = pf.edits.len() + pf.smali_edits.len();
             let bundle = glass_api::open(&path)?;
             let edit_map = pf.to_edit_map();
-            glass_api::export_to_path(&bundle, &edit_map, &out)?;
+            let smali_map = pf.to_smali_edit_map()?;
+            glass_api::export_to_path_with_smali(
+                &bundle, &edit_map, &smali_map, &out,
+            )?;
             json_of(&serde_json::json!({
                 "out": out,
                 "edits_applied": edits_applied,

@@ -9,14 +9,20 @@ use serde::{Deserialize, Serialize};
 use crate::ids::ArtifactId;
 
 /// Bumped whenever the on-disk shape changes in a non-additive way.
-/// Records with a higher version than this binary supports are skipped
-/// on read; lower versions are dropped (we don't keep migration code
-/// in v1 — start fresh after a bump).
+/// Records with a higher version than this binary supports are
+/// skipped on read; older versions still load (`decode_versioned`
+/// in store.rs accepts any `v <= SCHEMA_VERSION`).
 /// v2: `Annotation` became a struct of three optionals (rename /
 /// comment / colour) instead of an enum, so a single key can carry
-/// all three. Old v1 records with the enum shape fail to decode
-/// and are silently skipped — see `decode_versioned` in store.rs.
-pub const SCHEMA_VERSION: u32 = 2;
+/// all three.
+/// v3: `AnnotationKey` grew a new `OpIndex` variant — same role as
+/// `MethodLine` but keyed on the index into `SmaliMethod.ops`
+/// rather than a line offset in the rendered body. Survives the
+/// per-op editor's insertions / deletions, which line offsets
+/// don't. `MethodLine` is preserved on read for backward compat;
+/// the glass-ui loader walks any `MethodLine` records and
+/// upgrades them to `OpIndex` on first open.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleRecord {
@@ -159,11 +165,23 @@ pub enum AnnotationKey {
     Method(String, String),
     /// A specific line within a DEX method body. `line_offset` is
     /// 0-indexed relative to the `.method` directive line itself
-    /// (so 0 is the header, 1 is the first body line). Stable as
-    /// long as the artifact's bytes don't change — and if they
-    /// did, the ArtifactId would change too and the annotation
-    /// lookup would miss anyway.
+    /// (so 0 is the header, 1 is the first body line).
+    ///
+    /// Legacy v2 shape, kept for backward read compat. New writes
+    /// always produce [`OpIndex`](Self::OpIndex), which survives
+    /// editing the method body. The glass-ui loader upgrades any
+    /// remaining `MethodLine` records to `OpIndex` on first open.
     MethodLine(String, String, u32),
+    /// A specific op within a DEX method. `op_index` is the index
+    /// into `SmaliMethod.ops` — the parsed structure — so
+    /// inserting / deleting ops in the per-op editor shifts the
+    /// index by a known amount and the annotation can be re-keyed
+    /// atomically.
+    OpIndex {
+        class_jni: String,
+        method_decl: String,
+        op_index: u32,
+    },
 }
 
 /// All three facets that can live on one annotation key. The

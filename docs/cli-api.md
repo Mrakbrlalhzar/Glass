@@ -168,6 +168,31 @@ Full smali source for one class.
 glass smali ./app.apk --class com.example.MainActivity --text
 ```
 
+### `smali-set <path> --class <ref> [--body STR | --file PATH] --patches FILE`
+Stage a typed rewrite of one DEX class. The body is the full smali
+text (same shape `smali` returns); the `.class` line in the body
+must declare the same class as `--class` (we cross-check to avoid
+silently overwriting the wrong slot).
+
+Exactly one of `--body` (inline string), `--file` (path to a
+`.smali` file), or stdin (neither flag given) supplies the body.
+
+Smali edits accumulate in the same patch file as byte-level
+`patch` edits — `export-patched` writes both. Per-`(artifact,
+class_jni)` upsert: re-staging the same class replaces the prior
+body.
+
+```sh
+# Round-trip via stdin
+glass smali ./app.apk --class com.example.Foo \
+  | sed 's/old-name/new-name/g' \
+  | glass smali-set ./app.apk --class com.example.Foo --patches edits.json
+
+# Or read from disk
+glass smali-set ./app.apk --class com.example.Foo \
+  --file new_foo.smali --patches edits.json
+```
+
 ### `methods <path> --class <ref>`
 Methods declared by a class (name, descriptor, modifiers, op count,
 constructor flag).

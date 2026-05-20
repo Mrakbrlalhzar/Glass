@@ -55,6 +55,12 @@ fn set_macos_process_name(_name: &str) {}
 
 pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
     set_macos_process_name("Glass");
+    // Install a panic hook that the live smali op editor can
+    // tell to stay quiet on a thread-local basis. Without this,
+    // every keystroke against a partial op line dumps a panic
+    // backtrace from the smali parser to stderr — caught
+    // correctly by `parse_smali_class`, but extremely noisy.
+    glass_api::install_suppressible_panic_hook();
     let db = match glass_db::Database::open(fresh) {
         Ok(d) => Some(d),
         Err(e) => {
@@ -547,9 +553,21 @@ fn spawn_loader(shell: &gpui::Entity<Shell>, path: PathBuf, cx: &mut App) {
                     // first point we have both the artifact list and
                     // the DB handle in the same place.
                     if let Some(db) = shell.db_ref() {
-                        let idx = crate::annotations::load_for_artifacts(
+                        let mut idx = crate::annotations::load_for_artifacts(
                             db,
                             &bundle.artifact_ids,
+                        );
+                        // One-time upgrade of legacy `MethodLine`
+                        // annotations to op-index keys. Runs while
+                        // we still have both the DB handle and the
+                        // freshly-lifted SmaliClass set; persists
+                        // the result so subsequent opens skip the
+                        // work (the upgrade is idempotent — no
+                        // MethodLine entries means nothing to do).
+                        crate::annotations::upgrade_method_line_to_op_index(
+                            db,
+                            &mut idx,
+                            &bundle.smali_classes,
                         );
                         bundle.annotations = std::sync::Arc::new(idx);
                     }

@@ -321,6 +321,9 @@ fn sort_key(k: &AnnotationKey) -> (u8, String) {
         AnnotationKey::Class(c) => (2, c.clone()),
         AnnotationKey::Method(c, m) => (3, format!("{c}->{m}")),
         AnnotationKey::MethodLine(c, m, line) => (4, format!("{c}->{m}#{line:08}")),
+        AnnotationKey::OpIndex { class_jni, method_decl, op_index } => {
+            (5, format!("{class_jni}->{method_decl}#{op_index:08}"))
+        }
     }
 }
 
@@ -343,6 +346,16 @@ fn primary_label(k: &AnnotationKey, rename: Option<&str>) -> String {
             } else {
                 format!("{cls}.{short}:{line}")
             }
+        }
+        AnnotationKey::OpIndex { class_jni, method_decl, op_index } => {
+            let short = method_decl.split('(').next().unwrap_or(method_decl);
+            let cls = class_jni
+                .trim_start_matches('L')
+                .trim_end_matches(';')
+                .rsplit('/')
+                .next()
+                .unwrap_or(class_jni);
+            format!("{cls}.{short} op{op_index}")
         }
     };
     match rename {

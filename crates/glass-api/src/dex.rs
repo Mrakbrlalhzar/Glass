@@ -113,6 +113,26 @@ impl Bundle {
         })
     }
 
+    /// Resolve a class reference (JNI or dotted Java form) to the
+    /// `(dex_artifact_id, class_jni)` pair that owns it. Used by
+    /// `smali-set` to populate a `SmaliPatchEntry` without making
+    /// the caller learn the DEX layout.
+    pub fn resolve_smali_class(
+        &self,
+        class_ref: &str,
+    ) -> Result<(glass_db::ArtifactId, String)> {
+        let target = self
+            .resolve_class(class_ref)
+            .with_context(|| format!("no class matches {class_ref:?}"))?;
+        let target_jni = target.name.as_jni_type();
+        for group in &self.dex_groups {
+            if group.classes.iter().any(|c| c.name.as_jni_type() == target_jni) {
+                return Ok((group.artifact_id.clone(), target_jni));
+            }
+        }
+        anyhow::bail!("class {target_jni:?} not found in any DEX group");
+    }
+
     /// Methods declared by a class.
     pub fn methods(&self, class_ref: &str) -> Result<MethodListing> {
         let class = self

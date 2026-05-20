@@ -54,6 +54,14 @@ pub struct EditPatch {
 /// caller error.
 pub type EditMap = HashMap<ArtifactId, Vec<EditPatch>>;
 
+/// Per-DEX typed smali-class edits. Outer key is the DEX
+/// artifact id (blake3 of the raw `classes*.dex` bytes — matches
+/// what the loader hashes at open time). Inner key is the class
+/// JNI signature (`Lcom/foo/Bar;`); value is the rewritten
+/// SmaliClass that replaces the original in the re-emitted DEX.
+pub type SmaliEditMap =
+    HashMap<ArtifactId, HashMap<String, smali::types::SmaliClass>>;
+
 /// Apply `edits` to the artifact described by `binary_bytes`
 /// (the raw on-disk bytes of one Mach-O / ELF body) and return
 /// the re-serialised output.
@@ -128,15 +136,43 @@ fn locate_in_section(container: &Container, vaddr: u64) -> Result<(usize, usize)
 }
 
 /// Top-level entry point: write a patched copy of `bundle.source_path`
-/// to `out_path`, applying `edits` keyed by artifact id.
+/// to `out_path`, applying byte-level `edits` keyed by artifact id.
+///
+/// Use [`export_to_path_with_smali`] when there are also typed
+/// smali-class edits to re-emit. This wrapper is kept for the
+/// byte-only callers (CLI `export-patched`, tests).
 pub fn export_to_path(bundle: &Bundle, edits: &EditMap, out_path: &Path) -> Result<()> {
-    if edits.is_empty() {
+    let empty = SmaliEditMap::new();
+    export_to_path_with_smali(bundle, edits, &empty, out_path)
+}
+
+/// Same as [`export_to_path`] but also accepts a [`SmaliEditMap`]
+/// of typed class rewrites. Only meaningful for APK bundles —
+/// passing a non-empty smali map for a Native / IPA bundle is
+/// caller error.
+pub fn export_to_path_with_smali(
+    bundle: &Bundle,
+    edits: &EditMap,
+    smali_edits: &SmaliEditMap,
+    out_path: &Path,
+) -> Result<()> {
+    if edits.is_empty() && smali_edits.is_empty() {
         bail!("no edits to export");
     }
     match bundle.kind {
-        BundleKind::Native => export_native_to_path(bundle, edits, out_path),
-        BundleKind::Apk => export_apk_to_path(bundle, edits, out_path),
-        BundleKind::Ipa => export_ipa_to_path(bundle, edits, out_path),
+        BundleKind::Native => {
+            if !smali_edits.is_empty() {
+                bail!("native bundle can't carry smali edits");
+            }
+            export_native_to_path(bundle, edits, out_path)
+        }
+        BundleKind::Apk => export_apk_to_path(bundle, edits, smali_edits, out_path),
+        BundleKind::Ipa => {
+            if !smali_edits.is_empty() {
+                bail!("IPA bundle can't carry smali edits");
+            }
+            export_ipa_to_path(bundle, edits, out_path)
+        }
     }
 }
 
@@ -159,31 +195,96 @@ fn export_native_to_path(bundle: &Bundle, edits: &EditMap, out: &Path) -> Result
     Ok(())
 }
 
-fn export_apk_to_path(bundle: &Bundle, edits: &EditMap, out: &Path) -> Result<()> {
+fn export_apk_to_path(
+    bundle: &Bundle,
+    edits: &EditMap,
+    smali_edits: &SmaliEditMap,
+    out: &Path,
+) -> Result<()> {
     use smali::android::zip::ApkFile;
+
+    // Collect every changed component into a single
+    // (entry_name → new_bytes) table. Byte edits against native
+    // libs and typed smali edits feed into the same replace_entry
+    // loop below, so a future third component type (resources,
+    // AndroidManifest, etc.) just needs another collector here.
+    let mut overrides: Vec<(String, Vec<u8>)> = Vec::new();
+    collect_native_overrides(bundle, edits, &mut overrides)?;
+    collect_dex_overrides(bundle, smali_edits, &mut overrides)?;
+
     let mut apk = ApkFile::from_file(&bundle.source_path)
         .map_err(|e| anyhow!("opening APK {}: {e:?}", bundle.source_path.display()))?;
+    for (entry_name, new_bytes) in overrides {
+        apk.replace_entry(&entry_name, new_bytes)
+            .map_err(|e| anyhow!("replacing {entry_name} in APK: {e:?}"))?;
+    }
+    apk.write_to_file(out)
+        .map_err(|e| anyhow!("writing patched APK {}: {e:?}", out.display()))?;
+    Ok(())
+}
+
+/// Build (entry_name, new_bytes) pairs for every native lib that
+/// has staged byte edits. Native libs live at `lib/<abi>/<name>`
+/// — the artifact's `label` is exactly that suffix (set at load
+/// time).
+fn collect_native_overrides(
+    bundle: &Bundle,
+    edits: &EditMap,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<()> {
     for (artifact_id, patches) in edits {
         let artifact = bundle
             .artifacts
             .iter()
             .find(|a| &a.id == artifact_id)
             .ok_or_else(|| anyhow!("artifact for edit not found in bundle"))?;
-        // APK native libs live at `lib/<abi>/<name>`. The artifact's
-        // label is exactly that — we wrote it at load time.
-        let entry_name = artifact.label.clone();
-        let entry_name = if entry_name.starts_with("lib/") {
-            entry_name
+        let entry_name = if artifact.label.starts_with("lib/") {
+            artifact.label.clone()
         } else {
-            format!("lib/{entry_name}")
+            format!("lib/{}", artifact.label)
         };
         let new_bytes = export_native_artifact(&artifact.binary.bytes, patches)
             .with_context(|| format!("re-serialising {entry_name}"))?;
-        apk.replace_entry(&entry_name, new_bytes)
-            .map_err(|e| anyhow!("replacing {entry_name} in APK: {e:?}"))?;
+        out.push((entry_name, new_bytes));
     }
-    apk.write_to_file(out)
-        .map_err(|e| anyhow!("writing patched APK {}: {e:?}", out.display()))?;
+    Ok(())
+}
+
+/// Build (entry_name, new_bytes) pairs for every DEX that has
+/// staged smali edits. Edited classes are spliced into the
+/// original class list (load order preserved aside from a final
+/// JNI-name sort that mirrors `smali2dex`), then the whole DEX
+/// is re-emitted via `DexFile::from_smali`.
+fn collect_dex_overrides(
+    bundle: &Bundle,
+    smali_edits: &SmaliEditMap,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<()> {
+    use smali::dex::DexFile;
+    for (dex_aid, class_edits) in smali_edits {
+        if class_edits.is_empty() {
+            continue;
+        }
+        let group = bundle
+            .dex_groups
+            .iter()
+            .find(|g| &g.artifact_id == dex_aid)
+            .ok_or_else(|| {
+                anyhow!("smali edit references unknown DEX artifact {dex_aid}")
+            })?;
+        let mut classes: Vec<smali::types::SmaliClass> = group
+            .classes
+            .iter()
+            .map(|c| {
+                let jni = c.name.as_jni_type();
+                class_edits.get(&jni).cloned().unwrap_or_else(|| c.clone())
+            })
+            .collect();
+        classes.sort_by(|a, b| a.name.as_jni_type().cmp(&b.name.as_jni_type()));
+        let dex = DexFile::from_smali(&classes)
+            .map_err(|e| anyhow!("assembling DEX {}: {e:?}", group.name))?;
+        out.push((group.name.clone(), dex.to_bytes().to_vec()));
+    }
     Ok(())
 }
 

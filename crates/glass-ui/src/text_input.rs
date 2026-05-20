@@ -30,7 +30,7 @@
 //! selection; the selected range is `min(cursor, anchor) ..
 //! max(cursor, anchor)`. When `None`, no selection is active.
 
-use gpui::{div, px, App, ParentElement, Rgba, SharedString, Styled};
+use gpui::{div, px, App, InteractiveElement, ParentElement, Rgba, SharedString, Styled};
 
 /// Single-line text-editing state + key handlers.
 #[derive(Debug, Clone)]
@@ -441,6 +441,135 @@ impl TextInput {
             col = col.child(line_row);
         }
         col
+    }
+
+    /// Variant of `render` that overlays a per-character click hit
+    /// zone. Callers supply an `on_pos_click` that moves the cursor
+    /// to the clicked byte offset (and optionally extends the
+    /// selection when shift is held). Each character gets its own
+    /// `Stateful<Div>` with a unique id derived from `id_prefix`
+    /// and the byte offset.
+    pub fn render_clickable<F>(
+        &self,
+        id_prefix: &'static str,
+        text_colour: Rgba,
+        dim: Rgba,
+        placeholder: &str,
+        font: &'static str,
+        on_pos_click: F,
+    ) -> gpui::Div
+    where
+        F: Fn(usize, bool, &mut gpui::App) + Clone + 'static,
+    {
+        let _ = (font, dim);
+        let (sel_a, sel_b) = self.selection_range();
+        let caret_idx = self.cursor;
+        let field_bg: Rgba = crate::theme::current().hex.field_bg.rgba();
+        let sel_bg: Rgba = crate::theme::current().hex.field_selection.rgba();
+        let mut row = gpui::div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(22.))
+            .px_2()
+            .bg(field_bg);
+        if self.text.is_empty() {
+            // Empty input: a single hit zone takes the user back to
+            // cursor=0. Otherwise clicks would land below the caret
+            // and do nothing.
+            let on_click = on_pos_click.clone();
+            let id: &'static str =
+                Box::leak(format!("{id_prefix}-empty").into_boxed_str());
+            row = row.child(caret(text_colour)).child(
+                gpui::div()
+                    .id(id)
+                    .flex_1()
+                    .h(px(22.))
+                    .text_color(dim)
+                    .font_family(font)
+                    .ml(px(2.))
+                    .child(SharedString::from(placeholder.to_string()))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        move |ev: &gpui::MouseDownEvent, _w, cx: &mut gpui::App| {
+                            on_click(0, ev.modifiers.shift, cx);
+                        },
+                    ),
+            );
+            return row;
+        }
+        // Walk char by char so each glyph is its own click target.
+        // Cost: O(N) elements where N is text length. For class
+        // signatures that's <100; trivial.
+        let mut byte = 0usize;
+        for ch in self.text.chars() {
+            let in_sel = byte >= sel_a && byte < sel_b && sel_a != sel_b;
+            if byte == caret_idx {
+                row = row.child(caret(text_colour));
+            }
+            let on_click = on_pos_click.clone();
+            let char_id: &'static str =
+                Box::leak(format!("{id_prefix}-c{byte}").into_boxed_str());
+            let mut cell = gpui::div()
+                .id(char_id)
+                .font_family(font)
+                .text_color(text_colour)
+                .child(SharedString::from(ch.to_string()))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |ev: &gpui::MouseDownEvent, _w, cx: &mut gpui::App| {
+                        on_click(byte, ev.modifiers.shift, cx);
+                    },
+                );
+            if in_sel {
+                cell = cell.bg(sel_bg);
+            }
+            row = row.child(cell);
+            byte += ch.len_utf8();
+        }
+        // Trailing caret + click target so the user can land the
+        // cursor at end-of-text by clicking past the last glyph.
+        let end_byte = self.text.len();
+        if caret_idx == end_byte {
+            row = row.child(caret(text_colour));
+        }
+        let on_click_tail = on_pos_click;
+        let tail_id: &'static str =
+            Box::leak(format!("{id_prefix}-tail").into_boxed_str());
+        row = row.child(
+            gpui::div()
+                .id(tail_id)
+                .flex_1()
+                .h(px(22.))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |ev: &gpui::MouseDownEvent, _w, cx: &mut gpui::App| {
+                        on_click_tail(end_byte, ev.modifiers.shift, cx);
+                    },
+                ),
+        );
+        row
+    }
+
+    /// Move the cursor to a specific byte offset, optionally
+    /// extending the selection (when `shift` is true). Used by
+    /// `render_clickable`'s callbacks.
+    pub fn set_cursor_pos(&mut self, byte_idx: usize, shift: bool) {
+        // Clamp to a UTF-8 char boundary at or before the requested
+        // index — clicking on the middle of a multi-byte char should
+        // still land cleanly.
+        let mut idx = byte_idx.min(self.text.len());
+        while idx > 0 && !self.text.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        if shift {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.cursor);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor = idx;
     }
 
     pub fn render(

@@ -171,8 +171,30 @@ impl<'a> AnnotationKeyArgs<'a> {
                     line_offset,
                 ))
             }
+            "op-index" => {
+                // `method` is required and is "name(descriptor)return#N"
+                // — same encoding as `method-line`, but N is the
+                // index into SmaliMethod.ops (the parsed structure).
+                // Survives op insertions / deletions in the per-op
+                // editor; old `method-line` annotations are upgraded
+                // to this shape at bundle load time.
+                let method = self.method.with_context(|| {
+                    "op-index key requires `method` ('name(descriptor)return#N')"
+                })?;
+                let (name_sig, idx_str) = method.rsplit_once('#').with_context(|| {
+                    "op-index: `method` must end with #<op_index>"
+                })?;
+                let op_index: u32 = idx_str
+                    .parse()
+                    .with_context(|| format!("op-index: bad index {idx_str:?}"))?;
+                Ok(AnnotationKey::OpIndex {
+                    class_jni: self.key.to_string(),
+                    method_decl: name_sig.to_string(),
+                    op_index,
+                })
+            }
             other => anyhow::bail!(
-                "unknown key_kind {other:?}: expected one of address / symbol / class / method / method-line"
+                "unknown key_kind {other:?}: expected one of address / symbol / class / method / method-line / op-index"
             ),
         }
     }
@@ -285,6 +307,10 @@ fn stringify_key(key: &AnnotationKey) -> (&'static str, String) {
         AnnotationKey::MethodLine(c, m, line) => {
             ("method-line", format!("{c}->{m}#{line}"))
         }
+        AnnotationKey::OpIndex { class_jni, method_decl, op_index } => (
+            "op-index",
+            format!("{class_jni}->{method_decl}#{op_index}"),
+        ),
     }
 }
 
