@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+  <!-- The Kotlin mark: a rounded square split by a "K" of two
+       triangles. Top half is a triangle pointing right; bottom
+       half is a triangle pointing right offset diagonally so
+       together they form a stylised K. -->
+  <path d="M2 2 L 14 2 L 8 8 L 14 14 L 2 14 Z" />
+</svg>

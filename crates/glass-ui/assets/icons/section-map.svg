@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round">
+  <!-- Four stacked rectangles of varying widths — read as the
+       binary's section layout (.text / .data / __text / __data
+       etc.). Filled at low opacity so it doesn't compete with
+       the leaf labels. -->
+  <rect x="1.5" y="2.5" width="13" height="2.6" fill="currentColor" fill-opacity="0.25" />
+  <rect x="1.5" y="5.7" width="9" height="2.6" fill="currentColor" fill-opacity="0.15" />
+  <rect x="1.5" y="8.9" width="11" height="2.6" fill="currentColor" fill-opacity="0.25" />
+  <rect x="1.5" y="12.1" width="5.5" height="2.6" fill="currentColor" fill-opacity="0.15" />
+</svg>

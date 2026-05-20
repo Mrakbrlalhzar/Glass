@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+  <!-- Four narrow rows with a dotted "address column" on the
+       left and varying-width "instruction" bars on the right.
+       Reads as "disassembled rows of instructions". -->
+  <rect x="2" y="3" width="1.4" height="1.4" rx="0.3" />
+  <rect x="2" y="6" width="1.4" height="1.4" rx="0.3" />
+  <rect x="2" y="9" width="1.4" height="1.4" rx="0.3" />
+  <rect x="2" y="12" width="1.4" height="1.4" rx="0.3" />
+  <rect x="5" y="3.2" width="9" height="1" rx="0.3" />
+  <rect x="5" y="6.2" width="6.5" height="1" rx="0.3" />
+  <rect x="5" y="9.2" width="8" height="1" rx="0.3" />
+  <rect x="5" y="12.2" width="5" height="1" rx="0.3" />
+</svg>

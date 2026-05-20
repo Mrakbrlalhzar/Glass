@@ -68,7 +68,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
             None
         }
     };
-    application().run(move |cx: &mut App| {
+    application().with_assets(crate::IconAssets).run(move |cx: &mut App| {
         cx.init_colors();
         // Quit when the last window closes — the default on macOS
         // keeps the process alive in the dock, which doesn't match

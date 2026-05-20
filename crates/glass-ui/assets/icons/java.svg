@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Steam wisps -->
+  <path d="M6 2 C 5 3 7 4 6 5" />
+  <path d="M9 2 C 8 3 10 4 9 5" />
+  <!-- Cup body -->
+  <path d="M3.5 7 L 3.5 12 Q 3.5 13.5 5 13.5 L 10 13.5 Q 11.5 13.5 11.5 12 L 11.5 7 Z" fill="currentColor" fill-opacity="0.18" />
+  <!-- Handle -->
+  <path d="M11.5 8 Q 13.5 8 13.5 10 Q 13.5 12 11.5 12" />
+  <!-- Saucer -->
+  <path d="M2.5 14.5 L 12.5 14.5" />
+</svg>

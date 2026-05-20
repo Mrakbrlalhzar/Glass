@@ -195,15 +195,20 @@ fn snapshot_apk_with_progress(
         p.total = total_classes;
     }
 
+    // One shared package tree across every DEX. The DEX
+    // partitioning is purely a packaging artefact — d8/r8
+    // split classes across `classes.dex` / `classes2.dex` / …
+    // based on the per-DEX 64K field/method-ref cap, not on
+    // anything semantic. Browsing the merged package hierarchy
+    // is much friendlier; each leaf still remembers its DEX
+    // origin in `origins[leaf_id]` so the smali tab can show a
+    // "which DEX?" chip.
+    let mut classes_pkg_root = PkgBuilder::default();
     let mut processed = 0usize;
     for (dex_index, dex) in apk.dex_files.iter().enumerate() {
         let classes = dex.classes()?;
         let dex_origin = SharedString::from(dex.name.clone());
-        // Artifact id for this DEX — index matches the push order
-        // a few lines above where we pushed `from_bytes(&dex.bytes)`
-        // into `artifact_ids`.
         let dex_aid = artifact_ids[dex_index].clone();
-        let mut pkg_root = PkgBuilder::default();
         for class in classes {
             let id = LeafId(bodies.len());
             bodies.push(SharedString::from(class.to_smali()));
@@ -214,21 +219,20 @@ fn snapshot_apk_with_progress(
                 parts.last().cloned().unwrap_or_else(|| jni.clone()),
             ));
             kinds.push(LeafKind::SmaliClass { class_jni: jni.clone() });
-            // Cache the typed class for the editor + export paths.
             smali_classes.insert((dex_aid.clone(), jni.clone()), class.clone());
-            pkg_root.insert(&parts, id);
+            classes_pkg_root.insert(&parts, id);
             processed += 1;
-            // Updating shared state every class would thrash the lock. The
-            // UI polls at ~30fps so a coarser cadence here is plenty.
             if processed % 64 == 0 {
                 if let Ok(mut p) = progress.lock() {
                     p.current = processed;
                 }
             }
         }
+    }
+    if !apk.dex_files.is_empty() {
         roots.push(Node::Group {
-            label: dex_origin,
-            children: pkg_root.finish(),
+            label: SharedString::from("Classes"),
+            children: classes_pkg_root.finish(),
         });
     }
     if let Ok(mut p) = progress.lock() {
@@ -336,6 +340,19 @@ fn snapshot_apk_with_progress(
     }
     let bundle_id = glass_db::BundleId::from_raw(*bundle_hasher.finalize().as_bytes());
 
+    // Per-leaf icon path. For smali classes we look up the
+    // original source extension (Foo.java / Foo.kt) so the
+    // Java vs Kotlin marks render correctly in the navigator.
+    let leaf_icons = crate::icons::leaf_icons_for(&kinds, |jni| {
+        // The smali_classes map is keyed by `(ArtifactId,
+        // class_jni)`; we don't have the artifact id at the
+        // leaf level here, so the first match wins. A JNI sig
+        // is class-unique across the bundle, so this is safe.
+        smali_classes
+            .iter()
+            .find(|((_, k), _)| k == jni)
+            .and_then(|(_, c)| c.source.clone())
+    });
     Ok(LoadedBundle {
         title: format!("Glass — {}", apk.path.display()),
         tree: Arc::new(Tree { roots }),
@@ -343,6 +360,7 @@ fn snapshot_apk_with_progress(
         origins: Arc::new(origins),
         labels: Arc::new(labels),
         kinds: Arc::new(kinds),
+        leaf_icons: Arc::new(leaf_icons),
         bundle_id: Some(bundle_id),
         artifact_ids: Arc::new(artifact_ids),
         display_label,
@@ -572,6 +590,7 @@ fn snapshot_ipa_with_progress(
         (glass_db::ArtifactId, String),
         ::smali::types::SmaliClass,
     > = std::collections::HashMap::new();
+    let leaf_icons = crate::icons::leaf_icons_for(&kinds, |_jni| None);
     Ok(LoadedBundle {
         title: format!("Glass — {}", ipa.path.display()),
         tree: Arc::new(Tree { roots }),
@@ -579,6 +598,7 @@ fn snapshot_ipa_with_progress(
         origins: Arc::new(origins),
         labels: Arc::new(labels),
         kinds: Arc::new(kinds),
+        leaf_icons: Arc::new(leaf_icons),
         bundle_id: Some(bundle_id),
         artifact_ids: Arc::new(artifact_ids),
         display_label,
@@ -796,6 +816,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         });
     }
 
+    let leaf_icons = crate::icons::leaf_icons_for(&kinds_v, |_jni| None);
     Ok(LoadedBundle {
         title: format!("Glass — {}", bin.path.display()),
         tree: Arc::new(Tree { roots: tree_roots }),
@@ -803,6 +824,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         origins: Arc::new(origins),
         labels: Arc::new(labels_v),
         kinds: Arc::new(kinds_v),
+        leaf_icons: Arc::new(leaf_icons),
         bundle_id: None,
         artifact_ids: Arc::new(vec![aid]),
         display_label,

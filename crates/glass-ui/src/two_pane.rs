@@ -52,40 +52,72 @@ pub fn render_two_pane(
                 div().size_full().flex().flex_col().child(
                 list(shell.list_state.clone(), {
                     let rows = rows.clone();
+                    let leaf_icons = bundle.leaf_icons.clone();
                     move |index, _window, _cx| {
                         let row = rows[index].clone();
                         let handle = self_handle.clone();
                         let indent = px(8. + row.depth as f32 * 14.);
 
-                        let (is_selected, glyph, label, on_click_kind): (bool, &'static str, SharedString, RowAction) = match row.kind {
-                            RowKind::Group { ref path, expanded, ref label } => (
+                        let (is_selected, label, on_click_kind, leaf_icon): (bool, SharedString, RowAction, Option<&'static str>) = match row.kind {
+                            RowKind::Group { ref path, expanded: _, ref label } => (
                                 false,
-                                if expanded { "▾ " } else { "▸ " },
                                 label.clone(),
                                 RowAction::Toggle(path.clone()),
+                                None,
                             ),
                             RowKind::Leaf { leaf_id, ref label } => (
                                 selected == Some(leaf_id),
-                                "  ",
                                 label.clone(),
                                 RowAction::Select(leaf_id),
+                                leaf_icons.get(leaf_id.0).copied(),
                             ),
+                        };
+                        let chevron = match row.kind {
+                            RowKind::Group { expanded, .. } => {
+                                if expanded { Some("▾") } else { Some("▸") }
+                            }
+                            RowKind::Leaf { .. } => None,
                         };
 
                         let row_bg = if is_selected { accent } else { panel };
                         let row_fg = if is_selected { crate::theme::current().shell.text_bright.rgba() } else { fg };
 
-                        div()
+                        let mut row_div = div()
                             .h(px(22.))
                             .w_full()
                             .pl(indent)
                             .pr_3()
                             .flex()
+                            .flex_row()
                             .items_center()
+                            .gap_1()
                             .text_xs()
                             .bg(row_bg)
-                            .text_color(row_fg)
-                            .child(format!("{glyph}{label}"))
+                            .text_color(row_fg);
+                        if let Some(c) = chevron {
+                            row_div = row_div.child(
+                                div().w(px(14.)).flex_shrink_0().child(c),
+                            );
+                        } else if let Some(icon_path) = leaf_icon {
+                            row_div = row_div.child(
+                                div()
+                                    .w(px(14.))
+                                    .h(px(14.))
+                                    .flex_shrink_0()
+                                    .child(
+                                        gpui::svg()
+                                            .path(SharedString::from(icon_path))
+                                            .size_full()
+                                            .text_color(row_fg),
+                                    ),
+                            );
+                        } else {
+                            row_div = row_div.child(
+                                div().w(px(14.)).flex_shrink_0(),
+                            );
+                        }
+                        row_div
+                            .child(label)
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
                                 move |_event, _window, cx: &mut App| {
@@ -454,6 +486,17 @@ pub fn render_two_pane(
                 }
                 let edited_fields = Arc::new(edited_fields);
                 let edited_methods = Arc::new(edited_methods);
+                // Origin chip — shows which DEX inside the APK
+                // this class was lifted from. Tooltip-style label
+                // anchored top-right of the smali body. We surface
+                // it because the user no longer sees per-DEX
+                // groupings in the navigator (all classes share a
+                // single package tree now), but they may still
+                // want to know "is this in classes.dex or
+                // classes3.dex?" when sizing a patch.
+                let active_leaf_origin: Option<SharedString> = shell
+                    .active_leaf()
+                    .and_then(|leaf| bundle.origins.get(leaf.0).cloned());
                 let max_h = px(LISTING_ROW_MIN_WIDTH);
                 div()
                     .flex_1()
@@ -465,6 +508,23 @@ pub fn render_two_pane(
                             .flex_1()
                             .relative()
                             .overflow_hidden()
+                            .when_some(active_leaf_origin, |d, origin| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(4.))
+                                        .right(px(12.))
+                                        .px_2()
+                                        .py_0p5()
+                                        .text_xs()
+                                        .text_color(dim)
+                                        .border_1()
+                                        .border_color(border)
+                                        .rounded_sm()
+                                        .bg(panel)
+                                        .child(origin),
+                                )
+                            })
                             .on_scroll_wheel(cx.listener(
                                 move |this, ev: &gpui::ScrollWheelEvent, _w, cx| {
                                     let dx = ev.delta.pixel_delta(px(22.)).x;

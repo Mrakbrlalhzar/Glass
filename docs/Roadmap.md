@@ -6,3 +6,15 @@
 * scripting setup e.g. scripts describe their function and add to menus *(note: depends on the scripting engine landing first.)*
 * execute scripts *(note: depends on the scripting engine landing first.)*
 * Function decompilation into pseudo C code or Java (for DEX classes)
+
+## Loose ends
+
+* Smali editing: add methods, fields and method lines. The current
+  popovers and per-op editor only mutate *existing* members — there's no
+  affordance to insert a brand-new field, method, or to delete one
+  outright. The per-op editor's Cmd-Enter inserts a blank line after the
+  current one, which is the only "add" today. A complete pass needs:
+  `+ add field` / `+ add method` buttons on the class-decl popover,
+  delete affordances on each member row in the Changes dialog, and a way
+  to insert a method body op at the head of a method (currently only
+  after).

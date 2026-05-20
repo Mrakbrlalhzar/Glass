@@ -34,6 +34,7 @@ mod dex_cg_render;
 mod graph;
 mod graph_canvas;
 mod hex;
+mod icons;
 mod listing_model;
 mod listing_render;
 mod loader;
@@ -72,6 +73,7 @@ pub use search::{build_search_index, SearchEntry, SearchIndex, SearchJump};
 pub use xref::{PaletteScope, PaletteScopeSource, XrefIndexState, XrefProgress, XrefStore};
 
 pub use hex::{build_hex_rows, hex_row_for_addr, HexRow};
+pub use icons::IconAssets;
 pub use listing_model::{
     build_listing_rows, listing_row_for_addr, ArrowDirection, ArrowRole, ArrowSegment, ArrowStyle,
     DataPeek, DataSectionMeta, ListingRow, ARROW_MAX_LANES,
@@ -190,6 +192,11 @@ pub struct LoadedBundle {
     pub labels: Arc<Vec<SharedString>>,
     /// What kind of view each leaf opens. Parallel to `bodies` etc.
     pub kinds: Arc<Vec<LeafKind>>,
+    /// Icon asset path for each leaf — chosen at load time from
+    /// the leaf kind (and, for smali classes, the parsed
+    /// `SmaliClass.source` extension). One of the names
+    /// registered by the `IconAssets` source — see `icons.rs`.
+    pub leaf_icons: Arc<Vec<&'static str>>,
     /// blake3 of the source bytes — the persistence key. `None` for the
     /// standalone arm64 case until that grows real artifact identity.
     pub bundle_id: Option<glass_db::BundleId>,
