@@ -438,6 +438,9 @@ fn open_glass_window(
                 spawn_flush_timer(&shell, db, cx);
             }
             spawn_annotation_reload_poll(&shell, cx);
+            spawn_device_poll(&shell, cx);
+            spawn_frida_probe(&shell, cx);
+            spawn_debug_dock_pump(&shell, cx);
             shell.update(cx, |_shell, cx: &mut Context<Shell>| {
                 cx.observe_window_bounds(window, |_shell, window: &mut Window, _cx| {
                     let b = window.bounds();
@@ -494,6 +497,459 @@ fn spawn_annotation_reload_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Periodic device-discovery snapshot. Runs `DeviceManager::
+/// list()` every 2.5s and pushes the result through
+/// `cx.update_entity` so the toolbar's device chip stays in
+/// sync with what's plugged in. Cheap — adb is a local socket
+/// call, usbmuxd is similar.
+fn spawn_device_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
+    let weak = shell.downgrade();
+    // Snapshot the manager handle once outside the loop —
+    // `Arc::clone` is cheap and avoids re-entering the entity
+    // every tick just to grab it.
+    let manager = cx.update_entity(shell, |s, _cx| s.device_manager.clone());
+    cx.spawn(async move |cx| {
+        // Probe backend status once at startup. Manager
+        // re-uses cached info on subsequent calls.
+        if let Some(entity) = weak.upgrade() {
+            let status = manager.backend_status();
+            let _ = cx.update_entity(&entity, |shell, cx| {
+                shell.device_backend_status = status;
+                cx.notify();
+            });
+        }
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            let Some(entity) = weak.upgrade() else { break };
+            // Run the list call off the foreground so a slow
+            // adb invocation can't stall the UI thread.
+            let manager = manager.clone();
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { manager.list() })
+                .await;
+            let _ = cx.update_entity(&entity, |shell, cx| {
+                // If the selected device disappeared, drop it
+                // back to None so the chip flips to "No device"
+                // instead of pretending we're still attached.
+                if let Some(id) = shell.selected_device.clone() {
+                    if !snapshot.iter().any(|d| d.id == id) {
+                        shell.selected_device = None;
+                    }
+                }
+                shell.device_snapshot = snapshot;
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+/// Probe the currently-selected device for frida-server. Runs
+/// off the foreground (frida-core's calls block, even the
+/// cheap-looking ones). Cache TTL is 10s — frida-server
+/// doesn't come and go, but we want a freshly-started server
+/// to show up in the chip within a reasonable interval.
+///
+/// Only probes when `Shell.selected_device` is `Some`. Result
+/// goes into `Shell.frida_probes`; the chip reads from there
+/// at render time.
+fn spawn_frida_probe(shell: &gpui::Entity<Shell>, cx: &mut App) {
+    let weak = shell.downgrade();
+    cx.spawn(async move |cx| {
+        // 3 seconds is short enough that uninstall / install /
+        // app-launch state changes show up in the chip within
+        // a few ticks, and long enough that the chip doesn't
+        // do the frida round-trip on every render. The probe
+        // itself is cheap but it does block a tokio worker.
+        const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2000))
+                .await;
+            let Some(entity) = weak.upgrade() else { break };
+            // Decide whether the selected device needs a probe.
+            // Pull the answer out of the Shell synchronously.
+            let target = cx.update_entity(&entity, |shell, _cx| {
+                let id = shell.selected_device.clone()?;
+                let stale = shell
+                    .frida_probes
+                    .get(&id)
+                    .map(|c| c.probed_at.elapsed() >= PROBE_TTL)
+                    .unwrap_or(true);
+                if stale { Some(id) } else { None }
+            });
+            let Some(id) = target else { continue };
+            // Snapshot the bits the cross-check needs:
+            //   * Package name from the loaded bundle's manifest
+            //     (`android:package`). Used to verify a
+            //     gadget candidate is *actually* the app the
+            //     user has loaded, not a stale frida-core
+            //     cache entry from a previous session.
+            //   * Device manager handle for the ADB
+            //     fallback verification.
+            let package_name = cx
+                .update_entity(&entity, |shell, _cx| {
+                    shell
+                        .bundle()
+                        .and_then(|b| b.android_manifest.as_ref())
+                        .and_then(|m| m.package_name().map(|s| s.to_string()))
+                });
+            let device_manager = cx.update_entity(&entity, |shell, _cx| {
+                shell.device_manager.clone()
+            });
+            // Move the actual frida call to the background
+            // executor so a stuck enumerate doesn't lock up the
+            // poll task.
+            let probe_id = id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { glass_frida::FridaRuntime::probe(&probe_id) })
+                .await;
+            // Cross-check gadget reports against ADB. Frida-
+            // core caches process listings aggressively and
+            // continues to enumerate gadgeted apps after
+            // they've been killed or uninstalled. We trust
+            // it when it says Server (frida-server is a
+            // long-lived daemon; the cache rarely lies); for
+            // Gadget we need an independent "yes the app is
+            // running" signal from ADB.
+            let final_result = reconcile_gadget_via_adb(
+                &id,
+                result,
+                package_name.as_deref(),
+                &device_manager,
+            );
+            let _ = cx.update_entity(&entity, |shell, cx| {
+                shell.frida_probes.insert(
+                    id,
+                    crate::FridaProbeCache {
+                        result: final_result,
+                        probed_at: std::time::Instant::now(),
+                    },
+                );
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+/// Reconcile the frida-core probe against an independent
+/// gadget-port probe via ADB.
+///
+/// Why the two-step:
+///   * frida-core's `enumerate_processes` lists the device's
+///     whole `ps` table, so it can only reliably surface
+///     `frida-server` (a daemon with a known name). Anything
+///     else in that list isn't a useful "gadget is alive"
+///     signal — gadget mode is per-app and frida-core caches
+///     state.
+///   * The gadget binds TCP port 27042 inside the app's
+///     sandbox *only* when its host app is running with the
+///     gadget loaded. ADB-forwarding to that port + a TCP
+///     connect+read is a direct, cache-free reachability
+///     check.
+///
+/// Behaviour:
+///   * Frida says Server → trust it.
+///   * Frida says anything else (incl. ServerUnreachable) →
+///     run the gadget-port probe. If it answers, synthesise
+///     a `Gadget` report. Otherwise pass the frida result
+///     through unchanged.
+fn reconcile_gadget_via_adb(
+    device: &glass_device::DeviceId,
+    result: Result<glass_frida::ProbeReport, glass_frida::FridaError>,
+    _expected_package: Option<&str>,
+    device_manager: &std::sync::Arc<glass_device::DeviceManager>,
+) -> Result<glass_frida::ProbeReport, glass_frida::FridaError> {
+    // Server reports we trust as-is.
+    if let Ok(r) = &result {
+        if matches!(r.kind, glass_frida::FridaKind::Server) {
+            return result;
+        }
+    }
+    // ADB only makes sense for Android.
+    if !matches!(device.platform, glass_device::DevicePlatform::Android) {
+        return result;
+    }
+    let Ok(status) = device_manager.backend_status().adb.clone() else {
+        return result;
+    };
+    let backend = match glass_device::adb::AdbBackend::with_override(
+        Some(status.binary_path),
+    ) {
+        Ok(b) => b,
+        Err(_) => return result,
+    };
+    match backend.probe_gadget(&device.serial) {
+        Ok(true) => {
+            tracing::info!("gadget probe: 27042 alive — reporting Gadget");
+            Ok(glass_frida::ProbeReport {
+                kind: glass_frida::FridaKind::Gadget,
+                // Frida-core wouldn't talk to a gadget we
+                // hadn't asked it about; we don't have a
+                // useful version string here. Empty is fine
+                // — the chip falls back to "frida-gadget"
+                // without a version suffix.
+                agent_version: None,
+                os: Some("android".to_string()),
+                gadget_process_names: Vec::new(),
+            })
+        }
+        Ok(false) => {
+            tracing::info!("gadget probe: 27042 closed");
+            result
+        }
+        Err(e) => {
+            tracing::info!(?e, "gadget probe: ADB error");
+            result
+        }
+    }
+}
+
+/// Drains the active Frida session's event channel each tick
+/// and appends formatted lines to the dock log. Runs as long
+/// as the dock has a `Session`. Cheap when nothing's ready —
+/// `poll_events` returns immediately on an empty channel.
+fn spawn_debug_dock_pump(shell: &gpui::Entity<Shell>, cx: &mut App) {
+    let weak = shell.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            let Some(entity) = weak.upgrade() else { break };
+            // Pull a clone of the session (cheap — just two
+            // Arcs) so we can drain events without holding a
+            // borrow on Shell.
+            let session_opt: Option<glass_frida::Session> =
+                cx.update_entity(&entity, |shell, _cx| {
+                    shell
+                        .debug_dock
+                        .as_ref()
+                        .and_then(|d| d.session.clone())
+                });
+            let Some(session) = session_opt else {
+                continue;
+            };
+            let events = session.poll_events();
+            if events.is_empty() {
+                continue;
+            }
+            let _ = cx.update_entity(&entity, |shell, cx| {
+                for ev in events {
+                    route_session_event(shell, ev);
+                }
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+/// Dispatch a SessionEvent to either the trace registry (if
+/// the script belongs to a live trace) or the dock's general
+/// log (for the smoke-test path and one-off scripts).
+fn route_session_event(shell: &mut Shell, ev: glass_frida::SessionEvent) {
+    match ev {
+        glass_frida::SessionEvent::ScriptMessage { script_id, payload } => {
+            // Look up the script first as a trace; failing
+            // that, as a hook. Hook + trace can't share an
+            // id (they get separate IDs from the session
+            // actor) so the ordering here is purely
+            // cosmetic.
+            let trace_key = shell
+                .bundle()
+                .and_then(|b| b.traces.key_for_script(script_id).cloned());
+            if let Some(key) = trace_key {
+                let inv = invocation_from_payload(&payload);
+                let class_short = key
+                    .class_jni
+                    .strip_prefix('L')
+                    .and_then(|s| s.strip_suffix(';'))
+                    .map(|s| s.replace('/', "."))
+                    .unwrap_or_else(|| key.class_jni.clone());
+                let line = format!(
+                    "{class_short}.{}  {}",
+                    key.method_name, inv.summary
+                );
+                if let Some(bundle) = shell.bundle_mut() {
+                    bundle.traces.push_invocation(&key, inv);
+                }
+                push_dock_log_line(shell, line);
+                return;
+            }
+            let hook_key = shell
+                .bundle()
+                .and_then(|b| b.hooks.key_for_script(script_id).cloned());
+            if let Some(key) = hook_key {
+                let inv = invocation_from_payload(&payload);
+                let class_short = key
+                    .class_jni
+                    .strip_prefix('L')
+                    .and_then(|s| s.strip_suffix(';'))
+                    .map(|s| s.replace('/', "."))
+                    .unwrap_or_else(|| key.class_jni.clone());
+                // Hooks render with an extra prefix marker so
+                // the user can distinguish trace vs hook
+                // events in the unified log.
+                let line = format!(
+                    "⚙ {class_short}.{}  {}",
+                    key.method_name, inv.summary
+                );
+                // Build hook invocation reusing the trace
+                // helper since the wire format is identical.
+                let hook_inv = crate::hooks::Invocation {
+                    at: inv.at,
+                    kind: inv.kind,
+                    summary: inv.summary,
+                };
+                if let Some(bundle) = shell.bundle_mut() {
+                    bundle.hooks.push_invocation(&key, hook_inv);
+                }
+                push_dock_log_line(shell, line);
+                return;
+            }
+            // Untracked script (smoke test or M3.4 plumbing).
+            push_dock_log_line(
+                shell,
+                format!("[script {script_id}] {payload}"),
+            );
+        }
+        glass_frida::SessionEvent::ScriptLog {
+            script_id,
+            level,
+            message,
+        } => push_dock_log_line(
+            shell,
+            format!("[script {script_id} {level}] {message}"),
+        ),
+        glass_frida::SessionEvent::ScriptError {
+            script_id,
+            description,
+        } => {
+            // Mark the matching trace OR hook as failed —
+            // a script ID is unique to one registry, so at
+            // most one of these branches fires.
+            let trace_key = shell
+                .bundle()
+                .and_then(|b| b.traces.key_for_script(script_id).cloned());
+            if let Some(key) = trace_key {
+                if let Some(bundle) = shell.bundle_mut() {
+                    bundle.traces.mark_failed(&key, description.clone());
+                }
+            } else {
+                let hook_key = shell
+                    .bundle()
+                    .and_then(|b| b.hooks.key_for_script(script_id).cloned());
+                if let Some(key) = hook_key {
+                    if let Some(bundle) = shell.bundle_mut() {
+                        bundle.hooks.mark_failed(&key, description.clone());
+                    }
+                }
+            }
+            push_dock_log_line(
+                shell,
+                format!("[script {script_id} ERR] {description}"),
+            );
+        }
+        glass_frida::SessionEvent::Detached { reason } => {
+            push_dock_log_line(shell, format!("session detached: {reason}"));
+        }
+    }
+}
+
+/// Build an [`Invocation`] from the raw JSON the trace JS
+/// sends. The shape is one of:
+///   * `{kind: "call", args: [s1, s2, ...]}` — args are
+///     pre-stringified by `safeRepr`.
+///   * `{kind: "return", value: s}`.
+///   * `{kind: "throw", error: s}` — uncaught exception.
+///   * `{kind: "ready"}` — the script's setup completed.
+///   * `{kind: "setup-error", error: s}` — the script
+///     couldn't hook the method.
+///
+/// We collapse everything into a single-line summary so the
+/// trace pane can render a clean column of text. Each variant
+/// stores the kind tag (Call/Return) for grouping later.
+fn invocation_from_payload(
+    payload: &serde_json::Value,
+) -> crate::traces::Invocation {
+    use crate::traces::{Invocation, InvocationKind};
+    let kind = payload
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
+    let (inv_kind, summary) = match kind {
+        "call" => {
+            let args: Vec<String> = payload
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|v| v.as_str().unwrap_or("?").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (InvocationKind::Call, format!("call({})", args.join(", ")))
+        }
+        "return" => {
+            let v = payload
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            (InvocationKind::Return, format!("→ {v}"))
+        }
+        "throw" => {
+            let e = payload
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            (InvocationKind::Return, format!("↯ {e}"))
+        }
+        "ready" => (
+            InvocationKind::Call,
+            "(trace ready)".to_string(),
+        ),
+        "setup-error" => {
+            // The error string can be quite long (a Java
+            // stack trace) — render the whole thing so the
+            // user can see what Frida actually rejected.
+            // If the payload didn't have an `error` field,
+            // fall back to dumping the raw JSON so we never
+            // hide diagnostic info.
+            let e = payload
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| payload.to_string());
+            (InvocationKind::Call, format!("(setup error) {e}"))
+        }
+        _ => (InvocationKind::Call, payload.to_string()),
+    };
+    Invocation {
+        at: std::time::Instant::now(),
+        kind: inv_kind,
+        summary,
+    }
+}
+
+/// Append a line to the dock log. Wraps the borrow dance so
+/// callers in this module can just pass a string.
+fn push_dock_log_line(shell: &mut Shell, line: String) {
+    if let Some(dock) = shell.debug_dock.as_mut() {
+        dock.log.push(line);
+        const MAX: usize = 200;
+        if dock.log.len() > MAX {
+            let drop = dock.log.len() - MAX;
+            dock.log.drain(..drop);
+        }
+    }
 }
 
 fn spawn_flush_timer(shell: &gpui::Entity<Shell>, db: glass_db::Database, cx: &mut App) {

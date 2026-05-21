@@ -11,6 +11,8 @@ members = [
     "crates/glass-ui",
     "crates/glass-script",
     "crates/glass-cli",
+    "crates/glass-device",
+    "crates/glass-frida",
 ]
 
 [workspace.package]
@@ -103,6 +105,18 @@ glass-mcp = { path = "crates/glass-mcp" }
 glass-ui = { path = "crates/glass-ui" }
 glass-db = { path = "crates/glass-db" }
 glass-script = { path = "crates/glass-script" }
+glass-device = { path = "crates/glass-device" }
+glass-frida = { path = "crates/glass-frida" }
+
+# Device discovery deps. `idevice` speaks Apple's usbmux protocol
+# directly (pure-Rust; no libimobiledevice install needed). Async
+# via tokio. We pick only the features we need for enumeration +
+# lockdown property reads; the crate has 50+ optional features
+# covering every iOS service which would balloon build times.
+# `tokio` we pin once here so glass-device and any future async
+# consumer agree.
+idevice = { version = "0.1", default-features = false, features = ["usbmuxd", "tcp", "aws-lc"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "net"] }
 
 [profile.release]
 lto = "thin"

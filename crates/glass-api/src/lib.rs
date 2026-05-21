@@ -50,7 +50,7 @@ pub use bin_search::{
 };
 pub use bundle::{open, Bundle, BundleKind, DexGroup};
 pub use export::{
-    export_to_path, export_to_path_with_smali, EditMap, EditPatch, SmaliEditMap,
+    export_to_path, export_to_path_with_smali, ApkAdditions, EditMap, EditPatch, SmaliEditMap,
 };
 pub use patch_file::{
     schema as patch_file_schema, PatchEntry, PatchFile, PatchKind, SmaliPatchEntry,

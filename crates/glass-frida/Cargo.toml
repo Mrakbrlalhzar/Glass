@@ -1,0 +1,46 @@
+[package]
+name = "glass-frida"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Host-side Frida driver for Glass. Wraps the `frida` crate so the rest of the workspace doesn't need to know about its devkit build-time requirement."
+
+[lints]
+workspace = true
+
+[features]
+# `frida` is opt-in because the underlying `frida-sys` bindings
+# link against the Frida devkit at build time. Enabling this
+# feature pulls in `frida/auto-download`, which downloads the
+# matching `frida-core-devkit` tarball from frida's GitHub
+# releases the first time the crate compiles. ~30MB per
+# platform, cached in `target/` after that. Default off so the
+# workspace builds without any network or extra toolchain.
+default = []
+frida = ["dep:frida", "dep:frida-sys"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+glass-device.workspace = true
+smali.workspace = true
+serde_json = "1"
+
+# Used by the session actor on the frida-feature path to
+# pull frida-sys symbols directly (script options, posting
+# messages, GLib main-context pumping). The `frida` crate's
+# safe wrappers don't expose enough surface for the actor
+# pattern, so we touch frida-sys here.
+
+# Behind the `frida` feature so the workspace builds without it.
+# `auto-download` saves the user from manually staging the
+# devkit; the frida-sys build.rs handles platform detection.
+frida = { version = "0.17", optional = true, features = ["auto-download"] }
+frida-sys = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

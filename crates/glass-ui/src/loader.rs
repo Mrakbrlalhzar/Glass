@@ -371,6 +371,7 @@ fn snapshot_apk_with_progress(
         method_lines: Arc::new(method_lines),
         method_calls: Arc::new(method_calls),
         manifest_rows: Arc::new(manifest_rows),
+        android_manifest: apk.manifest.clone().map(Arc::new),
         xrefs: crate::xref::XrefStore::new(),
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
@@ -378,6 +379,9 @@ fn snapshot_apk_with_progress(
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        traces: crate::traces::TraceRegistry::new(),
+        hooks: crate::hooks::HookRegistry::new(),
+        pending_additions: std::collections::BTreeMap::new(),
     })
 }
 
@@ -609,6 +613,11 @@ fn snapshot_ipa_with_progress(
         method_lines: Arc::new(method_lines),
         method_calls: Arc::new(method_calls),
         manifest_rows: Arc::new(info_rows),
+        // IPA has Info.plist, not AndroidManifest. The Frida
+        // gadget-injection planner only consumes Android
+        // manifests today; iOS injection is a future
+        // milestone.
+        android_manifest: None,
         xrefs: crate::xref::XrefStore::new(),
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
@@ -616,6 +625,9 @@ fn snapshot_ipa_with_progress(
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        traces: crate::traces::TraceRegistry::new(),
+        hooks: crate::hooks::HookRegistry::new(),
+        pending_additions: std::collections::BTreeMap::new(),
     })
 }
 
@@ -835,6 +847,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         method_lines: Arc::new(std::collections::HashMap::new()),
         method_calls: Arc::new(std::collections::HashMap::new()),
         manifest_rows: Arc::new(Vec::new()),
+        android_manifest: None,
         xrefs: crate::xref::XrefStore::new(),
         // Shell populates this from the persisted DB right after the
         // loader returns; the loader itself doesn't carry the DB.
@@ -842,6 +855,9 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(std::collections::HashMap::new()),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        traces: crate::traces::TraceRegistry::new(),
+        hooks: crate::hooks::HookRegistry::new(),
+        pending_additions: std::collections::BTreeMap::new(),
     })
 }
 

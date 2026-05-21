@@ -1132,7 +1132,14 @@ pub fn export_patched(
         let bundle = glass_api::open(&path)?;
         let edit_map = pf.to_edit_map();
         let smali_map = pf.to_smali_edit_map()?;
-        glass_api::export_to_path_with_smali(&bundle, &edit_map, &smali_map, &out)?;
+        // CLI export doesn't have an "add new file" surface yet
+        // — the patch-file format only carries replacements.
+        // Pass an empty additions map; the GUI's gadget-injection
+        // flow is the only producer of additions today.
+        let additions = glass_api::ApkAdditions::new();
+        glass_api::export_to_path_with_smali(
+            &bundle, &edit_map, &smali_map, &additions, &out,
+        )?;
         Ok(ExportPatchedResult {
             out,
             edits_applied,

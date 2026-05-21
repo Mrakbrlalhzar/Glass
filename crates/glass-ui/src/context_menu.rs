@@ -142,6 +142,40 @@ pub enum ContextMenuItem {
         method_signature_jni: String,
         label: SharedString,
     },
+    /// Start a live Frida trace on the named method. Routed to
+    /// `Shell::start_trace`. Shown only when the debug dock is
+    /// open and attached.
+    StartTrace {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        label: SharedString,
+    },
+    /// Stop a running trace.
+    StopTrace {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        label: SharedString,
+    },
+    /// Install a hook (log-only initial action). User can
+    /// flip it to a return-override via the Hooks dialog.
+    StartHook {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        label: SharedString,
+    },
+    StopHook {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature_jni: String,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -251,6 +285,18 @@ pub fn render_context_menu(
             }
             ContextMenuItem::RevertSmaliMethodEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::StartTrace { label, .. } => {
+                ("Trace calls".to_string(), label.clone())
+            }
+            ContextMenuItem::StopTrace { label, .. } => {
+                ("Stop tracing".to_string(), label.clone())
+            }
+            ContextMenuItem::StartHook { label, .. } => {
+                ("Hook calls".to_string(), label.clone())
+            }
+            ContextMenuItem::StopHook { label, .. } => {
+                ("Stop hook".to_string(), label.clone())
             }
         };
         let weak = weak.clone();

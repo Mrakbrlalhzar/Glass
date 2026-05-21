@@ -33,8 +33,15 @@ mod dex_callgraph;
 mod dex_cg_render;
 mod graph;
 mod graph_canvas;
+mod debug_dock;
+mod hooks;
+mod hooks_dialog;
+mod traces;
+mod traces_dialog;
+mod device_picker;
 mod hex;
 mod icons;
+mod injection_dialog;
 mod listing_model;
 mod listing_render;
 mod loader;
@@ -233,6 +240,13 @@ pub struct LoadedBundle {
     /// Pre-flattened AndroidManifest rows for the XML viewer. Empty
     /// for non-APK bundles or APKs without a parseable manifest.
     pub manifest_rows: Arc<Vec<ManifestRow>>,
+    /// Raw parsed AndroidManifest. Kept alongside `manifest_rows`
+    /// (which is for the read-only viewer) because the Frida
+    /// injection planner walks the typed tree to pick a patch
+    /// target. `None` for non-APK bundles and APKs whose manifest
+    /// failed to decode.
+    pub android_manifest:
+        Option<Arc<::smali::android::binary_xml::AndroidManifest>>,
     /// Cross-reference store. Built on background threads after
     /// foreground load completes so first paint stays fast. Right-
     /// click "References / Callers" menus consult this; while a
@@ -259,6 +273,25 @@ pub struct LoadedBundle {
     /// `(artifact, class_jni)` pair as `smali_classes`. In-memory
     /// only; closing the bundle drops them.
     pub smali_edits: smali_edits::SmaliEditRegistry,
+    /// Live Frida method-trace registry. Sibling of
+    /// `smali_edits` — same `(artifact, class_jni)`-style
+    /// keying. Populated by the dock when the user starts a
+    /// trace from the smali view; closed when they stop the
+    /// trace or disconnect.
+    pub traces: traces::TraceRegistry,
+    /// Live Frida method-hook registry. Hooks override
+    /// method behaviour (return values, args, side effects)
+    /// while traces just observe. Same key shape so a
+    /// method can carry both at once.
+    pub hooks: hooks::HookRegistry,
+    /// Extra files to splice into the APK at export time —
+    /// keyed by their zip-entry path
+    /// (`lib/arm64-v8a/libfrida-gadget.so`, etc.). Used by the
+    /// Frida gadget-injection flow to ship the gadget binary
+    /// alongside the staged smali edit that loads it. Sorted
+    /// (BTreeMap) for deterministic export ordering. In-memory
+    /// only; closing the bundle drops them.
+    pub pending_additions: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
@@ -1127,6 +1160,75 @@ pub(crate) struct Shell {
     pub(crate) op_edit: Option<op_editor::OpEditState>,
     pub(crate) annotation_stack: Option<annotation_popover::AnnotationStack>,
     pub(crate) external_edit: Option<external_editor::ExternalEditState>,
+    /// Cross-platform device manager — populated once at Shell
+    /// construction with both an ADB backend (for Android) and
+    /// an iDevice backend (for iOS). `Arc` so the background
+    /// poll task can hold a reference without keeping Shell
+    /// alive.
+    pub(crate) device_manager: std::sync::Arc<glass_device::DeviceManager>,
+    /// Latest snapshot from the poll loop. Read at render time
+    /// to populate the device picker dropdown; mutated only by
+    /// the background task via `cx.update_entity`.
+    pub(crate) device_snapshot: Vec<glass_device::DeviceInfo>,
+    /// Cached backend status (ADB found / iOS reachable). Read
+    /// alongside `device_snapshot` to surface install hints in
+    /// the dropdown footer.
+    pub(crate) device_backend_status: glass_device::BackendStatus,
+    /// The device the user has currently selected. Persists as
+    /// long as the device stays in the snapshot; reset to
+    /// `None` if it disappears.
+    pub(crate) selected_device: Option<glass_device::DeviceId>,
+    /// Toolbar chip's dropdown visibility flag.
+    pub(crate) device_picker_open: bool,
+    /// Cached Frida probe per device, with a coarse TTL. The
+    /// poll task refreshes the selected device's entry on a
+    /// schedule (frida-server doesn't move). Probes off the
+    /// gpui thread because frida-core calls block.
+    pub(crate) frida_probes: std::collections::HashMap<
+        glass_device::DeviceId,
+        FridaProbeCache,
+    >,
+    /// Active gadget-injection dialog. `Some` from the moment
+    /// the user clicks "Inject Frida gadget" in the device
+    /// picker until they Cancel or the executor finishes. The
+    /// plan is snapshotted at open time so the dialog doesn't
+    /// re-run the planner on every render.
+    pub(crate) injection_dialog: Option<InjectionDialogState>,
+    /// Progress + log lines for an in-flight Inject & Install
+    /// pipeline. `Some` while export → sign → adb install is
+    /// running; flips to `Some(Done(_))` so the user can read
+    /// the final status, then they click Dismiss to clear it.
+    pub(crate) injection_progress: Option<InjectionProgress>,
+    /// Bottom debug dock — `Some` after the user clicks
+    /// Connect on the device picker for a Frida-reachable
+    /// device with a loaded APK. Hosts Play / Stop controls
+    /// and a small log column. Closing the dock disconnects
+    /// the (logical) session — there's no long-lived Frida
+    /// state to clean up yet; the dock is per-action today.
+    pub(crate) debug_dock: Option<DebugDockState>,
+    /// Modal overlay showing the full list of active Frida
+    /// traces. Toggled from the dock header. Same shape as
+    /// `changes_dialog_open` — a bool, render conditionally
+    /// at the root level.
+    pub(crate) traces_dialog_open: bool,
+    /// Modal listing every active Frida hook. Same shape as
+    /// the traces dialog; opened from the dock header.
+    pub(crate) hooks_dialog_open: bool,
+    /// Key of the hook currently being edited in the dialog
+    /// (when the user clicked Edit). `None` when the dialog
+    /// is showing the list, `Some` when it's showing the
+    /// inline JS editor.
+    pub(crate) hook_editor_target: Option<hooks::HookKey>,
+    /// Live text the user is typing into the JS editor.
+    /// Mirrored from a TextInput entity managed by the
+    /// dialog; persists across renders so partial edits
+    /// survive blur/refresh.
+    pub(crate) hook_editor_buffer: String,
+    /// Transient anchor used while the user drags the dock's
+    /// top handle. Holds (mouse_y_at_press, dock_height_at_press)
+    /// so mouse-move can compute a delta. `None` outside of an
+    /// active drag.
+    pub(crate) debug_dock_resize_anchor: Option<(Pixels, Pixels)>,
     /// Whether the "N changes" modal dialog is showing.
     pub(crate) changes_dialog_open: bool,
     /// True after the first click of "Abandon all" inside the
@@ -1143,6 +1245,96 @@ pub(crate) struct Shell {
     /// Glass is working — large APKs can take a couple of
     /// seconds to re-pack.
     pub(crate) export_in_progress: bool,
+}
+
+/// Bottom debug-dock state. Captured at Connect time so the
+/// dock stays attached to a specific device + package even if
+/// the user changes the chip selection.
+#[derive(Clone, Debug)]
+pub(crate) struct DebugDockState {
+    pub device: glass_device::DeviceInfo,
+    pub package: String,
+    /// Frida agent version captured from the probe at connect
+    /// time. Surfaces in the dock header as informational
+    /// context.
+    pub agent_version: Option<String>,
+    /// Append-only log of action outputs. Each entry is a
+    /// single line ready to render in the dock's log column.
+    pub log: Vec<String>,
+    /// Dock height in pixels. Default 180; the user drags the
+    /// top edge to resize.
+    pub height: Pixels,
+    /// Frida session for the gadgeted app. `None` until the
+    /// attach completes (or fails); `Some` once it's live.
+    /// All script lifecycle goes through this.
+    pub session: Option<glass_frida::Session>,
+    /// True while we're still attempting the attach. Distinct
+    /// from `session = None` so the UI can show a spinner /
+    /// disable the Play button before the session is ready.
+    pub attaching: bool,
+}
+
+/// In-flight Inject & Install pipeline state. Single struct
+/// for the whole run; the executor pushes log lines + phase
+/// updates onto it through `cx.update_entity`, the dialog
+/// reads them at render time.
+#[derive(Clone, Debug)]
+pub(crate) struct InjectionProgress {
+    /// Which step we're currently on. Reads as the headline
+    /// in the progress overlay.
+    pub phase: InjectionPhase,
+    /// Combined stdout / stderr / diagnostic lines from each
+    /// step. Rendered as a small log panel under the phase.
+    pub log: Vec<String>,
+    /// `None` while running, `Some(Ok(path))` once the APK is
+    /// on the device (or just on disk when no install), or
+    /// `Some(Err(msg))` on any failure.
+    pub result: Option<Result<std::path::PathBuf, String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InjectionPhase {
+    Exporting,
+    Signing,
+    Installing,
+    Done,
+}
+
+impl InjectionPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Exporting => "Exporting patched APK…",
+            Self::Signing => "Signing patched APK…",
+            Self::Installing => "Installing on device…",
+            Self::Done => "Done.",
+        }
+    }
+}
+
+/// State for the gadget-injection dialog. Holds the snapshot
+/// of the plan, the target device id, and any in-flight
+/// execution status (a stub for now — fills in M3.2c with the
+/// real executor).
+#[derive(Clone, Debug)]
+pub(crate) struct InjectionDialogState {
+    pub plan: glass_frida::InjectionPlan,
+    /// The device the patched APK is destined for. Persisted
+    /// so the dialog can show "Inject & install on Pixel 7"
+    /// even after the chip's selection changes. `None` means
+    /// the user opened the dialog without a device selected
+    /// — Inject is disabled.
+    pub target_device: Option<glass_device::DeviceInfo>,
+}
+
+/// Per-device cache entry for the Frida probe. The chip reads
+/// the most recent successful result; the poll task overwrites
+/// it when a fresh probe completes. `pending` lets the chip
+/// show "probing…" the first time we look at a newly-selected
+/// device.
+#[derive(Clone, Debug)]
+pub(crate) struct FridaProbeCache {
+    pub result: Result<glass_frida::ProbeReport, glass_frida::FridaError>,
+    pub probed_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -1381,6 +1573,12 @@ impl Render for Shell {
         } else {
             header
         };
+        // Device picker chip — sits to the left of the Edit File
+        // affordance so it's always present, regardless of which
+        // tab is active. Driven by the background poll task in
+        // app.rs::spawn_device_poll.
+        let header = header.child(device_picker::render_chip(self, fg, dim, cx));
+
         // "Edit File" affordance — either the launch button (when
         // no session is active and a smali tab is in front) or the
         // live-watching chip (when a session is running). At most
@@ -1556,6 +1754,24 @@ impl Render for Shell {
         } else {
             None
         };
+
+        let injection_overlay: Option<gpui::AnyElement> = self
+            .injection_dialog
+            .as_ref()
+            .map(|state| {
+                injection_dialog::render_injection_dialog(
+                    self, state, panel, border, fg, dim, accent, cx,
+                )
+            });
+
+        let injection_progress_overlay: Option<gpui::AnyElement> = self
+            .injection_progress
+            .as_ref()
+            .map(|progress| {
+                injection_dialog::render_injection_progress(
+                    progress, panel, border, fg, dim, accent, cx,
+                )
+            });
 
         let export_progress_overlay: Option<gpui::AnyElement> = if self.export_in_progress {
             Some(render_export_progress(panel, border, fg, dim))
@@ -2028,6 +2244,30 @@ impl Render for Shell {
             }))
             .child(header)
             .child(body);
+        // Snapshot once and share between the dock + dialog.
+        let traces: Vec<traces::TraceEntry> = self
+            .bundle()
+            .map(|b| b.traces.entries().iter().map(|&e| e.clone()).collect())
+            .unwrap_or_default();
+        if let Some(dock_state) = self.debug_dock.as_ref() {
+            root = root.child(debug_dock::render_debug_dock(
+                dock_state, &traces, panel, border, fg, dim, accent, cx,
+            ));
+        }
+        if self.traces_dialog_open {
+            root = root.child(traces_dialog::render_traces_dialog(
+                &traces, panel, border, fg, dim, accent, cx,
+            ));
+        }
+        if self.hooks_dialog_open {
+            let hooks: Vec<hooks::HookEntry> = self
+                .bundle()
+                .map(|b| b.hooks.entries().iter().map(|&e| e.clone()).collect())
+                .unwrap_or_default();
+            root = root.child(hooks_dialog::render_hooks_dialog(
+                &hooks, panel, border, fg, dim, accent, cx,
+            ));
+        }
         if let Some(o) = palette_overlay {
             root = root.child(o);
         }
@@ -2041,6 +2281,12 @@ impl Render for Shell {
             root = root.child(o);
         }
         if let Some(o) = changes_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = injection_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = injection_progress_overlay {
             root = root.child(o);
         }
         if let Some(o) = export_progress_overlay {
@@ -2066,6 +2312,11 @@ impl Render for Shell {
         }
         if let Some(o) = op_edit_suggestions_overlay {
             root = root.child(o);
+        }
+        if self.device_picker_open {
+            root = root.child(device_picker::render_dropdown(
+                self, panel, border, fg, dim, accent, cx,
+            ));
         }
         root
     }

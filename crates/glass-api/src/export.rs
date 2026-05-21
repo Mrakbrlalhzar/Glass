@@ -142,34 +142,46 @@ fn locate_in_section(container: &Container, vaddr: u64) -> Result<(usize, usize)
 /// smali-class edits to re-emit. This wrapper is kept for the
 /// byte-only callers (CLI `export-patched`, tests).
 pub fn export_to_path(bundle: &Bundle, edits: &EditMap, out_path: &Path) -> Result<()> {
-    let empty = SmaliEditMap::new();
-    export_to_path_with_smali(bundle, edits, &empty, out_path)
+    let empty_smali = SmaliEditMap::new();
+    let empty_adds: ApkAdditions = std::collections::BTreeMap::new();
+    export_to_path_with_smali(bundle, edits, &empty_smali, &empty_adds, out_path)
 }
 
+/// Brand-new entries to splice into an APK at export time.
+/// Keyed by their zip-entry path
+/// (`lib/arm64-v8a/libfrida-gadget.so`, etc.). The export pipe
+/// adds these alongside any replacements from `edits` /
+/// `smali_edits`. Only meaningful for APK bundles.
+pub type ApkAdditions = std::collections::BTreeMap<String, Vec<u8>>;
+
 /// Same as [`export_to_path`] but also accepts a [`SmaliEditMap`]
-/// of typed class rewrites. Only meaningful for APK bundles —
-/// passing a non-empty smali map for a Native / IPA bundle is
-/// caller error.
+/// of typed class rewrites and an [`ApkAdditions`] map of new
+/// zip entries (used by the Frida gadget-injection flow).
+/// Only meaningful for APK bundles — passing a non-empty smali
+/// map or additions for a Native / IPA bundle is caller error.
 pub fn export_to_path_with_smali(
     bundle: &Bundle,
     edits: &EditMap,
     smali_edits: &SmaliEditMap,
+    additions: &ApkAdditions,
     out_path: &Path,
 ) -> Result<()> {
-    if edits.is_empty() && smali_edits.is_empty() {
+    if edits.is_empty() && smali_edits.is_empty() && additions.is_empty() {
         bail!("no edits to export");
     }
     match bundle.kind {
         BundleKind::Native => {
-            if !smali_edits.is_empty() {
-                bail!("native bundle can't carry smali edits");
+            if !smali_edits.is_empty() || !additions.is_empty() {
+                bail!("native bundle can't carry smali edits or APK additions");
             }
             export_native_to_path(bundle, edits, out_path)
         }
-        BundleKind::Apk => export_apk_to_path(bundle, edits, smali_edits, out_path),
+        BundleKind::Apk => {
+            export_apk_to_path(bundle, edits, smali_edits, additions, out_path)
+        }
         BundleKind::Ipa => {
-            if !smali_edits.is_empty() {
-                bail!("IPA bundle can't carry smali edits");
+            if !smali_edits.is_empty() || !additions.is_empty() {
+                bail!("IPA bundle can't carry smali edits or APK additions");
             }
             export_ipa_to_path(bundle, edits, out_path)
         }
@@ -199,15 +211,18 @@ fn export_apk_to_path(
     bundle: &Bundle,
     edits: &EditMap,
     smali_edits: &SmaliEditMap,
+    additions: &ApkAdditions,
     out: &Path,
 ) -> Result<()> {
     use smali::android::zip::ApkFile;
 
-    // Collect every changed component into a single
-    // (entry_name → new_bytes) table. Byte edits against native
-    // libs and typed smali edits feed into the same replace_entry
-    // loop below, so a future third component type (resources,
-    // AndroidManifest, etc.) just needs another collector here.
+    // Collect every changed-or-new component into a single
+    // (entry_name → bytes) table. The smali crate's
+    // `replace_entry` is `insert` semantically — it adds when
+    // the key is missing — so the same loop handles both
+    // replacements and additions. We just emit a tracing event
+    // when something looks like a fresh add so the export log
+    // is legible.
     let mut overrides: Vec<(String, Vec<u8>)> = Vec::new();
     collect_native_overrides(bundle, edits, &mut overrides)?;
     collect_dex_overrides(bundle, smali_edits, &mut overrides)?;
@@ -217,6 +232,15 @@ fn export_apk_to_path(
     for (entry_name, new_bytes) in overrides {
         apk.replace_entry(&entry_name, new_bytes)
             .map_err(|e| anyhow!("replacing {entry_name} in APK: {e:?}"))?;
+    }
+    // Brand-new entries last, so additions appear after any
+    // replacements in the deterministic export ordering. The
+    // smali crate's ApkFile stores entries in a sorted map, so
+    // ordering is actually stable regardless, but doing
+    // additions explicitly later keeps the log readable.
+    for (entry_name, bytes) in additions {
+        apk.replace_entry(entry_name.as_str(), bytes.clone())
+            .map_err(|e| anyhow!("adding {entry_name} to APK: {e:?}"))?;
     }
     apk.write_to_file(out)
         .map_err(|e| anyhow!("writing patched APK {}: {e:?}", out.display()))?;

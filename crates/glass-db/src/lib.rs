@@ -234,6 +234,13 @@ pub struct WindowSettings {
     /// so older settings.json files load unchanged.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Override path for the `adb` binary. When `None`, glass-
+    /// device falls back to its default discovery order
+    /// ($PATH, $ANDROID_HOME, common Android Studio + Homebrew
+    /// locations). Set this when adb is installed somewhere
+    /// unusual and Glass can't find it on its own.
+    #[serde(default)]
+    pub adb_path: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]

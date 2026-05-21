@@ -486,6 +486,66 @@ pub fn render_two_pane(
                 }
                 let edited_fields = Arc::new(edited_fields);
                 let edited_methods = Arc::new(edited_methods);
+                // Live-trace mask — set of (method_name, signature)
+                // pairs on the current class that have an
+                // active/pending Frida trace. Drives the magenta
+                // row tint so the user can see at a glance which
+                // methods are instrumented.
+                let traced_methods: Arc<
+                    std::collections::HashSet<(String, String)>,
+                > = if let Some(jni) = active_class_jni.as_deref() {
+                    let set = bundle
+                        .traces
+                        .entries()
+                        .iter()
+                        .filter(|e| {
+                            e.key.class_jni == jni
+                                && matches!(
+                                    e.status,
+                                    crate::traces::TraceStatus::Pending
+                                        | crate::traces::TraceStatus::Active
+                                )
+                        })
+                        .map(|e| {
+                            (
+                                e.key.method_name.clone(),
+                                e.key.method_signature.clone(),
+                            )
+                        })
+                        .collect();
+                    Arc::new(set)
+                } else {
+                    Arc::new(std::collections::HashSet::new())
+                };
+                // Hook mask — same shape as traces. Hooks
+                // win over traces because changing behaviour
+                // is the higher-attention state.
+                let hooked_methods: Arc<
+                    std::collections::HashSet<(String, String)>,
+                > = if let Some(jni) = active_class_jni.as_deref() {
+                    let set = bundle
+                        .hooks
+                        .entries()
+                        .iter()
+                        .filter(|e| {
+                            e.key.class_jni == jni
+                                && matches!(
+                                    e.status,
+                                    crate::hooks::HookStatus::Pending
+                                        | crate::hooks::HookStatus::Active
+                                )
+                        })
+                        .map(|e| {
+                            (
+                                e.key.method_name.clone(),
+                                e.key.method_signature.clone(),
+                            )
+                        })
+                        .collect();
+                    Arc::new(set)
+                } else {
+                    Arc::new(std::collections::HashSet::new())
+                };
                 // Origin chip — shows which DEX inside the APK
                 // this class was lifted from. Tooltip-style label
                 // anchored top-right of the smali body. We surface
@@ -544,6 +604,8 @@ pub fn render_two_pane(
                                     let row_scopes = row_scopes.clone();
                                     let edited_fields = edited_fields.clone();
                                     let edited_methods = edited_methods.clone();
+                                    let traced_methods = traced_methods.clone();
+                                    let hooked_methods = hooked_methods.clone();
                                     let op_edit_snapshot = op_edit_snapshot.clone();
                                     move |index, _window, _cx| {
                                         // Inline op editor — when this row is
@@ -599,8 +661,51 @@ pub fn render_two_pane(
                                             .w_full()
                                             .overflow_hidden()
                                             .relative();
+                                        // Tint priority:
+                                        //   selected > hooked (crimson)
+                                        //   > traced (magenta) > edited
+                                        //   > annotation > none.
+                                        // Hooks beat traces because
+                                        // modifying behaviour is more
+                                        // dangerous than observing it.
+                                        let scope_method = match row_scopes.get(index) {
+                                            Some(crate::smali_row_scope::RowScope::Method { name, signature }) => {
+                                                Some((name.clone(), signature.clone()))
+                                            }
+                                            _ => None,
+                                        };
+                                        let is_hooked_row = scope_method
+                                            .as_ref()
+                                            .map(|m| hooked_methods.contains(m))
+                                            .unwrap_or(false);
+                                        let is_traced_row = !is_hooked_row
+                                            && scope_method
+                                                .as_ref()
+                                                .map(|m| traced_methods.contains(m))
+                                                .unwrap_or(false);
                                         if is_selected {
                                             row = row.bg(rgb(COLOUR_ROW_SELECTED()));
+                                        } else if is_hooked_row {
+                                            // Crimson — louder than
+                                            // magenta because hooks
+                                            // change behaviour.
+                                            row = row.bg(gpui::Rgba {
+                                                r: 0.85,
+                                                g: 0.15,
+                                                b: 0.20,
+                                                a: 0.22,
+                                            });
+                                        } else if is_traced_row {
+                                            // Magenta — distinct from
+                                            // edit-green (instrumentation
+                                            // is a live observation, not
+                                            // a pending change).
+                                            row = row.bg(gpui::Rgba {
+                                                r: 0.85,
+                                                g: 0.30,
+                                                b: 0.85,
+                                                a: 0.18,
+                                            });
                                         } else if {
                                             // Tint when the row's scope matches
                                             // an edited bucket. Class decl,

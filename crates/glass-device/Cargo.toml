@@ -1,0 +1,20 @@
+[package]
+name = "glass-device"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Host-side device discovery for Glass — enumerates USB-attached Android phones (via adb) and iOS devices (via the idevice usbmux protocol)."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+idevice.workspace = true
+tokio.workspace = true
+plist.workspace = true

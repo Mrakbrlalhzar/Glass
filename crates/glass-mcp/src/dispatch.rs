@@ -362,8 +362,12 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             let bundle = glass_api::open(&path)?;
             let edit_map = pf.to_edit_map();
             let smali_map = pf.to_smali_edit_map()?;
+            // MCP export carries no additions today — same shape
+            // as the CLI verb; the gadget-injection flow lives
+            // in the GUI.
+            let additions = glass_api::ApkAdditions::new();
             glass_api::export_to_path_with_smali(
-                &bundle, &edit_map, &smali_map, &out,
+                &bundle, &edit_map, &smali_map, &additions, &out,
             )?;
             json_of(&serde_json::json!({
                 "out": out,

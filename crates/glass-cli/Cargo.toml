@@ -25,5 +25,12 @@ glass-db.workspace = true
 glass-ui.workspace = true
 glass-mcp.workspace = true
 
+[features]
+# Forward the `frida` feature through glass-ui → glass-frida.
+# Enable with `cargo build --release -p glass-cli --features frida`
+# to bake the Frida runtime + devkit into the binary.
+default = []
+frida = ["glass-ui/frida"]
+
 [lints]
 workspace = true

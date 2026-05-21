@@ -100,6 +100,39 @@ impl Shell {
             op_edit: None,
             annotation_stack: None,
             external_edit: None,
+            device_manager: {
+                // Honour an `adb_path` override from the window
+                // settings, falling back to the default
+                // discovery order. Cheap to construct — no I/O
+                // beyond an `adb version` probe + a usbmuxd
+                // socket open.
+                let settings = glass_db::load_window_settings();
+                let adb_override = settings
+                    .adb_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from);
+                Arc::new(glass_device::DeviceManager::with_adb_override(
+                    adb_override,
+                ))
+            },
+            device_snapshot: Vec::new(),
+            device_backend_status: glass_device::BackendStatus {
+                adb: Err(glass_device::DeviceError::AdbNotFound),
+                ios: Err(glass_device::DeviceError::IosBackendUnavailable(
+                    "not probed yet".into(),
+                )),
+            },
+            selected_device: None,
+            device_picker_open: false,
+            frida_probes: std::collections::HashMap::new(),
+            injection_dialog: None,
+            injection_progress: None,
+            debug_dock: None,
+            debug_dock_resize_anchor: None,
+            traces_dialog_open: false,
+            hooks_dialog_open: false,
+            hook_editor_target: None,
+            hook_editor_buffer: String::new(),
             changes_dialog_open: false,
             changes_dialog_confirm_abandon: false,
             export_status: None,
@@ -1787,14 +1820,83 @@ impl Shell {
                 .unwrap_or(false)
             {
                 items.push(ContextMenuItem::RevertSmaliMethodEdit {
-                    artifact,
-                    class_jni,
-                    method_name,
-                    method_signature_jni,
+                    artifact: artifact.clone(),
+                    class_jni: class_jni.clone(),
+                    method_name: method_name.clone(),
+                    method_signature_jni: method_signature_jni.clone(),
                     label: SharedString::from(format!(
                         "Revert method edit ({display})"
                     )),
                 });
+            }
+            // Trace items — only show when the debug dock is
+            // attached. Toggle between Start / Stop based on
+            // current registry state. <clinit> is excluded
+            // because Frida's Java.use can't hook static
+            // initialisers.
+            let dock_attached = self
+                .debug_dock
+                .as_ref()
+                .map(|d| d.session.is_some())
+                .unwrap_or(false);
+            if dock_attached && method_name != "<clinit>" {
+                let is_traced = self
+                    .bundle()
+                    .map(|b| {
+                        b.traces.is_traced(
+                            &artifact,
+                            &class_jni,
+                            &method_name,
+                            &method_signature_jni,
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_traced {
+                    items.push(ContextMenuItem::StopTrace {
+                        artifact: artifact.clone(),
+                        class_jni: class_jni.clone(),
+                        method_name: method_name.clone(),
+                        method_signature_jni: method_signature_jni.clone(),
+                        label: SharedString::from(display.clone()),
+                    });
+                } else {
+                    items.push(ContextMenuItem::StartTrace {
+                        artifact: artifact.clone(),
+                        class_jni: class_jni.clone(),
+                        method_name: method_name.clone(),
+                        method_signature_jni: method_signature_jni.clone(),
+                        label: SharedString::from(display.clone()),
+                    });
+                }
+                // Hook items — same gating as traces.
+                let is_hooked = self
+                    .bundle()
+                    .map(|b| {
+                        b.hooks.is_hooked(
+                            &artifact,
+                            &class_jni,
+                            &method_name,
+                            &method_signature_jni,
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_hooked {
+                    items.push(ContextMenuItem::StopHook {
+                        artifact,
+                        class_jni,
+                        method_name,
+                        method_signature_jni,
+                        label: SharedString::from(display),
+                    });
+                } else {
+                    items.push(ContextMenuItem::StartHook {
+                        artifact,
+                        class_jni,
+                        method_name,
+                        method_signature_jni,
+                        label: SharedString::from(display),
+                    });
+                }
             }
         }
         self.context_menu = Some(ContextMenuState { position, items });
@@ -1954,6 +2056,69 @@ impl Shell {
                 ..
             } => {
                 self.revert_smali_method_edit(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    cx,
+                );
+            }
+            ContextMenuItem::StartTrace {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                ..
+            } => {
+                self.start_trace(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    cx,
+                );
+            }
+            ContextMenuItem::StopTrace {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                ..
+            } => {
+                self.stop_trace(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    cx,
+                );
+            }
+            ContextMenuItem::StartHook {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                ..
+            } => {
+                // Default action: LogOnly. User flips via the
+                // Hooks dialog's Cycle button.
+                self.start_hook(
+                    artifact,
+                    class_jni,
+                    method_name,
+                    method_signature_jni,
+                    crate::hooks::HookAction::LogOnly,
+                    cx,
+                );
+            }
+            ContextMenuItem::StopHook {
+                artifact,
+                class_jni,
+                method_name,
+                method_signature_jni,
+                ..
+            } => {
+                self.stop_hook(
                     artifact,
                     class_jni,
                     method_name,
@@ -6101,10 +6266,1307 @@ impl Shell {
     /// Open a save-file dialog and write a patched copy of the
     /// currently-loaded bundle there. Driven by the Changes
     /// dialog's "Export N changes…" button.
+    // ---- Frida gadget injection ---------------------------------------
+
+    /// Open the gadget-injection dialog for the currently-loaded
+    /// bundle. Computes an `InjectionPlan` synchronously (it's
+    /// pure inspection) and stashes the result on Shell so the
+    /// dialog renderer doesn't have to rebuild it every frame.
+    ///
+    /// Returns `false` and no-ops when:
+    ///   * No bundle is loaded.
+    ///   * The bundle isn't an APK (no AndroidManifest).
+    ///   * The bundle's manifest failed to decode.
+    /// In each case we log a hint and leave the picker dropdown
+    /// open so the user can see why nothing happened.
+    pub(crate) fn open_injection_dialog(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(bundle) = self.bundle() else {
+            tracing::info!("open_injection_dialog: no bundle loaded");
+            return false;
+        };
+        let Some(manifest) = bundle.android_manifest.as_ref() else {
+            tracing::info!(
+                "open_injection_dialog: bundle has no AndroidManifest — \
+                 gadget injection is APK-only for now"
+            );
+            return false;
+        };
+        // Collect inputs for the planner. `loaded_classes` is
+        // the set of JNI sigs we've lifted smali for; the
+        // planner uses it to warn when the manifest references
+        // a class we don't actually have.
+        let loaded_classes: std::collections::BTreeSet<String> = bundle
+            .smali_classes
+            .keys()
+            .map(|(_, jni)| jni.clone())
+            .collect();
+        // ABIs the APK carries native libs for — `lib/<abi>/`.
+        // We read this from the existing `origins` field where
+        // each native-lib leaf records its `lib/<abi>/<name>`
+        // string.
+        let mut native_abis: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut abis_with_gadget: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for (i, origin) in bundle.origins.iter().enumerate() {
+            // origins like "lib/arm64-v8a" (set by the loader
+            // for native-lib leaves). Strip the prefix to get
+            // the ABI string.
+            let s = origin.as_ref();
+            if let Some(abi) = s.strip_prefix("lib/") {
+                native_abis.insert(abi.to_string());
+                // If a leaf labelled libfrida-gadget.so sits in
+                // this ABI directory, flag the warning. The
+                // leaf's label is the bare filename.
+                if let Some(label) = bundle.labels.get(i) {
+                    if label.as_ref() == "libfrida-gadget.so" {
+                        abis_with_gadget.insert(abi.to_string());
+                    }
+                }
+            }
+        }
+        let inputs = glass_frida::PlanInputs {
+            manifest: Some(&**manifest),
+            loaded_classes,
+            native_abis,
+            abis_with_gadget,
+        };
+        let plan = match glass_frida::plan_injection(&inputs) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(?e, "open_injection_dialog: planner refused");
+                return false;
+            }
+        };
+        // Capture which device the user has currently selected
+        // so the dialog can offer "Inject & install on …" even
+        // if the chip selection changes while the dialog is
+        // open.
+        let target_device = self
+            .selected_device
+            .as_ref()
+            .and_then(|id| {
+                self.device_snapshot.iter().find(|d| &d.id == id).cloned()
+            });
+        self.injection_dialog = Some(crate::InjectionDialogState {
+            plan,
+            target_device,
+        });
+        // Close the picker dropdown so the dialog is the only
+        // overlay competing for attention.
+        self.device_picker_open = false;
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn close_injection_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.injection_dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Apply the gadget-injection plan to the loaded bundle.
+    /// Stages a smali edit on the patch-target class (visible
+    /// in the Changes dialog like any other smali edit) and
+    /// registers `lib/<abi>/libfrida-gadget.so` as a pending
+    /// APK addition for every supported ABI in the plan.
+    ///
+    /// After this the user clicks the toolbar's existing
+    /// "Export N changes…" button to write the patched APK.
+    /// Sign + install are M3.2d/e.
+    pub(crate) fn execute_injection(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.injection_dialog.as_ref() else { return };
+        // Pluck the JNI of the patch-target class so we can
+        // locate it in the bundle.
+        let target_jni = match &state.plan.patch_target {
+            glass_frida::PatchTarget::ExistingApplication { class_jni, .. } => {
+                class_jni.clone()
+            }
+            glass_frida::PatchTarget::LauncherActivity { class_jni, .. } => {
+                class_jni.clone()
+            }
+            glass_frida::PatchTarget::SynthesiseRequired => {
+                tracing::warn!(
+                    "execute_injection: plan needs class synthesis (not implemented)"
+                );
+                self.close_injection_dialog(cx);
+                return;
+            }
+        };
+        let plan = state.plan.clone();
+        // Find the artifact (DEX) that contains this class.
+        // smali_classes is keyed by (artifact_id, class_jni)
+        // so we can lift the class out and learn its DEX in
+        // one pass.
+        let (artifact_id, base_class) = {
+            let Some(bundle) = self.bundle() else {
+                self.close_injection_dialog(cx);
+                return;
+            };
+            let hit = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
+                if jni == &target_jni {
+                    Some((aid.clone(), c.clone()))
+                } else {
+                    None
+                }
+            });
+            match hit {
+                Some(x) => x,
+                None => {
+                    tracing::warn!(
+                        target_jni = %target_jni,
+                        "execute_injection: class isn't in the lifted set"
+                    );
+                    self.close_injection_dialog(cx);
+                    return;
+                }
+            }
+        };
+        // Layer on top of any earlier staged edit for the same
+        // class so the gadget patch coexists with whatever the
+        // user might have changed manually.
+        let starting_class = self
+            .bundle()
+            .and_then(|b| b.smali_edits.get(&artifact_id, &target_jni))
+            .map(|e| e.modified.clone())
+            .unwrap_or(base_class);
+        let patched = match glass_frida::apply_plan(&starting_class, &plan) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(?e, "execute_injection: apply_plan failed");
+                self.close_injection_dialog(cx);
+                return;
+            }
+        };
+        // Stage the modified class through the existing path
+        // so it shows up in the Changes dialog like any other
+        // smali edit (revertable, line-cached invalidation,
+        // tinting on the smali tab).
+        self.stage_smali_class_edit(artifact_id, target_jni, patched, cx);
+        // Add the gadget binary to the bundle's pending APK
+        // additions for every ABI we ship a gadget for.
+        // Today that's arm64-v8a only; other ABIs in the plan
+        // are skipped with a log line so the user can see what
+        // didn't make it.
+        let mut added_abis: Vec<String> = Vec::new();
+        let mut skipped_abis: Vec<String> = Vec::new();
+        // Every gadget binary needs its config sibling — recent
+        // gadget releases (17.x) refuse to load without
+        // libfrida-gadget.config.so next to them. Stage the
+        // listen-mode config alongside every .so we add.
+        let config_filename = glass_frida::ANDROID_GADGET_CONFIG_FILENAME;
+        let config_bytes = glass_frida::android_gadget_config_listen();
+        for abi in &plan.abis {
+            match glass_frida::for_android_abi(abi) {
+                Some(gadget) => {
+                    if let Some(bundle) = self.bundle_mut() {
+                        let zip_path = format!("lib/{abi}/{}", gadget.filename);
+                        bundle
+                            .pending_additions
+                            .insert(zip_path, gadget.bytes.to_vec());
+                        let cfg_path = format!("lib/{abi}/{config_filename}");
+                        bundle
+                            .pending_additions
+                            .insert(cfg_path, config_bytes.clone());
+                    }
+                    added_abis.push(abi.clone());
+                }
+                None => skipped_abis.push(abi.clone()),
+            }
+        }
+        // If no ABI matched, also drop the gadget under
+        // arm64-v8a regardless — Android will pick it up on
+        // arm64 phones even if the APK didn't ship any other
+        // arm64 libs. (Devices choose libs by ABI; an APK with
+        // only x86 libs but with arm64-v8a frida-gadget will
+        // load it correctly on a Pixel.)
+        if added_abis.is_empty() {
+            if let Some(gadget) = glass_frida::for_android_abi("arm64-v8a") {
+                if let Some(bundle) = self.bundle_mut() {
+                    bundle.pending_additions.insert(
+                        format!("lib/arm64-v8a/{}", gadget.filename),
+                        gadget.bytes.to_vec(),
+                    );
+                    bundle.pending_additions.insert(
+                        format!("lib/arm64-v8a/{config_filename}"),
+                        config_bytes.clone(),
+                    );
+                }
+                added_abis.push("arm64-v8a".to_string());
+            }
+        }
+        tracing::info!(
+            added = ?added_abis,
+            skipped = ?skipped_abis,
+            "gadget bytes registered as pending APK additions",
+        );
+        self.close_injection_dialog(cx);
+    }
+
+    /// Full "Inject & Install" pipeline. Stages the smali edit
+    /// + gadget addition (same as `execute_injection`), then on
+    /// a background task: writes a temp APK via the existing
+    /// export pipeline, signs it with the Glass debug keystore,
+    /// and `adb install -r`s it on the target device. Progress
+    /// is reported on `Shell.injection_progress` so the GUI
+    /// can show a streaming status overlay.
+    pub(crate) fn execute_injection_and_install(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        // First stage the changes via the existing path so the
+        // Changes dialog still shows what got patched.
+        let Some(state) = self.injection_dialog.clone() else { return };
+        let Some(target) = state.target_device.clone() else {
+            tracing::warn!("execute_injection_and_install: no device selected");
+            return;
+        };
+        if !matches!(target.state, glass_device::AuthState::Authorised) {
+            self.injection_progress = Some(crate::InjectionProgress {
+                phase: crate::InjectionPhase::Done,
+                log: vec![format!(
+                    "Device {} isn't authorised — accept the USB-debug prompt on it first.",
+                    target.id.serial,
+                )],
+                result: Some(Err("device unauthorised".into())),
+            });
+            self.close_injection_dialog(cx);
+            cx.notify();
+            return;
+        }
+        if !matches!(target.id.platform, glass_device::DevicePlatform::Android) {
+            self.injection_progress = Some(crate::InjectionProgress {
+                phase: crate::InjectionPhase::Done,
+                log: vec![format!(
+                    "Selected device {} is iOS — inject-and-install is Android-only for now.",
+                    target.id.serial,
+                )],
+                result: Some(Err("ios install path not implemented".into())),
+            });
+            self.close_injection_dialog(cx);
+            cx.notify();
+            return;
+        }
+        // Discover sign tools *before* any disk writes. If
+        // they're missing the user sees a clean error rather
+        // than a half-baked patched APK on disk.
+        let signer = match glass_frida::SignerTools::discover() {
+            Ok(s) => s,
+            Err(e) => {
+                self.injection_progress = Some(crate::InjectionProgress {
+                    phase: crate::InjectionPhase::Done,
+                    log: vec![format!("{e}")],
+                    result: Some(Err(format!("sign tools missing: {e}"))),
+                });
+                self.close_injection_dialog(cx);
+                cx.notify();
+                return;
+            }
+        };
+        // Reuse `execute_injection` to stage the smali edit +
+        // gadget addition. This closes the dialog as a
+        // side-effect (it always does); we don't need to call
+        // close again.
+        self.execute_injection(cx);
+        // Build the inputs for the background task.
+        let source_path = self
+            .source_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let stem = source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("patched");
+        let temp_dir = std::env::temp_dir().join("glass-inject");
+        if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+            self.injection_progress = Some(crate::InjectionProgress {
+                phase: crate::InjectionPhase::Done,
+                log: vec![format!("creating {}: {e}", temp_dir.display())],
+                result: Some(Err(format!("tempdir: {e}"))),
+            });
+            cx.notify();
+            return;
+        }
+        let out_path = temp_dir.join(format!("{stem}-frida.apk"));
+        // Snapshot everything the executor needs so the
+        // background task doesn't hold a borrow on Shell.
+        let Some(bundle) = self.bundle() else { return };
+        let mut edit_map: std::collections::HashMap<
+            glass_db::ArtifactId,
+            Vec<glass_api::EditPatch>,
+        > = std::collections::HashMap::new();
+        for e in bundle.edits.entries() {
+            edit_map
+                .entry(e.artifact.clone())
+                .or_default()
+                .push(glass_api::EditPatch {
+                    vaddr: e.vaddr,
+                    new_bytes: e.new_bytes.clone(),
+                });
+        }
+        let mut smali_edit_map: glass_api::SmaliEditMap =
+            std::collections::HashMap::new();
+        for e in bundle.smali_edits.entries() {
+            smali_edit_map
+                .entry(e.key.artifact.clone())
+                .or_default()
+                .insert(e.key.class_jni.clone(), e.modified.clone());
+        }
+        let additions: glass_api::ApkAdditions = bundle.pending_additions.clone();
+        let serial = target.id.serial.clone();
+        let device_manager = self.device_manager.clone();
+        // Initial progress state.
+        self.injection_progress = Some(crate::InjectionProgress {
+            phase: crate::InjectionPhase::Exporting,
+            log: vec![format!("Writing patched APK to {}", out_path.display())],
+            result: None,
+        });
+        cx.notify();
+        // Spawn the pipeline.
+        cx.spawn(async move |this, cx| {
+            // Phase 1: export.
+            let export_result: Result<(), String> = cx
+                .background_executor()
+                .spawn({
+                    let source_path = source_path.clone();
+                    let out_path = out_path.clone();
+                    async move {
+                        match glass_api::open(&source_path) {
+                            Ok(bundle) => glass_api::export_to_path_with_smali(
+                                &bundle,
+                                &edit_map,
+                                &smali_edit_map,
+                                &additions,
+                                &out_path,
+                            )
+                            .map_err(|e| format!("{e:#}")),
+                            Err(e) => Err(format!("re-open failed: {e:#}")),
+                        }
+                    }
+                })
+                .await;
+            if let Err(e) = export_result {
+                let _ = this.update(cx, |shell, cx| {
+                    let log = vec![format!("Export failed: {e}")];
+                    shell.injection_progress = Some(crate::InjectionProgress {
+                        phase: crate::InjectionPhase::Done,
+                        log,
+                        result: Some(Err(e)),
+                    });
+                    cx.notify();
+                });
+                return;
+            }
+            // Phase 2: sign.
+            let _ = this.update(cx, |shell, cx| {
+                if let Some(p) = shell.injection_progress.as_mut() {
+                    p.phase = crate::InjectionPhase::Signing;
+                    p.log.push(format!(
+                        "Signing with {}",
+                        signer.keystore_path.display()
+                    ));
+                }
+                cx.notify();
+            });
+            let signer_for_task = signer.clone();
+            let out_path_for_task = out_path.clone();
+            let sign_result: Result<String, glass_frida::SignError> = cx
+                .background_executor()
+                .spawn(async move {
+                    signer_for_task.ensure_keystore()?;
+                    signer_for_task.sign(&out_path_for_task)
+                })
+                .await;
+            match sign_result {
+                Ok(stdout) => {
+                    let _ = this.update(cx, |shell, cx| {
+                        if let Some(p) = shell.injection_progress.as_mut() {
+                            if !stdout.trim().is_empty() {
+                                p.log.push(stdout.trim().to_string());
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.injection_progress = Some(crate::InjectionProgress {
+                            phase: crate::InjectionPhase::Done,
+                            log: vec![format!("Sign failed: {e}")],
+                            result: Some(Err(format!("{e}"))),
+                        });
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+            // Phase 3: adb install.
+            let _ = this.update(cx, |shell, cx| {
+                if let Some(p) = shell.injection_progress.as_mut() {
+                    p.phase = crate::InjectionPhase::Installing;
+                    p.log.push(format!("adb -s {serial} install -r"));
+                }
+                cx.notify();
+            });
+            let serial_for_task = serial.clone();
+            let out_for_task = out_path.clone();
+            let install_result: Result<String, glass_device::DeviceError> = cx
+                .background_executor()
+                .spawn(async move {
+                    let status = device_manager.backend_status();
+                    let adb = status
+                        .adb
+                        .map_err(|e| glass_device::DeviceError::Backend(format!("adb: {e}")))?;
+                    // We need a fresh AdbBackend here — backend_status
+                    // returned info, but the install verb lives on
+                    // the backend itself. Re-discover the binary.
+                    let backend = glass_device::adb::AdbBackend::with_override(
+                        Some(adb.binary_path),
+                    )
+                    .map_err(|e| glass_device::DeviceError::Backend(format!("{e}")))?;
+                    backend.install(&serial_for_task, &out_for_task)
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                let mut p = shell
+                    .injection_progress
+                    .take()
+                    .unwrap_or_else(|| crate::InjectionProgress {
+                        phase: crate::InjectionPhase::Done,
+                        log: Vec::new(),
+                        result: None,
+                    });
+                p.phase = crate::InjectionPhase::Done;
+                match install_result {
+                    Ok(stdout) => {
+                        if !stdout.trim().is_empty() {
+                            p.log.push(stdout.trim().to_string());
+                        }
+                        p.result = Some(Ok(out_path.clone()));
+                    }
+                    Err(e) => {
+                        p.log.push(format!("Install failed: {e}"));
+                        p.result = Some(Err(format!("{e}")));
+                    }
+                }
+                shell.injection_progress = Some(p);
+                // We just changed the device's state — the
+                // newly-installed app probably hasn't launched
+                // yet so the chip should re-probe and reflect
+                // current reality, not the cached "yes Frida"
+                // from before we ran.
+                if let Some(id) = shell.selected_device.as_ref() {
+                    shell.frida_probes.remove(id);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn dismiss_injection_progress(&mut self, cx: &mut Context<Self>) {
+        if self.injection_progress.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    // ---- Debug dock ----------------------------------------------------
+
+    /// Open the bottom debug dock against the currently-selected
+    /// device + loaded APK. Captures the device snapshot + the
+    /// bundle's package name + the latest probe's agent version
+    /// at connect time so the dock stays anchored even if the
+    /// chip selection changes underneath.
+    pub(crate) fn open_debug_dock(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.selected_device.clone() else { return false };
+        let Some(device) = self
+            .device_snapshot
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(bundle) = self.bundle() else { return false };
+        let Some(manifest) = bundle.android_manifest.as_ref() else {
+            return false;
+        };
+        let Some(package) = manifest.package_name().map(|s| s.to_string())
+        else {
+            return false;
+        };
+        let agent_version = self
+            .frida_probes
+            .get(&id)
+            .and_then(|c| c.result.as_ref().ok())
+            .and_then(|r| r.agent_version.clone());
+        // Spawn the Frida session actor up front. We hand it
+        // the dock immediately so the UI can render; the
+        // actual attach runs on a background task and
+        // populates `session` when it completes.
+        let session = glass_frida::Session::spawn();
+        self.debug_dock = Some(crate::DebugDockState {
+            device: device.clone(),
+            package: package.clone(),
+            agent_version,
+            log: vec![format!("connecting to {package}…")],
+            height: gpui::px(180.),
+            session: Some(session.clone()),
+            attaching: true,
+        });
+        // The dock comes from the picker dropdown — close that
+        // so the chip doesn't fight the new dock for attention.
+        self.device_picker_open = false;
+        cx.notify();
+        // Kick off the attach. Two steps off the foreground
+        // executor:
+        //   1. Resolve the package's PID via `adb shell pidof`.
+        //   2. Set up `adb forward tcp:27442 tcp:27042` (the
+        //      gadget probe already does this, harmless to
+        //      repeat — adb just returns the same port).
+        //   3. Ask Frida to add a remote device at the
+        //      forwarded address + attach to that PID.
+        let device_manager = self.device_manager.clone();
+        let serial = device.id.serial.clone();
+        let package_for_task = package.clone();
+        cx.spawn(async move |this, cx| {
+            let attach_outcome: Result<glass_frida::AttachReport, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let status = device_manager.backend_status().adb.clone();
+                    let Ok(adb_info) = status else {
+                        return Err("ADB not available".to_string());
+                    };
+                    let backend = glass_device::adb::AdbBackend::with_override(
+                        Some(adb_info.binary_path.clone()),
+                    )
+                    .map_err(|e| format!("adb backend: {e}"))?;
+                    // 1. Get the PID.
+                    let pid_out = backend
+                        .shell(
+                            &serial,
+                            &["pidof", &package_for_task],
+                        )
+                        .map_err(|e| format!("pidof: {e}"))?;
+                    let pid: u32 = pid_out
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| {
+                            format!("{package_for_task} isn't running on the device — launch it first")
+                        })?;
+                    // 2. Make sure the gadget forward is set up.
+                    let _ = backend.probe_gadget(&serial);
+                    // 3. Attach via the forwarded loopback.
+                    session
+                        .attach_remote("127.0.0.1:27442", pid)
+                        .map_err(|e| format!("attach {pid}: {e}"))
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                if let Some(dock) = shell.debug_dock.as_mut() {
+                    dock.attaching = false;
+                    match attach_outcome {
+                        Ok(_) => {
+                            dock.log.push("connected".to_string());
+                        }
+                        Err(e) => {
+                            dock.log.push(format!("attach failed: {e}"));
+                            // Tear down the actor — no point
+                            // holding a session we couldn't
+                            // attach.
+                            if let Some(s) = dock.session.take() {
+                                s.shutdown();
+                            }
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
+    }
+
+    pub(crate) fn close_debug_dock(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut dock) = self.debug_dock.take() {
+            if let Some(session) = dock.session.take() {
+                // Best-effort detach, then drop everything.
+                let _ = session.detach();
+                session.shutdown();
+            }
+            cx.notify();
+        }
+    }
+
+    /// Stash the current pointer Y and current dock height on
+    /// mouse-down so subsequent mouse-moves can resize relative
+    /// to a stable anchor instead of accumulating tiny deltas.
+    pub(crate) fn start_dock_resize(
+        &mut self,
+        pointer_y: gpui::Pixels,
+        _cx: &mut Context<Self>,
+    ) {
+        if let Some(dock) = self.debug_dock.as_ref() {
+            self.debug_dock_resize_anchor = Some((pointer_y, dock.height));
+        }
+    }
+
+    /// Apply a drag delta. The pointer moving *up* (smaller Y)
+    /// grows the dock; moving down shrinks it.
+    pub(crate) fn update_dock_resize(
+        &mut self,
+        pointer_y: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((anchor_y, anchor_h)) = self.debug_dock_resize_anchor
+        else {
+            return;
+        };
+        let dy = anchor_y.as_f32() - pointer_y.as_f32();
+        let new_h = gpui::px(anchor_h.as_f32() + dy);
+        self.set_debug_dock_height(new_h, cx);
+    }
+
+    pub(crate) fn finish_dock_resize(&mut self, cx: &mut Context<Self>) {
+        if self.debug_dock_resize_anchor.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Set the dock's height. Used by the drag-handle on the
+    /// top edge; values are clamped to a sane range.
+    pub(crate) fn set_debug_dock_height(
+        &mut self,
+        h: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dock) = self.debug_dock.as_mut() {
+            // Lower bound: enough to show the controls + a
+            // single log line. Upper bound: half the window
+            // (we don't know the window height here, so cap
+            // at 800 — windows are typically taller than that
+            // and the dock can be re-resized).
+            let clamped = h.as_f32().clamp(80.0, 800.0);
+            dock.height = gpui::px(clamped);
+            cx.notify();
+        }
+    }
+
+    /// Append a log line to the dock. Trims trailing whitespace
+    /// and skips empty lines so the column stays tight.
+    fn push_dock_log(&mut self, line: impl Into<String>, cx: &mut Context<Self>) {
+        if let Some(dock) = self.debug_dock.as_mut() {
+            let line = line.into();
+            for s in line.lines() {
+                let trimmed = s.trim_end();
+                if !trimmed.is_empty() {
+                    dock.log.push(trimmed.to_string());
+                }
+            }
+            // Keep the log bounded so a chatty action doesn't
+            // OOM the dock. 200 lines = several screens of
+            // history, plenty for the play/stop cadence.
+            const MAX_LOG: usize = 200;
+            if dock.log.len() > MAX_LOG {
+                let drop = dock.log.len() - MAX_LOG;
+                dock.log.drain(..drop);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Launch the dock's package on the dock's device. Runs
+    /// `adb shell monkey -p <pkg> -c LAUNCHER 1` off the
+    /// foreground; pipes the combined stdout/stderr into the
+    /// dock's log column.
+    pub(crate) fn debug_play(&mut self, cx: &mut Context<Self>) {
+        let Some(dock) = self.debug_dock.as_ref() else { return };
+        let serial = dock.device.id.serial.clone();
+        let package = dock.package.clone();
+        let device_manager = self.device_manager.clone();
+        self.push_dock_log(format!("▶ launching {package}"), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let status = device_manager.backend_status().adb.clone();
+                    let backend = match status {
+                        Ok(info) => {
+                            glass_device::adb::AdbBackend::with_override(
+                                Some(info.binary_path),
+                            )
+                        }
+                        Err(e) => Err(glass_device::DeviceError::Backend(
+                            format!("{e}"),
+                        )),
+                    };
+                    match backend {
+                        Ok(b) => b.start_main_activity(&serial, &package),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await;
+            let line = match result {
+                Ok(s) if s.trim().is_empty() => "(no output)".to_string(),
+                Ok(s) => s,
+                Err(e) => format!("error: {e}"),
+            };
+            let _ = this.update(cx, |shell, cx| {
+                shell.push_dock_log(line, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Force-stop the dock's package on the dock's device.
+    pub(crate) fn debug_stop(&mut self, cx: &mut Context<Self>) {
+        let Some(dock) = self.debug_dock.as_ref() else { return };
+        let serial = dock.device.id.serial.clone();
+        let package = dock.package.clone();
+        let device_manager = self.device_manager.clone();
+        self.push_dock_log(format!("◼ stopping {package}"), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let status = device_manager.backend_status().adb.clone();
+                    let backend = match status {
+                        Ok(info) => {
+                            glass_device::adb::AdbBackend::with_override(
+                                Some(info.binary_path),
+                            )
+                        }
+                        Err(e) => Err(glass_device::DeviceError::Backend(
+                            format!("{e}"),
+                        )),
+                    };
+                    match backend {
+                        Ok(b) => b.force_stop(&serial, &package),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await;
+            let line = match result {
+                Ok(s) if s.trim().is_empty() => "(stopped)".to_string(),
+                Ok(s) => s,
+                Err(e) => format!("error: {e}"),
+            };
+            let _ = this.update(cx, |shell, cx| {
+                shell.push_dock_log(line, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_traces_dialog(&mut self, cx: &mut Context<Self>) {
+        self.traces_dialog_open = !self.traces_dialog_open;
+        cx.notify();
+    }
+
+    pub(crate) fn close_traces_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.traces_dialog_open {
+            self.traces_dialog_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Stop every active trace. Used by the "Stop all" footer
+    /// in the trace dialog. Iterates the registry, drains
+    /// keys (so we don't double-borrow), unloads each script.
+    pub(crate) fn stop_all_traces(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<crate::traces::TraceKey> = self
+            .bundle()
+            .map(|b| b.traces.entries().iter().map(|e| e.key.clone()).collect())
+            .unwrap_or_default();
+        for k in keys {
+            self.stop_trace(
+                k.artifact,
+                k.class_jni,
+                k.method_name,
+                k.method_signature,
+                cx,
+            );
+        }
+    }
+
+    // ---- Hook lifecycle ------------------------------------------------
+
+    pub(crate) fn toggle_hooks_dialog(&mut self, cx: &mut Context<Self>) {
+        self.hooks_dialog_open = !self.hooks_dialog_open;
+        // Always start in list mode — close any editor if it
+        // was left open from a previous session.
+        self.hook_editor_target = None;
+        self.hook_editor_buffer.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn close_hooks_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.hooks_dialog_open {
+            self.hooks_dialog_open = false;
+            self.hook_editor_target = None;
+            self.hook_editor_buffer.clear();
+            cx.notify();
+        }
+    }
+
+    /// Switch the hooks dialog into editor mode for one key.
+    /// Pre-fills the buffer with the entry's existing JS body
+    /// (or a sensible default) so the user can iterate.
+    pub(crate) fn open_hook_editor(
+        &mut self,
+        key: crate::hooks::HookKey,
+        cx: &mut Context<Self>,
+    ) {
+        let initial = self
+            .bundle()
+            .and_then(|b| b.hooks.get(&key))
+            .map(|e| match &e.action {
+                crate::hooks::HookAction::CustomJs(body) => body.clone(),
+                crate::hooks::HookAction::ReturnLiteral(lit) => {
+                    format!("return {lit};")
+                }
+                crate::hooks::HookAction::LogOnly => {
+                    "// runs after the original — return its value\n\
+                     return originalImpl.apply(this, args);"
+                        .to_string()
+                }
+            })
+            .unwrap_or_else(|| {
+                "// args[] are the call's parameters\n\
+                 // call originalImpl.apply(this, args) to invoke the\n\
+                 // real method, or return a value to override.\n\
+                 return originalImpl.apply(this, args);"
+                    .to_string()
+            });
+        self.hook_editor_target = Some(key);
+        self.hook_editor_buffer = initial;
+        cx.notify();
+    }
+
+    pub(crate) fn close_hook_editor(&mut self, cx: &mut Context<Self>) {
+        self.hook_editor_target = None;
+        self.hook_editor_buffer.clear();
+        cx.notify();
+    }
+
+    /// Persist the editor buffer as a CustomJs hook on the
+    /// editor's target key. If the hook doesn't exist yet
+    /// (user is creating it fresh), it's started; otherwise
+    /// the existing script is unloaded and a new one created
+    /// with the new body.
+    pub(crate) fn save_hook_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.hook_editor_target.clone() else { return };
+        let body = self.hook_editor_buffer.clone();
+        // Stop the running hook (if any), then start a fresh
+        // one with the new body. This is the simplest "edit"
+        // path — Frida sessions don't support live script
+        // mutation, so create-replace-on-edit is the model.
+        let exists = self
+            .bundle()
+            .map(|b| b.hooks.get(&key).is_some())
+            .unwrap_or(false);
+        if exists {
+            self.stop_hook(
+                key.artifact.clone(),
+                key.class_jni.clone(),
+                key.method_name.clone(),
+                key.method_signature.clone(),
+                cx,
+            );
+        }
+        self.start_hook(
+            key.artifact.clone(),
+            key.class_jni.clone(),
+            key.method_name.clone(),
+            key.method_signature.clone(),
+            crate::hooks::HookAction::CustomJs(body),
+            cx,
+        );
+        self.close_hook_editor(cx);
+    }
+
+    /// Track the editor's buffer. Called by the multi-line
+    /// text input on every keystroke.
+    pub(crate) fn set_hook_editor_buffer(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.hook_editor_buffer = text;
+        cx.notify();
+    }
+
+    pub(crate) fn start_hook(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature: String,
+        action: crate::hooks::HookAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dock) = self.debug_dock.as_ref() else {
+            return;
+        };
+        let Some(session) = dock.session.clone() else {
+            self.push_dock_log("• not attached — connect first", cx);
+            return;
+        };
+        let key = crate::hooks::HookKey {
+            artifact: artifact.clone(),
+            class_jni: class_jni.clone(),
+            method_name: method_name.clone(),
+            method_signature: method_signature.clone(),
+        };
+        if let Some(bundle) = self.bundle() {
+            if bundle.hooks.get(&key).is_some() {
+                self.push_dock_log(
+                    format!("• already hooking {class_jni}.{method_name}"),
+                    cx,
+                );
+                return;
+            }
+        }
+        let body = match &action {
+            crate::hooks::HookAction::LogOnly => glass_frida::HookBody::LogOnly,
+            crate::hooks::HookAction::ReturnLiteral(lit) => {
+                glass_frida::HookBody::ReturnLiteral(lit.clone())
+            }
+            crate::hooks::HookAction::CustomJs(body) => {
+                glass_frida::HookBody::Custom(body.clone())
+            }
+        };
+        let js = match glass_frida::render_hook_script(
+            &class_jni,
+            &method_name,
+            &method_signature,
+            &body,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.push_dock_log(format!("• render failed: {e}"), cx);
+                return;
+            }
+        };
+        let script_id = session.alloc_script_id();
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.hooks.insert(crate::hooks::HookEntry {
+                key: key.clone(),
+                script_id: Some(script_id),
+                status: crate::hooks::HookStatus::Pending,
+                action,
+                created_at: std::time::Instant::now(),
+                invocations: Vec::new(),
+            });
+        }
+        self.push_dock_log(
+            format!("⚙ hooking {class_jni}.{method_name}{method_signature}"),
+            cx,
+        );
+        cx.notify();
+        let name = format!(
+            "hook-{}-{}",
+            class_jni.replace('/', "."),
+            method_name
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    session.create_script(script_id, name, js)
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| match result {
+                Ok(()) => {
+                    if let Some(bundle) = shell.bundle_mut() {
+                        bundle.hooks.mark_active(&key, script_id);
+                    }
+                    shell.push_dock_log(
+                        format!("• hook {script_id} active"),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    if let Some(bundle) = shell.bundle_mut() {
+                        bundle.hooks.mark_failed(&key, e.clone());
+                    }
+                    shell.push_dock_log(
+                        format!("• hook {script_id} failed: {e}"),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn stop_hook(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = crate::hooks::HookKey {
+            artifact,
+            class_jni: class_jni.clone(),
+            method_name: method_name.clone(),
+            method_signature,
+        };
+        let script_id = self
+            .bundle()
+            .and_then(|b| b.hooks.get(&key))
+            .and_then(|e| e.script_id);
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.hooks.remove(&key);
+        }
+        self.push_dock_log(
+            format!("◼ stop hook {class_jni}.{method_name}"),
+            cx,
+        );
+        let Some(session) = self
+            .debug_dock
+            .as_ref()
+            .and_then(|d| d.session.clone())
+        else {
+            return;
+        };
+        let Some(id) = script_id else { return };
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move {
+                    let _ = session.unload_script(id);
+                })
+                .await;
+        })
+        .detach();
+    }
+
+    pub(crate) fn stop_all_hooks(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<crate::hooks::HookKey> = self
+            .bundle()
+            .map(|b| b.hooks.entries().iter().map(|e| e.key.clone()).collect())
+            .unwrap_or_default();
+        for k in keys {
+            self.stop_hook(
+                k.artifact,
+                k.class_jni,
+                k.method_name,
+                k.method_signature,
+                cx,
+            );
+        }
+    }
+
+    /// Smoke test: load a tiny script that calls `send(1+1)`
+    /// in the gadget. If the wiring works, the dock's event
+    /// pump turns this into a log line like
+    /// `[script <id>] 2` within a tick or two. Used to verify
+    /// the M3.4 plumbing without any feature code on top.
+    pub(crate) fn debug_smoke_test(&mut self, cx: &mut Context<Self>) {
+        let Some(dock) = self.debug_dock.as_ref() else { return };
+        let Some(session) = dock.session.clone() else {
+            self.push_dock_log("not connected — try Connect first", cx);
+            return;
+        };
+        let id = session.alloc_script_id();
+        self.push_dock_log(format!("• loading smoke-test script {id}"), cx);
+        // Background the create-script call since it blocks
+        // on the actor thread; keeps the UI responsive.
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    session.create_script(
+                        id,
+                        "glass-smoke",
+                        "send(1 + 1);",
+                    )
+                })
+                .await;
+            let line = match result {
+                Ok(()) => format!("smoke script {id} loaded"),
+                Err(e) => format!("smoke script {id} failed: {e}"),
+            };
+            let _ = this.update(cx, |shell, cx| {
+                shell.push_dock_log(line, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Start tracing a Java method on the connected gadget.
+    /// Inserts a `Pending` entry into the bundle's trace
+    /// registry, renders the Frida JS, allocates a script id,
+    /// and asks the session actor to load it. On load success
+    /// the entry flips to `Active`; on failure to `Failed`.
+    ///
+    /// No-op (with a log line) when:
+    ///   * No bundle is loaded.
+    ///   * The dock isn't open / not attached.
+    ///   * The method is already being traced.
+    pub(crate) fn start_trace(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dock) = self.debug_dock.as_ref() else {
+            tracing::info!("start_trace: dock not open — connect first");
+            return;
+        };
+        let Some(session) = dock.session.clone() else {
+            self.push_dock_log("• not attached — connect first", cx);
+            return;
+        };
+        let key = crate::traces::TraceKey {
+            artifact: artifact.clone(),
+            class_jni: class_jni.clone(),
+            method_name: method_name.clone(),
+            method_signature: method_signature.clone(),
+        };
+        // Refuse to double-trace.
+        if let Some(bundle) = self.bundle() {
+            if bundle.traces.get(&key).is_some() {
+                self.push_dock_log(
+                    format!("• already tracing {class_jni}.{method_name}"),
+                    cx,
+                );
+                return;
+            }
+        }
+        // Render JS up front so we fail fast on a bad signature.
+        let js = match glass_frida::render_trace_script(
+            &class_jni,
+            &method_name,
+            &method_signature,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.push_dock_log(
+                    format!("• render failed: {e}"),
+                    cx,
+                );
+                return;
+            }
+        };
+        let script_id = session.alloc_script_id();
+        // Stage Pending → caller's pane can show a "loading"
+        // indicator until the actor confirms.
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.traces.insert(crate::traces::TraceEntry {
+                key: key.clone(),
+                script_id: Some(script_id),
+                status: crate::traces::TraceStatus::Pending,
+                created_at: std::time::Instant::now(),
+                invocations: Vec::new(),
+            });
+        }
+        self.push_dock_log(
+            format!("▶ tracing {class_jni}.{method_name}{method_signature}"),
+            cx,
+        );
+        cx.notify();
+        // Load the script off the foreground.
+        let name = format!(
+            "trace-{}-{}",
+            class_jni.replace('/', "."),
+            method_name
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    session.create_script(script_id, name, js)
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| match result {
+                Ok(()) => {
+                    if let Some(bundle) = shell.bundle_mut() {
+                        bundle.traces.mark_active(&key, script_id);
+                    }
+                    shell.push_dock_log(
+                        format!("• trace {script_id} active"),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    if let Some(bundle) = shell.bundle_mut() {
+                        bundle.traces.mark_failed(&key, e.clone());
+                    }
+                    shell.push_dock_log(
+                        format!("• trace {script_id} failed: {e}"),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Stop and unregister a trace. Removes the entry from
+    /// the registry and asks the actor to unload the script.
+    /// Cheap when the trace is already gone.
+    pub(crate) fn stop_trace(
+        &mut self,
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+        method_name: String,
+        method_signature: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = crate::traces::TraceKey {
+            artifact,
+            class_jni: class_jni.clone(),
+            method_name: method_name.clone(),
+            method_signature,
+        };
+        // Pull the script id out before we drop the entry.
+        let script_id = self
+            .bundle()
+            .and_then(|b| b.traces.get(&key))
+            .and_then(|e| e.script_id);
+        if let Some(bundle) = self.bundle_mut() {
+            bundle.traces.remove(&key);
+        }
+        self.push_dock_log(
+            format!("◼ stop trace {class_jni}.{method_name}"),
+            cx,
+        );
+        let Some(session) = self
+            .debug_dock
+            .as_ref()
+            .and_then(|d| d.session.clone())
+        else {
+            return;
+        };
+        let Some(id) = script_id else { return };
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move {
+                    let _ = session.unload_script(id);
+                })
+                .await;
+        })
+        .detach();
+    }
+
     pub(crate) fn export_patched_bundle(&mut self, cx: &mut Context<Self>) {
         use std::collections::HashMap;
         let Some(bundle) = self.bundle() else { return };
-        if bundle.edits.is_empty() && bundle.smali_edits.is_empty() {
+        if bundle.edits.is_empty()
+            && bundle.smali_edits.is_empty()
+            && bundle.pending_additions.is_empty()
+        {
             return;
         }
         // Build the EditMap up-front (cheap clone of edit
@@ -6130,6 +7592,10 @@ impl Shell {
                 .or_default()
                 .insert(e.key.class_jni.clone(), e.modified.clone());
         }
+        // Pending APK additions (new zip entries): clone the
+        // bundle's map up front so the post-prompt continuation
+        // doesn't need a borrow on Shell.
+        let additions: glass_api::ApkAdditions = bundle.pending_additions.clone();
         // Re-load the source bundle from disk so the exporter
         // sees fresh bytes (the in-memory ParsedArtifact is the
         // source of truth for which file to patch, but the
@@ -6186,6 +7652,7 @@ impl Shell {
             // archive.
             let edit_map_for_task = edit_map.clone();
             let smali_map_for_task = smali_edit_map.clone();
+            let additions_for_task = additions.clone();
             let source_path_for_task = source_path.clone();
             let out_path_for_task = out_path.clone();
             let summary = cx
@@ -6196,6 +7663,7 @@ impl Shell {
                             &bundle,
                             &edit_map_for_task,
                             &smali_map_for_task,
+                            &additions_for_task,
                             &out_path_for_task,
                         ) {
                             Ok(()) => Ok(out_path_for_task),
@@ -6247,7 +7715,7 @@ impl Shell {
         }
     }
 
-    fn bundle_mut(&mut self) -> Option<&mut crate::LoadedBundle> {
+    pub(crate) fn bundle_mut(&mut self) -> Option<&mut crate::LoadedBundle> {
         if let crate::ShellState::Ready(b) = &mut self.state {
             Some(b)
         } else {

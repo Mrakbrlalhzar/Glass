@@ -34,6 +34,16 @@ const ATTRIBUTIONS: &[(&str, &str, &str)] = &[
     ("serde", "MIT/Apache-2.0", "Serialization"),
     ("symbolic-demangle", "MIT", "C++/Rust/Swift demangling"),
     ("parking_lot", "MIT/Apache-2.0", "Locking primitives"),
+    // Device discovery + on-device instrumentation.
+    ("idevice", "MIT", "iOS usbmux / lockdownd client"),
+    ("tokio", "MIT", "Async runtime (used by idevice)"),
+    ("frida", "wxWindows", "Dynamic instrumentation runtime (optional, opt-in via the `frida` feature)"),
+    // Notable bundled binaries shipped alongside Glass:
+    //   * libfrida-gadget.so per ABI — LGPL-2.1, used by the
+    //     APK injection flow when the user enables the `frida`
+    //     feature and chooses to gadget-patch a bundle.
+    //   * adb (Android Debug Bridge) — Apache-2.0, NOT bundled;
+    //     Glass shells out to whatever adb the user has installed.
 ];
 
 pub fn render_about(
