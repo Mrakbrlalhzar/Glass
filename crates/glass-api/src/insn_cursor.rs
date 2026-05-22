@@ -144,7 +144,7 @@ fn in_brackets(input: &str, cursor: usize) -> bool {
 fn looks_immediate(s: &str) -> bool {
     let s = s.trim_start_matches('#');
     let s = s.trim_start_matches('-');
-    s.starts_with("0x") || s.starts_with("0X") || s.chars().next().map_or(false, |c| c.is_ascii_digit())
+    s.starts_with("0x") || s.starts_with("0X") || s.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 fn looks_like_register(s: &str) -> bool {

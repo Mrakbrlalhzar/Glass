@@ -34,6 +34,12 @@ impl GadgetBinary {
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+    // Required by clippy when `len` is present. Always false
+    // in practice — we never construct an empty gadget — but
+    // the bound is on type shape, not runtime values.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 /// The Android arm64 gadget. Covers ~all phones shipped in the
@@ -71,19 +77,27 @@ pub const ANDROID_GADGET_CONFIG_FILENAME: &str =
 
 pub fn android_gadget_config_listen() -> Vec<u8> {
     // Listen on host loopback, fail (rather than auto-retry)
-    // if 27042 is taken, and wait for a host-side client
-    // before continuing app init. `on_load: wait` is the
-    // safer default for a reverse-engineering workflow —
-    // gives the user time to attach before the app's own
-    // code starts running. Users can override later by
-    // writing their own config in the bundle.
+    // if 27042 is taken, and **block** until a host client
+    // resumes us. `on_load: wait` is the right default for
+    // Glass's debug workflow — when the user clicks Restart
+    // the gadget pauses inside <clinit>, Glass installs all
+    // active traces + hooks against the frozen process, then
+    // sends a resume to let the app continue. This is the
+    // only way to catch methods that run during process
+    // init (Application.onCreate, content provider init,
+    // etc.); without pause we lose the entire startup
+    // window.
+    //
+    // Glass's Connect flow auto-resumes when the user has no
+    // traces / hooks defined, so the app still behaves
+    // normally when the user just wants to navigate.
     let json = r#"{
   "interaction": {
     "type": "listen",
     "address": "127.0.0.1",
     "port": 27042,
     "on_port_conflict": "fail",
-    "on_load": "resume"
+    "on_load": "wait"
   }
 }
 "#;

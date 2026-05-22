@@ -28,7 +28,7 @@ pub fn render(
     cx: &mut Context<Shell>,
 ) -> AnyElement {
     debug_assert!(matches!(state.kind, HexEditKind::String));
-    let current_len = state.input.text().as_bytes().len();
+    let current_len = state.input.text().len();
     let max_len = state.length;
     // Over budget: more bytes than the original allocation, OR
     // exactly the allocation with no NUL anywhere in the new

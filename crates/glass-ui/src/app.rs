@@ -490,7 +490,7 @@ fn spawn_annotation_reload_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
             };
             if Some(current) != last_mtime {
                 last_mtime = Some(current);
-                let _ = cx.update_entity(&entity, |shell, cx| {
+                cx.update_entity(&entity, |shell, cx| {
                     shell.refresh_all_annotations(cx);
                 });
             }
@@ -515,7 +515,7 @@ fn spawn_device_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
         // re-uses cached info on subsequent calls.
         if let Some(entity) = weak.upgrade() {
             let status = manager.backend_status();
-            let _ = cx.update_entity(&entity, |shell, cx| {
+            cx.update_entity(&entity, |shell, cx| {
                 shell.device_backend_status = status;
                 cx.notify();
             });
@@ -532,7 +532,7 @@ fn spawn_device_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
                 .background_executor()
                 .spawn(async move { manager.list() })
                 .await;
-            let _ = cx.update_entity(&entity, |shell, cx| {
+            cx.update_entity(&entity, |shell, cx| {
                 // If the selected device disappeared, drop it
                 // back to None so the chip flips to "No device"
                 // instead of pretending we're still attached.
@@ -624,7 +624,7 @@ fn spawn_frida_probe(shell: &gpui::Entity<Shell>, cx: &mut App) {
                 package_name.as_deref(),
                 &device_manager,
             );
-            let _ = cx.update_entity(&entity, |shell, cx| {
+            cx.update_entity(&entity, |shell, cx| {
                 shell.frida_probes.insert(
                     id,
                     crate::FridaProbeCache {
@@ -741,7 +741,7 @@ fn spawn_debug_dock_pump(shell: &gpui::Entity<Shell>, cx: &mut App) {
             if events.is_empty() {
                 continue;
             }
-            let _ = cx.update_entity(&entity, |shell, cx| {
+            cx.update_entity(&entity, |shell, cx| {
                 for ev in events {
                     route_session_event(shell, ev);
                 }
@@ -916,6 +916,50 @@ fn invocation_from_payload(
             InvocationKind::Call,
             "(trace ready)".to_string(),
         ),
+        "setup-info" => {
+            // Diagnostic ping from the script's preamble.
+            // Tells us whether Frida's Java bridge exists
+            // at script-load time. Surfaces in the log so
+            // the user can see "we got this far."
+            let tj = payload
+                .get("typeofJava")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let av = payload
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .map(|b| if b { "true" } else { "false" })
+                .unwrap_or("?");
+            (
+                InvocationKind::Call,
+                format!("(setup) typeof Java = {tj}, Java.available = {av}"),
+            )
+        }
+        "info" => {
+            // Generic diagnostic from a probe script. Just
+            // dump the whole payload so we don't accidentally
+            // hide a field. Used by the smoke-test diagnostic
+            // path; can be reused by other probes.
+            (InvocationKind::Call, format!("(info) {payload}"))
+        }
+        "wrapper-error" => {
+            // Our own wrapper code threw (e.g. safeRepr on
+            // a hostile object). Surfaced so the user sees
+            // it without bringing down the app. `phase` is
+            // either "format-args" or "format-return".
+            let phase = payload
+                .get("phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let err = payload
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            (
+                InvocationKind::Call,
+                format!("(wrapper-error {phase}) {err}"),
+            )
+        }
         "setup-error" => {
             // The error string can be quite long (a Java
             // stack trace) — render the whole thing so the

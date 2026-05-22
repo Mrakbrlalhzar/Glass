@@ -600,7 +600,6 @@ pub fn render_two_pane(
                                     let bundle = bundle.clone();
                                     let active_class_jni = active_class_jni.clone();
                                     let row_annotations = row_annotations.clone();
-                                    let class_decl_edited = class_decl_edited;
                                     let row_scopes = row_scopes.clone();
                                     let edited_fields = edited_fields.clone();
                                     let edited_methods = edited_methods.clone();
@@ -706,21 +705,15 @@ pub fn render_two_pane(
                                                 b: 0.85,
                                                 a: 0.18,
                                             });
-                                        } else if {
-                                            // Tint when the row's scope matches
-                                            // an edited bucket. Class decl,
-                                            // edited field, or edited method
-                                            // all light up the row.
-                                            match row_scopes.get(index) {
-                                                Some(crate::smali_row_scope::RowScope::ClassDecl) => class_decl_edited,
-                                                Some(crate::smali_row_scope::RowScope::Field { name, signature }) => {
-                                                    edited_fields.contains(&(name.clone(), signature.clone()))
-                                                }
-                                                Some(crate::smali_row_scope::RowScope::Method { name, signature }) => {
-                                                    edited_methods.contains(&(name.clone(), signature.clone()))
-                                                }
-                                                _ => false,
+                                        } else if match row_scopes.get(index) {
+                                            Some(crate::smali_row_scope::RowScope::ClassDecl) => class_decl_edited,
+                                            Some(crate::smali_row_scope::RowScope::Field { name, signature }) => {
+                                                edited_fields.contains(&(name.clone(), signature.clone()))
                                             }
+                                            Some(crate::smali_row_scope::RowScope::Method { name, signature }) => {
+                                                edited_methods.contains(&(name.clone(), signature.clone()))
+                                            }
+                                            _ => false,
                                         } {
                                             // Green wash — same idiom as the
                                             // disasm editor uses for staged

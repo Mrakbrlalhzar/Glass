@@ -28,12 +28,7 @@ pub fn discover_adb(override_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(p) = scan_path() {
         return Some(p);
     }
-    for candidate in sdk_candidates() {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    sdk_candidates().into_iter().find(|c| c.is_file())
 }
 
 fn scan_path() -> Option<PathBuf> {

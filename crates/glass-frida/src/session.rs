@@ -67,6 +67,16 @@ enum Command {
     Detach {
         reply: mpsc::Sender<Result<(), String>>,
     },
+    /// Ask the gadget to resume — only meaningful when the
+    /// gadget was configured with `on_load: wait` and is
+    /// currently blocked inside <clinit>. Wraps
+    /// frida_device_resume_sync against the attached
+    /// device. Cheap no-op if the gadget has already
+    /// resumed (frida-core returns OK).
+    Resume {
+        pid: u32,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     /// Tell the actor to shut down cleanly. Drops everything,
     /// then exits the loop. Used when the dock closes.
     Shutdown,
@@ -206,6 +216,18 @@ impl Session {
         rx.recv().map_err(|_| "actor dropped reply".to_string())?
     }
 
+    /// Unblock a gadget that was loaded with `on_load: wait`.
+    /// Called from Glass's Restart orchestrator after every
+    /// trace/hook has been re-installed against the paused
+    /// process.
+    pub fn resume(&self, pid: u32) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.cmd_tx
+            .send(Command::Resume { pid, reply: tx })
+            .map_err(|_| "session actor dead".to_string())?;
+        rx.recv().map_err(|_| "actor dropped reply".to_string())?
+    }
+
     pub fn detach(&self) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
         self.cmd_tx
@@ -261,6 +283,9 @@ fn actor_main(cmd_rx: mpsc::Receiver<Command>, _event_tx: mpsc::Sender<SessionEv
                 let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
             }
             Command::Detach { reply } => {
+                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
+            }
+            Command::Resume { reply, .. } => {
                 let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
             }
             Command::Shutdown => break,
@@ -369,6 +394,9 @@ fn drain_commands_with_error(cmd_rx: mpsc::Receiver<Command>, msg: &str) {
                 let _ = reply.send(Err(msg.to_string()));
             }
             Command::Detach { reply } => {
+                let _ = reply.send(Err(msg.to_string()));
+            }
+            Command::Resume { reply, .. } => {
                 let _ = reply.send(Err(msg.to_string()));
             }
         }
@@ -557,16 +585,17 @@ fn handle_command(
             unsafe {
                 let opts = frida_sys::frida_script_options_new();
                 frida_sys::frida_script_options_set_name(opts, name_c.as_ptr());
-                // V8 runtime — required for the Java bridge.
-                // Frida's default QJS runtime doesn't auto-load
-                // `Java.*`, and our trace JS bails with
-                // "'Java' is not defined". V8 brings in the
-                // Java bridge implicitly when running on
-                // Android, which is what every interesting
-                // workload for Glass needs.
+                // Leave runtime at DEFAULT. Overriding to
+                // V8 turned out to *break* the Java bridge
+                // in gadget mode (the gadget pre-wires the
+                // bridge into its embedded runtime; asking
+                // for a different runtime spins up a fresh
+                // isolate without `Java` defined). The
+                // default — whatever the gadget was compiled
+                // against — is the right choice.
                 frida_sys::frida_script_options_set_runtime(
                     opts,
-                    frida_sys::FridaScriptRuntime_FRIDA_SCRIPT_RUNTIME_V8,
+                    frida_sys::FridaScriptRuntime_FRIDA_SCRIPT_RUNTIME_DEFAULT,
                 );
                 let mut err: *mut frida_sys::GError = std::ptr::null_mut();
                 let script_ptr = frida_sys::frida_session_create_script_sync(
@@ -578,10 +607,27 @@ fn handle_command(
                 );
                 frida_sys::g_object_unref(opts as _);
                 if !err.is_null() || script_ptr.is_null() {
-                    if !err.is_null() {
+                    // Surface the GError message so the dock
+                    // log shows what frida-core actually
+                    // rejected. Common causes: source that
+                    // triggers an immediate JS parse error
+                    // inside the gadget, or a script name
+                    // collision.
+                    let msg = if !err.is_null() {
+                        let m = (*err).message;
+                        let owned = if m.is_null() {
+                            "create_script: unknown error".to_string()
+                        } else {
+                            std::ffi::CStr::from_ptr(m as *const _)
+                                .to_string_lossy()
+                                .into_owned()
+                        };
                         frida_sys::g_clear_error(&mut err);
-                    }
-                    let _ = reply.send(Err("create_script failed".into()));
+                        owned
+                    } else {
+                        "create_script returned null script_ptr".to_string()
+                    };
+                    let _ = reply.send(Err(msg));
                     return true;
                 }
                 // Register the message callback.
@@ -610,9 +656,17 @@ fn handle_command(
                     &mut err,
                 );
                 if !err.is_null() {
+                    let m = (*err).message;
+                    let msg = if m.is_null() {
+                        "script load: unknown error".to_string()
+                    } else {
+                        std::ffi::CStr::from_ptr(m as *const _)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
                     frida_sys::g_clear_error(&mut err);
                     frida_sys::frida_unref(script_ptr as _);
-                    let _ = reply.send(Err("script load failed".into()));
+                    let _ = reply.send(Err(format!("script load: {msg}")));
                     return true;
                 }
                 scripts.insert(
@@ -653,6 +707,39 @@ fn handle_command(
         Command::Detach { reply } => {
             scripts.clear();
             *session = None;
+            let _ = reply.send(Ok(()));
+        }
+        Command::Resume { pid, reply } => {
+            let Some(sess) = session.as_ref() else {
+                let _ = reply.send(Err("not attached".into()));
+                return true;
+            };
+            // frida_device_resume_sync against the device we
+            // attached to. Cheap; the gadget unblocks the
+            // <clinit> wait loop. Already-resumed devices
+            // return success.
+            unsafe {
+                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                frida_sys::frida_device_resume_sync(
+                    sess.device_ptr,
+                    pid,
+                    std::ptr::null_mut(),
+                    &mut err,
+                );
+                if !err.is_null() {
+                    let msg_ptr = (*err).message;
+                    let msg = if msg_ptr.is_null() {
+                        "resume failed".to_string()
+                    } else {
+                        std::ffi::CStr::from_ptr(msg_ptr as *const _)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    frida_sys::g_clear_error(&mut err);
+                    let _ = reply.send(Err(msg));
+                    return true;
+                }
+            }
             let _ = reply.send(Ok(()));
         }
     }

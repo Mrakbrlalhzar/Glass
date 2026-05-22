@@ -274,14 +274,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
                     (bytes_vec, glass_api::PatchKind::Bytes, display)
                 }
                 (Some(_), Some(_)) => {
-                    return Err(DispatchError::Other(format!(
-                        "provide either `insn` or `bytes`, not both"
-                    )))
+                    return Err(DispatchError::Other("provide either `insn` or `bytes`, not both".to_string()))
                 }
                 (None, None) => {
-                    return Err(DispatchError::Other(format!(
-                        "provide `insn` or `bytes`"
-                    )))
+                    return Err(DispatchError::Other("provide `insn` or `bytes`".to_string()))
                 }
             };
             let mut pf = glass_api::PatchFile::read_or_default(&patches_path)?;

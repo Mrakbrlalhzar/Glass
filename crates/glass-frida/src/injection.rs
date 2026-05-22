@@ -255,9 +255,9 @@ fn manifest_class_attr(
 /// Find the first Activity (or activity-alias) with a `MAIN`
 /// action and `LAUNCHER` category in its intent filter set.
 /// Returns the node so the caller can read its `android:name`.
-fn find_launcher_activity<'a>(
-    manifest: &'a smali::android::binary_xml::AndroidManifest,
-) -> Option<&'a smali::android::binary_xml::ManifestElement> {
+fn find_launcher_activity(
+    manifest: &smali::android::binary_xml::AndroidManifest,
+) -> Option<&smali::android::binary_xml::ManifestElement> {
     let app = manifest.application()?;
     for child in &app.children {
         if child.tag != "activity" && child.tag != "activity-alias" {

@@ -23,6 +23,7 @@ use crate::{path, AuthState, DeviceError, DeviceId, DeviceInfo, Transport};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone)]
 pub struct AdbBackend {
     binary: PathBuf,
     version: String,
@@ -30,7 +31,7 @@ pub struct AdbBackend {
     /// on first sighting; reused on subsequent polls. We don't
     /// invalidate — the same physical device giving us a
     /// different model would be too unusual to plan for.
-    cache: Mutex<HashMap<String, CachedProps>>,
+    cache: std::sync::Arc<Mutex<HashMap<String, CachedProps>>>,
 }
 
 #[derive(Clone, Default)]
@@ -61,7 +62,7 @@ impl AdbBackend {
         Ok(Self {
             binary,
             version,
-            cache: Mutex::new(HashMap::new()),
+            cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
         })
     }
 

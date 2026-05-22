@@ -21,15 +21,15 @@
 //! folded into the class-level Add/Delete UX later).
 //!
 //! Validation rules:
-//!   * Name:       non-empty, Java identifier shape
-//!                 ([A-Za-z_$][A-Za-z0-9_$]*).
-//!   * Type:       any valid JNI type signature
-//!                 (primitive, `L<path>;`, or `[`-prefixed array of
-//!                 same). Generic / wildcard forms aren't allowed
-//!                 in field type slots so we don't pretend to
-//!                 support them.
-//!   * Initial:    free-form; we don't try to parse smali literals
-//!                 here. Empty means "no initialiser".
+//!
+//! * Name:    non-empty, Java identifier shape
+//!   (`[A-Za-z_$][A-Za-z0-9_$]*`).
+//! * Type:    any valid JNI type signature (primitive,
+//!   `L<path>;`, or `[`-prefixed array of same). Generic /
+//!   wildcard forms aren't allowed in field type slots so we
+//!   don't pretend to support them.
+//! * Initial: free-form; we don't try to parse smali literals
+//!   here. Empty means "no initialiser".
 
 use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString};
 use smali::types::{Modifier, SmaliClass, SmaliField, TypeSignature};

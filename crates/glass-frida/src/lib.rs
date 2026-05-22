@@ -33,7 +33,9 @@ pub use injection::{
 };
 pub use patch::{apply_plan, PatchError, GADGET_LIBRARY_NAME};
 pub use session::{AttachReport, ScriptId, Session, SessionEvent};
-pub use trace_js::{render_hook_script, render_trace_script, HookBody, JsRenderError};
+pub use trace_js::{
+    build_bridged_script, render_hook_script, render_trace_script, HookBody, JsRenderError,
+};
 pub use sign::{SignError, SignerTools};
 
 /// Cloneable error type surfaced through the GUI.

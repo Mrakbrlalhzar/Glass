@@ -47,6 +47,16 @@ arc_with_non_send_sync = "allow"
 needless_range_loop = "allow"
 result_large_err = "allow"
 large_enum_variant = "allow"
+# Tuple keys + Arc<HashMap<...>> chains are load-bearing in
+# the bundle types. Naming them helps readability a little
+# but adds an indirection layer that the bigger benefit of
+# the type signature being legible-at-glance doesn't merit.
+type_complexity = "allow"
+# We use `///   * item` (with extra spaces from the marker)
+# for visually-aligned bullets in module docs. Clippy wants
+# 0/2-space indentation; our convention reads better in the
+# editor and we don't want to fight it on every doc.
+doc_lazy_continuation = "allow"
 
 [workspace.lints.rust]
 # objc's class!/msg_send! macros expand to #[cfg(feature = "cargo-clippy")]

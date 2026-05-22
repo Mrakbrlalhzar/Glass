@@ -568,7 +568,7 @@ pub fn handle_key(shell: &mut Shell, ks: &gpui::Keystroke, cx: &mut Context<Shel
         if shell
             .op_edit
             .as_ref()
-            .map_or(false, |e| !e.suggestions.is_empty())
+            .is_some_and(|e| !e.suggestions.is_empty())
         {
             if let Some(state) = shell.op_edit.as_mut() {
                 state.suggestions.clear();
@@ -625,7 +625,7 @@ pub fn handle_named_key(shell: &mut Shell, key: &str, cx: &mut Context<Shell>) {
     let has_suggestions = shell
         .op_edit
         .as_ref()
-        .map_or(false, |e| !e.suggestions.is_empty());
+        .is_some_and(|e| !e.suggestions.is_empty());
     if has_suggestions && (key == "up" || key == "down") {
         if let Some(state) = shell.op_edit.as_mut() {
             let n = state.suggestions.len();

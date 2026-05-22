@@ -48,6 +48,12 @@ pub struct AnnotationStack {
 /// Where the bottom frame writes back at root-save time. The
 /// concrete class look-up happens on commit so we don't hold any
 /// references across the editor's lifetime.
+// The shared `Annotation` postfix is the load-bearing word
+// here — every variant *is* an annotation, distinguished by
+// what it's attached to. Renaming to drop the postfix would
+// lose readability at call sites (`ClassAnnotation` vs
+// `Class` doesn't disambiguate from glass_db::Class etc.).
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone)]
 pub enum AnnotationTarget {
     ClassAnnotation {

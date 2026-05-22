@@ -126,11 +126,11 @@ fn parse_hex_string(s: &str) -> Option<Rgba> {
     match s.len() {
         6 => {
             let v = u32::from_str_radix(s, 16).ok()?;
-            Some(rgb(v).into())
+            Some(rgb(v))
         }
         8 => {
             let v = u32::from_str_radix(s, 16).ok()?;
-            Some(rgba(v).into())
+            Some(rgba(v))
         }
         _ => None,
     }

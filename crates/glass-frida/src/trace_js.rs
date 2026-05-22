@@ -191,7 +191,7 @@ pub fn render_trace_script(
     // and `Java.perform` will throw "'Java' is not defined."
     // We do a typeof check, then poll briefly so traces set up
     // shortly after process spawn still come up cleanly.
-    Ok(format!(
+    let inner = format!(
         r#"(function () {{
   // Render-cap. Strings, arrays, and stringified objects
   // longer than this get truncated with a "…(+N more)"
@@ -230,15 +230,23 @@ pub fn render_trace_script(
     return null;
   }}
 
-  // One-level walk of a Java object's declared fields. Frida
-  // surfaces them as JS properties on the wrapper; we read
-  // each one and stringify it (without recursing further so
-  // we don't spend forever on nested data).
+  // One-level walk of a Java object's declared fields.
+  //
+  // DANGEROUS — reflecting on a Java object from inside our
+  // wrapper triggers JNI calls, lazy class loading, and
+  // synchronization. For methods called from native code at
+  // high frequency (touch / gesture / render callbacks)
+  // this can deadlock or crash the host app.
+  //
+  // Disabled by default. Switched on per-trace later via a
+  // user toggle; the conservative default formats objects
+  // as bare identifiers so tracing a touch callback is
+  // safe by construction.
+  var ENABLE_REFLECT = false;
   function shallowFields(obj) {{
+    if (!ENABLE_REFLECT) return [];
     var pairs = [];
     try {{
-      // `class` is set on every Java wrapper; use it to walk
-      // declared fields.
       var cls = obj.getClass ? obj.getClass() : null;
       if (cls && cls.getDeclaredFields) {{
         var fs = cls.getDeclaredFields();
@@ -361,11 +369,20 @@ pub fn render_trace_script(
       var returnType = {return_type_lit};
 
       impl.implementation = function () {{
-        var args = [];
-        for (var i = 0; i < arguments.length; i++) {{
-          args.push(reprWithType(arguments[i], paramTypes[i] || ""));
+        // Defensive: if our own JS throws while formatting
+        // args we must NOT let it bubble — that crashes
+        // the app on the thread the method was called on.
+        // Catch + emit a wrapper-error event instead.
+        try {{
+          var args = [];
+          for (var i = 0; i < arguments.length; i++) {{
+            args.push(reprWithType(arguments[i], paramTypes[i] || ""));
+          }}
+          send({{ kind: "call", args: args }});
+        }} catch (wrapErr) {{
+          send({{ kind: "wrapper-error", phase: "format-args",
+                  error: String(wrapErr) }});
         }}
-        send({{ kind: "call", args: args }});
         var ret;
         try {{
           ret = impl.apply(this, arguments);
@@ -373,7 +390,12 @@ pub fn render_trace_script(
           send({{ kind: "throw", error: String(e) }});
           throw e;
         }}
-        send({{ kind: "return", value: reprWithType(ret, returnType) }});
+        try {{
+          send({{ kind: "return", value: reprWithType(ret, returnType) }});
+        }} catch (wrapErr) {{
+          send({{ kind: "wrapper-error", phase: "format-return",
+                  error: String(wrapErr) }});
+        }}
         return ret;
       }};
 
@@ -381,10 +403,17 @@ pub fn render_trace_script(
     }});
   }}
 
-  // Wait until Frida's Java namespace is present and ART
-  // reports it's available. Polls every 50ms for up to 5s;
-  // if Java never shows up we surface a setup-error so the
-  // user sees something concrete in the dock.
+  // Wait for Frida's Java bridge to come online. On the
+  // gadget this can take several seconds depending on the
+  // host app's startup path. Poll for 30s before giving up,
+  // emit a one-line diagnostic up front so the user can
+  // tell whether `Java` exists at all vs `Java.available`
+  // staying false.
+  send({{
+    kind: "setup-info",
+    typeofJava: (typeof Java),
+    available: (typeof Java !== "undefined" ? !!Java.available : false)
+  }});
   var attempts = 0;
   function waitForJava() {{
     if (typeof Java !== "undefined" && Java.available) {{
@@ -392,10 +421,11 @@ pub fn render_trace_script(
       return;
     }}
     attempts++;
-    if (attempts > 100) {{
+    if (attempts > 600) {{
       send({{
         kind: "setup-error",
-        error: "Java runtime never became available — is this a Java/Kotlin app?"
+        error: "Java bridge never became available — typeof Java=" + (typeof Java)
+                + ", Java.available=" + (typeof Java !== "undefined" ? !!Java.available : "n/a")
       }});
       return;
     }}
@@ -406,11 +436,151 @@ pub fn render_trace_script(
 "#,
         class_lit = json_string(&dotted_class),
         method_lit = json_string(&frida_method),
-    ))
+    );
+    // Splice the wrapper IIFE into the frida-java-bridge
+    // bundle's entry.js position so the gadget loads the
+    // bridge first, then our wrapper.
+    Ok(build_bridged_script(&inner))
 }
 
 fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Bundled frida-java-bridge in frida-compile's `📦` format.
+/// We don't ship this verbatim — instead, [`build_bridged_script`]
+/// substitutes the bundle's `entry.js` content for our own
+/// wrapper code so the gadget runs the Java bridge import
+/// followed by our trace/hook logic as a single bundle.
+pub const JAVA_BRIDGE_BUNDLE: &str =
+    include_str!("../assets/frida-java-bridge.js");
+
+/// Splice `user_body` into the bundled frida-java-bridge as
+/// its `entry.js`. The result is a complete frida-compile
+/// bundle that:
+///   1. Initialises frida-java-bridge (sets `globalThis.Java`).
+///   2. Runs the user's wrapper script.
+///
+/// We have to do this at the bundle level because
+/// `create_script_sync` parses the whole input through the
+/// frida-compile envelope — trailing raw JS after the bundle
+/// is silently dropped. Patching the entry's body keeps
+/// everything inside one bundle so all of it runs.
+///
+/// The patch is purely textual: locate the entry.js manifest
+/// line, find its `✄`-separated body, replace the body, and
+/// rewrite the manifest's byte count. The other modules and
+/// re-exports stay untouched.
+pub fn build_bridged_script(user_body: &str) -> String {
+    let bundle = JAVA_BRIDGE_BUNDLE;
+    // We want to:
+    //   1. Find the manifest line for /entry.js.
+    //   2. Skip past the manifest (everything up to + including
+    //      the first `\n✄\n`).
+    //   3. Replace the first module body (everything between
+    //      the first `\n✄\n` and the second `\n✄\n` or EOF) with
+    //      our prelude that imports Java + runs user_body.
+    //   4. Rewrite the manifest line with the new byte count.
+    //
+    // The prelude does the same imports the original entry
+    // did (sets globalThis.Java), then runs user_body in the
+    // module scope so it can reference Java directly.
+    let prelude_template =
+        "import a from\"frida-java-bridge\";globalThis.Java=a;\n";
+    let new_entry = format!("{prelude_template}{user_body}");
+    let new_entry_bytes = new_entry.len();
+
+    // Find the entry.js manifest line and update it.
+    // Format: "<bytes> /entry.js"
+    let manifest_marker = " /entry.js\n";
+    let Some(line_end) = bundle.find(manifest_marker) else {
+        // Bundle layout has changed — fall back to raw user
+        // body. Will fail at runtime with a useful error in
+        // the dock log (Java still undefined) but won't
+        // panic.
+        return user_body.to_string();
+    };
+    // Walk backwards from line_end to find the start of the
+    // byte count.
+    let line_start = bundle[..line_end]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let new_manifest_line =
+        format!("{new_entry_bytes} /entry.js");
+
+    // Find the bundle's first `\n✄\n` — separator before the
+    // first module body.
+    let Some(sep1) = bundle.find("\n✄\n") else {
+        return user_body.to_string();
+    };
+    let body_start = sep1 + "\n✄\n".len();
+    // Find the next `\n✄\n` — end of the entry.js body.
+    let Some(sep2_rel) = bundle[body_start..].find("\n✄\n") else {
+        return user_body.to_string();
+    };
+    let body_end = body_start + sep2_rel;
+
+    // Reassemble: header up to the manifest line,
+    // new manifest line, header after, `\n✄\n`,
+    // new entry body, rest of bundle.
+    let mut out = String::with_capacity(bundle.len() + new_entry_bytes);
+    out.push_str(&bundle[..line_start]);
+    out.push_str(&new_manifest_line);
+    out.push_str(&bundle[line_end..sep1]);
+    out.push_str("\n✄\n");
+    out.push_str(&new_entry);
+    // Skip the original body, splice from the trailing sep
+    // (we keep the `\n✄\n` so the next module starts cleanly).
+    out.push_str(&bundle[body_end..]);
+    out
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn bridged_script_contains_user_body() {
+        let user = "send({kind:'info',stage:'user-body-ran'});";
+        let bundled = build_bridged_script(user);
+        assert!(bundled.starts_with("📦"));
+        assert!(bundled.contains("user-body-ran"));
+        assert!(bundled.contains("frida-java-bridge"));
+    }
+
+    #[test]
+    fn bridged_script_rewrites_manifest_count() {
+        // Run with two different-length user bodies; the
+        // emitted manifest count for entry.js should differ.
+        let a = build_bridged_script("send({});");
+        let b = build_bridged_script("send({a:1,b:2,c:3,d:4,e:5});");
+        // Extract the count line for /entry.js out of each.
+        // Format: "<n> /entry.js". Split on space to grab the
+        // count.
+        let count_of = |s: &str| -> usize {
+            let m = " /entry.js\n";
+            // `find` returns the start of the match (the
+            // space). `s[..i]` therefore includes the digit
+            // run before the space; rfind('\n') finds the
+            // newline before the digits. The slice between
+            // those is the bytes count we want, plus
+            // potentially the path because the search may
+            // pick up the entry.js *body* later in the
+            // bundle where "/entry.js" appears in source
+            // map paths. Use the first whitespace-separated
+            // token, which is always the digits.
+            let i = s.find(m).unwrap();
+            let line_start = s[..i].rfind('\n').map(|j| j + 1).unwrap_or(0);
+            s[line_start..i]
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        };
+        assert!(count_of(&a) < count_of(&b));
+    }
 }
 
 /// What the hook should do when the method fires. Same shape
@@ -525,7 +695,7 @@ pub fn render_hook_script(
         }
     };
 
-    Ok(format!(
+    let inner = format!(
         r#"(function () {{
   var MAX_LEN = 200;
   var MAX_HEX = 32;
@@ -553,7 +723,13 @@ pub fn render_hook_script(
     if (t === "string") return JSON.stringify(truncate(v));
     return null;
   }}
+  // Reflection disabled by default — see notes on the trace
+  // template's shallowFields. Hooks can be called from
+  // native UI callbacks at high frequency; reflecting on
+  // their args is genuinely dangerous.
+  var ENABLE_REFLECT = false;
   function shallowFields(obj) {{
+    if (!ENABLE_REFLECT) return [];
     var pairs = [];
     try {{
       var cls = obj.getClass ? obj.getClass() : null;
@@ -659,23 +835,37 @@ pub fn render_hook_script(
       originalImpl.implementation = function () {{
         var args = [];
         var callArgs = [];
-        for (var i = 0; i < arguments.length; i++) {{
-          args.push(arguments[i]);
-          callArgs.push(reprWithType(arguments[i], paramTypes[i] || ""));
+        try {{
+          for (var i = 0; i < arguments.length; i++) {{
+            args.push(arguments[i]);
+            callArgs.push(reprWithType(arguments[i], paramTypes[i] || ""));
+          }}
+        }} catch (wrapErr) {{
+          send({{ kind: "wrapper-error", phase: "format-args",
+                  error: String(wrapErr) }});
         }}
         {body_js}
       }};
       send({{ kind: "ready" }});
     }});
   }}
+  send({{
+    kind: "setup-info",
+    typeofJava: (typeof Java),
+    available: (typeof Java !== "undefined" ? !!Java.available : false)
+  }});
   var attempts = 0;
   function waitForJava() {{
     if (typeof Java !== "undefined" && Java.available) {{
       setup(); return;
     }}
     attempts++;
-    if (attempts > 100) {{
-      send({{ kind: "setup-error", error: "Java runtime never became available" }}); return;
+    if (attempts > 600) {{
+      send({{
+        kind: "setup-error",
+        error: "Java bridge never became available — typeof Java=" + (typeof Java)
+                + ", Java.available=" + (typeof Java !== "undefined" ? !!Java.available : "n/a")
+      }}); return;
     }}
     setTimeout(waitForJava, 50);
   }}
@@ -684,7 +874,11 @@ pub fn render_hook_script(
 "#,
         class_lit = json_string(&dotted_class),
         method_lit = json_string(&frida_method),
-    ))
+    );
+    // Same bundling trick as render_trace_script — the hook
+    // wrapper IIFE goes in the bundle's entry.js slot so the
+    // frida-java-bridge initialises before our code runs.
+    Ok(build_bridged_script(&inner))
 }
 
 #[cfg(test)]

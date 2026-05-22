@@ -6,7 +6,7 @@
 //!   ┌─ drag handle ────────────────────────────────────┐
 //!   │  com.example.app · Pixel 6 · frida-gadget 17.9  ⨯│
 //!   ├──────────────────────────────────────────────────┤
-//!   │  [▶ Play]  [◼ Stop]                              │
+//!   │  [↻ Restart]  [◼ Stop]                          │
 //!   ├──────────────────────────────────────────────────┤
 //!   │  ▶ launching com.example.app                     │
 //!   │  ** Starting: Intent { …}                        │
@@ -160,6 +160,21 @@ fn header_row(
         )
         .child(
             div()
+                .id("debug-dock-copy-btn")
+                .text_xs()
+                .text_color(dim)
+                .cursor_pointer()
+                .hover(|s| s.text_color(crate::theme::current().shell.accent.rgba()))
+                .child(SharedString::from("Copy"))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|shell, _ev, _w, cx| {
+                        shell.copy_debug_dock_log(cx);
+                    }),
+                ),
+        )
+        .child(
+            div()
                 .id("debug-dock-disconnect")
                 .text_xs()
                 .text_color(dim)
@@ -183,8 +198,15 @@ fn controls_row(
     cx: &mut Context<Shell>,
 ) -> gpui::Div {
     let _ = dim;
+    // Restart — force-stops the app, relaunches it, waits
+    // for the gadget to come back up, re-installs every
+    // active trace + hook, then resumes. That gives the
+    // user a one-click "rerun with my hooks in place" loop.
+    // With no traces / hooks defined the orchestrator
+    // collapses to "force-stop + start + resume," so the
+    // button is also the right thing for plain restarts.
     let play = div()
-        .id("debug-dock-play")
+        .id("debug-dock-restart")
         .px_3()
         .py_1()
         .rounded_sm()
@@ -194,11 +216,11 @@ fn controls_row(
         .text_color(fg)
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::current().hovers.standard.rgba()))
-        .child(SharedString::from("▶ Play"))
+        .child(SharedString::from("↻ Restart"))
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|shell, _ev, _w, cx| {
-                shell.debug_play(cx);
+                shell.debug_restart(cx);
             }),
         );
     let stop = div()

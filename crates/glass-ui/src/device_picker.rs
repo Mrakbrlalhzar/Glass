@@ -302,7 +302,7 @@ fn device_row(
 /// only thing the injector knows how to patch today).
 fn inject_gadget_action(
     shell: &Shell,
-    fg: gpui::Rgba,
+    _fg: gpui::Rgba,
     dim: gpui::Rgba,
     border: gpui::Rgba,
     accent: gpui::Rgba,
@@ -319,9 +319,7 @@ fn inject_gadget_action(
         return None;
     }
     let bundle = shell.bundle()?;
-    if bundle.android_manifest.is_none() {
-        return None;
-    }
+    bundle.android_manifest.as_ref()?;
     Some(
         div()
             .id("inject-gadget-action")
@@ -355,10 +353,6 @@ fn inject_gadget_action(
                 }),
             ),
     )
-    .map(|d| {
-        let _ = fg;
-        d
-    })
 }
 
 /// "Connect" affordance — opens the bottom debug dock for the
@@ -390,9 +384,7 @@ fn connect_action(
         return None;
     }
     let bundle = shell.bundle()?;
-    if bundle.android_manifest.is_none() {
-        return None;
-    }
+    bundle.android_manifest.as_ref()?;
     let _ = (fg, accent);
     Some(
         div()

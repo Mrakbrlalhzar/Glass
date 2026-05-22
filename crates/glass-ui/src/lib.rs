@@ -1887,7 +1887,7 @@ impl Render for Shell {
                 if this
                     .annotation_stack
                     .as_ref()
-                    .map_or(false, |s| !s.frames.is_empty())
+                    .is_some_and(|s| !s.frames.is_empty())
                 {
                     this.cancel_annotation_frame(cx);
                     return;
@@ -1912,7 +1912,7 @@ impl Render for Shell {
                     let has_suggestions = this
                         .op_edit
                         .as_ref()
-                        .map_or(false, |e| !e.suggestions.is_empty());
+                        .is_some_and(|e| !e.suggestions.is_empty());
                     if has_suggestions {
                         if let Some(state) = this.op_edit.as_mut() {
                             state.suggestions.clear();
@@ -1997,7 +1997,7 @@ impl Render for Shell {
                 if this
                     .annotation_stack
                     .as_ref()
-                    .map_or(false, |s| !s.frames.is_empty())
+                    .is_some_and(|s| !s.frames.is_empty())
                 {
                     annotation_popover::handle_named_key(this, "left", cx);
                     return;
@@ -2030,7 +2030,7 @@ impl Render for Shell {
                 if this
                     .annotation_stack
                     .as_ref()
-                    .map_or(false, |s| !s.frames.is_empty())
+                    .is_some_and(|s| !s.frames.is_empty())
                 {
                     annotation_popover::handle_named_key(this, "right", cx);
                     return;
@@ -2135,7 +2135,7 @@ impl Render for Shell {
                     let has_suggestions = this
                         .op_edit
                         .as_ref()
-                        .map_or(false, |e| !e.suggestions.is_empty());
+                        .is_some_and(|e| !e.suggestions.is_empty());
                     if has_suggestions {
                         this.accept_op_edit_suggestion(cx);
                     } else {
@@ -2196,7 +2196,7 @@ impl Render for Shell {
                 if this
                     .annotation_stack
                     .as_ref()
-                    .map_or(false, |s| !s.frames.is_empty())
+                    .is_some_and(|s| !s.frames.is_empty())
                 {
                     annotation_popover::handle_key(this, k, cx);
                     return;

@@ -318,7 +318,7 @@ pub fn render_section_map(
         move |index, _window, _cx| {
             let sec = sections[index].clone();
             let is_hot = hovered == Some(index);
-            let bg = if is_hot { crate::theme::current().hovers.standard.rgba() } else { gpui::rgba(0x00000000).into() };
+            let bg = if is_hot { crate::theme::current().hovers.standard.rgba() } else { gpui::rgba(0x00000000) };
             let hover_handle = row_handle.clone();
             let click_handle = row_handle.clone();
             let click_artifact = row_artifact.clone();

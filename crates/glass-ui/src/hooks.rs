@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub use crate::traces::{Invocation, InvocationKind};
+pub use crate::traces::Invocation;
 
 /// What kind of override the user wants. Stored alongside
 /// `body` so the dialog can render a meaningful summary

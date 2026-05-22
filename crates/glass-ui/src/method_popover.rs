@@ -212,8 +212,7 @@ fn validate_method_signature(s: &str) -> Result<(), &'static str> {
     let ret = &s[close + 1..];
     let mut rest = args;
     while !rest.is_empty() {
-        let (consumed, _err_offset) = parse_one_jni_type(rest, false)
-            .map_err(|m| m)?;
+        let (consumed, _err_offset) = parse_one_jni_type(rest, false)?;
         rest = &rest[consumed..];
     }
     // The return slot allows `V` plus any of the types `args`
