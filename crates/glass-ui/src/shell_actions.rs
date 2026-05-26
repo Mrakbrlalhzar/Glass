@@ -515,6 +515,81 @@ impl Shell {
         matches!(self.state, ShellState::Empty)
     }
 
+    /// Close the currently-loaded bundle and return the window to the
+    /// just-launched empty state. Any staged edits / tabs / dialogs
+    /// belonging to the bundle are dropped along with the bundle
+    /// itself. The window stays open so the Open / Open Recent menu
+    /// can repopulate it. No-op when already empty.
+    pub(crate) fn close_file(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.state, ShellState::Empty) {
+            return;
+        }
+        self.state = ShellState::Empty;
+        self.source_path = None;
+        self.progress = None;
+        self.tabs.clear();
+        self.active_tab = None;
+        self.expanded = crate::Expanded::default();
+        self.list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(2000.));
+        self.visible_count = 0;
+        self.tab_bar_width = gpui::px(0.);
+        self.overflow_open = false;
+        self.section_bar_bounds = gpui::Bounds::default();
+        self.hovered_section = None;
+        self.bar_cursor_addr = None;
+        self.bar_cursor_x = None;
+        self.section_table_scroll =
+            gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(2000.));
+        self.section_table_len = 0;
+        self.search_index = None;
+        self.search_indexing = false;
+        self.palette_open = false;
+        self.palette_query = crate::text_input::TextInput::new();
+        self.palette_selected = 0;
+        self.palette_list_state =
+            gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(2000.));
+        self.palette_list_len = 0;
+        self.palette_mode = crate::PaletteMode::default();
+        self.palette_bin_query = crate::text_input::TextInput::new();
+        self.palette_bin_list_state =
+            gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(2000.));
+        self.palette_bin_results = None;
+        self.palette_bin_error = None;
+        self.palette_bin_artifact = None;
+        self.palette_bin_grammar = crate::BinaryGrammar::default();
+        self.palette_asm_selected = 0;
+        self.palette_asm_candidates.clear();
+        self.palette_scope = None;
+        self.palette_focused = false;
+        self.context_menu = None;
+        self.about_open = false;
+        self.annotation_edit = None;
+        self.colour_picker = None;
+        self.disasm_edit = None;
+        self.hex_edit = None;
+        self.class_decl_edit = None;
+        self.field_edit = None;
+        self.method_edit = None;
+        self.op_edit = None;
+        self.annotation_stack = None;
+        self.external_edit = None;
+        self.frida_probes.clear();
+        self.injection_dialog = None;
+        self.injection_progress = None;
+        self.debug_dock = None;
+        self.debug_dock_resize_anchor = None;
+        self.traces_dialog_open = false;
+        self.hooks_dialog_open = false;
+        self.hook_editor_target = None;
+        self.hook_editor_buffer.clear();
+        self.changes_dialog_open = false;
+        self.changes_dialog_confirm_abandon = false;
+        self.export_status = None;
+        self.export_in_progress = false;
+        self.window_tint = 0;
+        cx.notify();
+    }
+
     /// Resolve a tab to its current `LeafId` (which may change across
     /// bundle reloads even though the `TabKind` identity is stable).
     pub(crate) fn tab_leaf(&self, index: usize) -> Option<LeafId> {
@@ -666,12 +741,20 @@ impl Shell {
                         ListState::new(rows.len(), ListAlignment::Top, px(2000.));
                     tab.listing_rows = Some(rows.clone());
                     tab.listing_progress = None;
-                    // Apply any pending scroll request now that rows exist.
-                    if let Some(addr) = tab.pending_scroll_addr.take() {
+                    // Apply any pending scroll request now that rows
+                    // exist. Leave the pending addr in place so
+                    // `ensure_active_tab_lines` re-applies it on the
+                    // next paint once the viewport has real bounds —
+                    // otherwise the first scroll can land short
+                    // because `scroll_into_view_with_context` reads
+                    // zero viewport height.
+                    if let Some(addr) = tab.pending_scroll_addr {
                         if let Some(row_idx) = listing_row_for_addr(rows.as_ref(), addr)
                         {
                             scroll_into_view_with_context(&tab.scroll, row_idx);
                             tab.selected_row = Some(row_idx);
+                        } else {
+                            tab.pending_scroll_addr = None;
                         }
                     }
                 }
@@ -713,14 +796,32 @@ impl Shell {
                     tab.scroll = ListState::new(rows.len(), ListAlignment::Top, px(2000.));
                     tab.hex_rows = Some(Arc::new(rows));
                 }
-                // Pending scroll-to address (clicked from a Listing's
-                // resolved-symbol comment, future feature).
-                if let Some(addr) = tab.pending_scroll_addr.take() {
+                // Pending scroll-to address — typically from a palette
+                // search hit ("string" in rodata, etc.) or a follow
+                // from a Listing's resolved-symbol comment. We hold
+                // the pending addr until the list element has a real
+                // viewport (`viewport_bounds().size.height > 0`) so
+                // `scroll_into_view_with_context` lands at the right
+                // place. On the very first paint after the tab was
+                // created, the viewport is still zero and the scroll
+                // either clamps weirdly or lands without enough
+                // context above the target. Peeking + retrying on the
+                // next paint, then taking, fixes both.
+                if let Some(addr) = tab.pending_scroll_addr {
                     if let Some(rows) = tab.hex_rows.as_ref() {
                         if let Some(idx) = hex_row_for_addr(rows.as_ref(), addr) {
+                            let viewport_ready =
+                                tab.scroll.viewport_bounds().size.height > px(0.);
                             scroll_into_view_with_context(&tab.scroll, idx);
                             tab.selected_row = Some(idx);
                             tab.selected_byte_addr = Some(addr);
+                            if viewport_ready {
+                                tab.pending_scroll_addr = None;
+                            } else {
+                                cx.notify();
+                            }
+                        } else {
+                            tab.pending_scroll_addr = None;
                         }
                     }
                 }
@@ -804,11 +905,20 @@ impl Shell {
                     start_build = Some((tab_id, symbols_arc, data_arc, progress));
                 }
                 if tab.listing_rows.is_some() {
-                    if let Some(addr) = tab.pending_scroll_addr.take() {
+                    if let Some(addr) = tab.pending_scroll_addr {
                         if let Some(rows) = tab.listing_rows.as_ref() {
                             if let Some(idx) = listing_row_for_addr(rows.as_ref(), addr) {
+                                let viewport_ready =
+                                    tab.scroll.viewport_bounds().size.height > px(0.);
                                 scroll_into_view_with_context(&tab.scroll, idx);
                                 tab.selected_row = Some(idx);
+                                if viewport_ready {
+                                    tab.pending_scroll_addr = None;
+                                } else {
+                                    cx.notify();
+                                }
+                            } else {
+                                tab.pending_scroll_addr = None;
                             }
                         }
                     }

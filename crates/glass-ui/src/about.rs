@@ -21,23 +21,41 @@ const REPO_URL: &str = "https://github.com/azw413/Glass";
 /// because the curated list lets us annotate the licence + one-line
 /// description per crate. Transitive deps are not listed.
 const ATTRIBUTIONS: &[(&str, &str, &str)] = &[
-    ("gpui", "Apache-2.0", "GPU-accelerated UI framework (Zed)"),
+    // UI.
+    ("gpui / gpui_platform", "Apache-2.0", "GPU-accelerated UI framework (Zed)"),
+    // Mobile / binary parsing + disassembly.
     ("smali", "GPL-3.0-only", "APK / DEX / smali parser"),
     ("armv8-encode", "MIT", "AArch64 disassembler"),
+    ("gimli", "MIT/Apache-2.0", "DWARF debug-info reader"),
+    ("symbolic-demangle", "MIT", "C++/Rust/Swift demangling"),
+    ("symbolic-common", "MIT", "Shared types for the symbolic crates"),
+    ("plist", "MIT", "Info.plist parsing"),
+    ("zip", "MIT", "APK / IPA archive reader"),
+    // Persistence + hashing.
     ("redb", "MIT/Apache-2.0", "Embedded key-value store"),
     ("blake3", "Apache-2.0/CC0-1.0", "Content-addressed hashing"),
-    ("rayon", "MIT/Apache-2.0", "Data-parallelism runtime"),
-    ("anyhow", "MIT/Apache-2.0", "Error handling"),
-    ("clap", "MIT/Apache-2.0", "CLI parsing"),
-    ("tracing", "MIT", "Structured logging"),
-    ("plist", "MIT", "Info.plist parsing"),
-    ("serde", "MIT/Apache-2.0", "Serialization"),
-    ("symbolic-demangle", "MIT", "C++/Rust/Swift demangling"),
+    ("rayon", "MIT/Apache-2.0", "Data-parallelism runtime (blake3 backend)"),
+    ("dirs", "MIT/Apache-2.0", "Platform config-directory lookup"),
+    // Concurrency + async runtime.
     ("parking_lot", "MIT/Apache-2.0", "Locking primitives"),
+    ("tokio", "MIT", "Async runtime (device discovery + MCP server)"),
+    ("async-trait", "MIT/Apache-2.0", "Async-fn-in-trait shim"),
+    // Errors / logging / serde.
+    ("anyhow", "MIT/Apache-2.0", "Error handling"),
+    ("thiserror", "MIT/Apache-2.0", "Derive-based error types"),
+    ("tracing", "MIT", "Structured logging"),
+    ("tracing-subscriber", "MIT", "Logging subscriber + env-filter"),
+    ("serde", "MIT/Apache-2.0", "Serialization"),
+    ("serde_json", "MIT/Apache-2.0", "JSON codec"),
+    // CLI / MCP.
+    ("clap", "MIT/Apache-2.0", "CLI parsing"),
+    ("rust-mcp-sdk", "MIT", "Model Context Protocol server SDK"),
+    // Misc utility.
+    ("bitflags", "MIT/Apache-2.0", "Type-safe bit flags"),
+    ("once_cell", "MIT/Apache-2.0", "Lazy statics"),
     // Device discovery + on-device instrumentation.
     ("idevice", "MIT", "iOS usbmux / lockdownd client"),
-    ("tokio", "MIT", "Async runtime (used by idevice)"),
-    ("frida", "wxWindows", "Dynamic instrumentation runtime (optional, opt-in via the `frida` feature)"),
+    ("frida / frida-sys", "wxWindows", "Dynamic instrumentation runtime (optional, opt-in via the `frida` feature)"),
     // Notable bundled binaries shipped alongside Glass:
     //   * libfrida-gadget.so per ABI — LGPL-2.1, used by the
     //     APK injection flow when the user enables the `frida`

@@ -18,7 +18,7 @@ use gpui_platform::application;
 
 use crate::loader::load_bundle_blocking;
 use crate::{
-    About, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
+    About, CloseFile, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
     OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7, OpenRecent8, OpenRecent9,
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
     Theme0, Theme1, Theme2, Theme3, Theme4, Theme5, Theme6, Theme7,
@@ -90,6 +90,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
             KeyBinding::new("cmd-o", OpenFile, None),
             KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-shift-w", CloseFile, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
 
@@ -107,6 +108,24 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         }
         cx.on_action(|_: &Quit, cx: &mut App| {
             cx.quit();
+        });
+        // Close File → tell the focused Shell window to drop its
+        // bundle and return to the launched-empty state. Deferred via
+        // cx.spawn for the same reason as About: the active window's
+        // slot is currently taken while this action callback runs.
+        cx.on_action(|_: &CloseFile, cx: &mut App| {
+            cx.spawn(async move |cx| {
+                cx.update(|cx| {
+                    let Some(wh) = cx.active_window() else { return };
+                    let Some(typed) = wh.downcast::<Shell>() else { return };
+                    let _ = cx.update_window(typed.into(), |root, _w, cx| {
+                        if let Ok(entity) = root.downcast::<Shell>() {
+                            entity.update(cx, |shell, cx| shell.close_file(cx));
+                        }
+                    });
+                });
+            })
+            .detach();
         });
         // About → tell every Shell window to show its About modal.
         // Deferred via cx.spawn so we never read a window that's on
@@ -351,6 +370,7 @@ fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
                 gpui::MenuItem::submenu(
                     gpui::Menu::new("Open Recent").items(recent_items),
                 ),
+                gpui::MenuItem::action("Close File", CloseFile),
                 gpui::MenuItem::separator(),
                 gpui::MenuItem::action("New Window", NewWindow),
                 gpui::MenuItem::action("Close Window", CloseWindow),
@@ -443,13 +463,23 @@ fn open_glass_window(
             spawn_debug_dock_pump(&shell, cx);
             shell.update(cx, |_shell, cx: &mut Context<Shell>| {
                 cx.observe_window_bounds(window, |_shell, window: &mut Window, _cx| {
-                    let b = window.bounds();
+                    // `window.bounds()` is the full frame (including
+                    // title bar). gpui's `open_window` interprets the
+                    // `WindowBounds::Windowed(bounds)` we pass back as
+                    // a *content* rect — AppKit then adds the title
+                    // bar around it. If we save the frame and restore
+                    // it as content, the window grows by one title
+                    // bar each launch. Convert to content here so the
+                    // round-trip is stable.
+                    let frame = window.bounds();
+                    let content = window.viewport_size();
+                    let titlebar_h = (frame.size.height - content.height).max(px(0.));
                     let mut settings = glass_db::load_window_settings();
                     settings.bounds = Some(glass_db::StoredBounds {
-                        x: b.origin.x.as_f32(),
-                        y: b.origin.y.as_f32(),
-                        width: b.size.width.as_f32(),
-                        height: b.size.height.as_f32(),
+                        x: frame.origin.x.as_f32(),
+                        y: (frame.origin.y + titlebar_h).as_f32(),
+                        width: content.width.as_f32(),
+                        height: content.height.as_f32(),
                     });
                     let _ = glass_db::save_window_settings(&settings);
                 })

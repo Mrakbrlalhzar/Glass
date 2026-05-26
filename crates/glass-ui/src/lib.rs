@@ -105,6 +105,7 @@ actions!(
         PaletteAsmTab,
         ToggleChangesDialog,
         OpenFile,
+        CloseFile,
         NewWindow,
         CloseWindow,
         Quit,

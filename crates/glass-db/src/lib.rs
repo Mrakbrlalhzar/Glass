@@ -92,7 +92,10 @@ impl Database {
 
     /// Up to `limit` most-recently-opened bundles. Skips entries
     /// without a `source_path` (older records that pre-date the
-    /// field). Sorted newest first.
+    /// field). Sorted newest first. Deduplicated by `source_path` —
+    /// rebuilding an APK produces a fresh content-hash bundle id
+    /// each time, but the path on disk is what the user identifies
+    /// the file by, so we collapse to the newest record per path.
     pub fn recent_bundles(&self, limit: usize) -> Vec<BundleRecord> {
         if self.inner.fresh {
             return Vec::new();
@@ -102,6 +105,12 @@ impl Database {
         let Ok(mut all) = s.read_all_bundles() else { return Vec::new() };
         all.retain(|b| b.source_path.is_some());
         all.sort_by(|a, b| b.last_opened_unix.cmp(&a.last_opened_unix));
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        all.retain(|b| match b.source_path.as_deref() {
+            Some(p) => seen.insert(p.to_string()),
+            None => false,
+        });
         all.truncate(limit);
         all
     }
