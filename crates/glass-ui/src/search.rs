@@ -39,27 +39,73 @@ impl SearchIndex {
     /// ranked: prefix-match > substring > char-subsequence, then by
     /// display length (shorter = closer).
     pub fn filter(&self, query: &str, cap: usize) -> Vec<&SearchEntry> {
-        if query.is_empty() {
+        if query.trim().is_empty() {
             return Vec::new();
         }
         let q = query.to_lowercase();
+        let tokens: Vec<&str> =
+            q.split_whitespace().filter(|t| !t.is_empty()).collect();
         let mut scored: Vec<(u8, usize, &SearchEntry)> = Vec::new();
         for e in &self.entries {
             let hay = e.display.to_lowercase();
-            let tier = if hay.starts_with(&q) {
-                0
-            } else if hay.contains(&q) {
-                1
-            } else if is_subsequence(&q, &hay) {
-                2
+            let tier = if tokens.len() <= 1 {
+                // Single-token query — keep the original three-tier
+                // match (prefix / substring / char-subsequence). The
+                // subsequence tier is what lets short fuzzy queries
+                // like "frmwk" find "FooBarFrameWork", and only
+                // applies when there's no whitespace to interpret
+                // word-by-word.
+                if hay.starts_with(&q) {
+                    0
+                } else if hay.contains(&q) {
+                    1
+                } else if is_subsequence(&q, &hay) {
+                    2
+                } else {
+                    continue;
+                }
             } else {
-                continue;
+                // Multi-token query — every token must occur as a
+                // substring of the display AND in the entered
+                // order. "change me" should match "changeMe" /
+                // "change_me_count" but not "dispatchMenuVisibility-
+                // Changed", where "me" precedes "change".
+                if !tokens_in_order(&tokens, &hay) {
+                    continue;
+                }
+                // Promote results where the *full* phrase appears
+                // contiguously to the top.
+                if hay.contains(&q) {
+                    if hay.starts_with(&q) { 0 } else { 1 }
+                } else {
+                    2
+                }
             };
             scored.push((tier, e.display.len(), e));
         }
         scored.sort_by_key(|&(tier, len, _)| (tier, len));
         scored.into_iter().take(cap).map(|(_, _, e)| e).collect()
     }
+}
+
+/// True if every `needle` token appears as a substring of `hay` in
+/// the given order. Tokens may overlap up to (but not including) the
+/// previous token's end — i.e. the next search starts at the index
+/// immediately after the previous match's start, so "ab ab" still
+/// matches "abab". `hay` and tokens are expected to already be
+/// lower-cased by the caller.
+fn tokens_in_order(tokens: &[&str], hay: &str) -> bool {
+    let mut cursor = 0usize;
+    for t in tokens {
+        if t.is_empty() {
+            continue;
+        }
+        match hay[cursor..].find(t) {
+            Some(off) => cursor += off + t.len(),
+            None => return false,
+        }
+    }
+    true
 }
 
 pub(crate) fn is_subsequence(needle: &str, hay: &str) -> bool {
@@ -149,7 +195,7 @@ pub fn build_search_index(bundle: &LoadedBundle) -> SearchIndex {
                 },
             });
             if let Some(body) = bundle.bodies.get(leaf_id) {
-                for line in body.lines() {
+                for (line_no, line) in body.lines().enumerate() {
                     let trimmed = line.trim_start();
                     if let Some(rest) = trimmed.strip_prefix(".method ") {
                         if let Some(name) = rest.split_whitespace().last() {
@@ -157,8 +203,9 @@ pub fn build_search_index(bundle: &LoadedBundle) -> SearchIndex {
                                 display: format!("{simple}.{name}"),
                                 chip: format!("method · {display}"),
                                 kind_glyph: "ƒ",
-                                jump: SearchJump::SmaliClass {
+                                jump: SearchJump::SmaliMethodLine {
                                     class_jni: class_jni.clone(),
+                                    line: line_no,
                                 },
                             });
                         }
@@ -168,8 +215,9 @@ pub fn build_search_index(bundle: &LoadedBundle) -> SearchIndex {
                                 display: format!("{simple}.{name}"),
                                 chip: format!("field · {display}"),
                                 kind_glyph: "ᕀ",
-                                jump: SearchJump::SmaliClass {
+                                jump: SearchJump::SmaliMethodLine {
                                     class_jni: class_jni.clone(),
+                                    line: line_no,
                                 },
                             });
                         }
