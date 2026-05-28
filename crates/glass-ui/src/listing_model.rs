@@ -24,6 +24,11 @@ pub enum ListingRow {
     Instruction {
         address: u64,
         bytes: [u8; 4],
+        /// How many of `bytes` are real. 4 for AArch64 / 32-bit
+        /// Thumb-2 / ARM-mode A32; 2 for 16-bit Thumb-1. The
+        /// renderer blanks the trailing slots when `len < 4`
+        /// so 2-byte instructions don't print spurious `00`s.
+        len: u8,
         mnemonic: SharedString,
         operands: Arc<Vec<glass_arch_arm::Chunk>>,
         /// Trailing `; ...` comment chunks. Empty if no annotation.
@@ -111,6 +116,30 @@ impl DataPeek {
             if addr >= s.base && addr < s.base.saturating_add(s.size) {
                 return Some((s.name.as_str(), s.base));
             }
+        }
+        None
+    }
+
+    /// Read a 32-bit little-endian word at `addr` from any covering
+    /// section. Used by the ARMv7 builder to dereference literal-pool
+    /// words: `ldr Rt, [pc, #imm]` loads a 4-byte pointer that
+    /// usually points into rodata, so we peek the word and then
+    /// peek a string at *that* address.
+    pub fn peek_u32_le(&self, addr: u64) -> Option<u32> {
+        for (base, bytes) in &self.sections {
+            if addr < *base {
+                continue;
+            }
+            let off = (addr - base) as usize;
+            if off + 4 > bytes.len() {
+                continue;
+            }
+            return Some(u32::from_le_bytes([
+                bytes[off],
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+            ]));
         }
         None
     }
@@ -252,8 +281,7 @@ pub fn build_listing_rows(
     // walks the precomputed vector instead of the AArch64-only
     // 4-byte-chunk path below.
     if text.precomputed.is_some() {
-        let _ = data;
-        return build_listing_rows_armv7(text, symbols, progress);
+        return build_listing_rows_armv7(text, symbols, data, progress);
     }
     use glass_arch_arm::format as fmt;
     let n = text.instruction_count();
@@ -463,6 +491,7 @@ pub fn build_listing_rows(
         rows.push(ListingRow::Instruction {
             address: addr,
             bytes,
+            len: 4,
             mnemonic: SharedString::from(mnemonic),
             operands: Arc::new(operands),
             comment,
@@ -737,9 +766,11 @@ fn assign_arrows(rows: &mut [ListingRow]) {
 fn build_listing_rows_armv7(
     text: &TextSectionBytes,
     symbols: &glass_arch_arm::SymbolMap,
+    data: &DataPeek,
     progress: Option<&Arc<Mutex<Progress>>>,
 ) -> Vec<ListingRow> {
     use armv8_encode::mc::InstructionInfo;
+    use glass_arch_arm::RegKind;
     let Some(precomputed) = text.precomputed.as_ref() else {
         return Vec::new();
     };
@@ -752,6 +783,14 @@ fn build_listing_rows_armv7(
         }
     }
     let mut rows = Vec::with_capacity(n + n / 8);
+    // ARMv7 `movw + movt` pair tracking. `movw Rd, #lo16` writes the
+    // low half; a subsequent `movt Rd, #hi16` writes the high half
+    // without disturbing the low half. Together they build a 32-bit
+    // absolute constant — almost always a pointer into rodata, which
+    // is the modern PIC compiler's replacement for the literal-pool
+    // pattern. Each slot holds the pending low-16 value for that
+    // register; any non-movt write clears it.
+    let mut r_movw_lo: [Option<u16>; 16] = [None; 16];
     for (i, insn) in precomputed.iter().enumerate() {
         if i % 1024 == 0 {
             if let Some(p) = progress {
@@ -787,9 +826,76 @@ fn build_listing_rows_armv7(
             target: insn.branch_target(),
             target_text: None,
         };
-        let comment = SharedString::from("");
+        // Resolve a pointed-to string for the comment column. Three
+        // patterns cover the common ARMv7 PIC idioms:
+        //
+        //   1. Literal pool — Thumb `ldr Rt, [pc, #imm]` (and ARM-
+        //      mode equivalents) resolve to a `PcRelative(abs_addr)`.
+        //      The bytes at that target are typically a *pointer*
+        //      into rodata, not the string itself, so we try the
+        //      direct peek first and then dereference.
+        //   2. `movw + movt` fusion — Thumb-2 / ARM-mode PIC code
+        //      builds a 32-bit absolute via paired half-word moves.
+        //      We watch for `movw Rd, #lo16` writing the low half
+        //      and emit the comment on the matching `movt Rd, #hi16`
+        //      that completes the pair.
+        //   3. Plain non-pcrel — no comment.
+        //
+        // Step 1: handle a literal-pool / direct PC-relative target.
+        let mut comment_text: Option<String> = None;
+        if let Some(pc_target) = insn.pcrel_target() {
+            if let Some(s) = data.peek_string(pc_target, 64) {
+                comment_text = Some(s);
+            } else if let Some(ptr) = data.peek_u32_le(pc_target) {
+                if let Some(s) = data.peek_string(ptr as u64, 64) {
+                    comment_text = Some(s);
+                }
+            }
+        }
+        // Step 2: update the movw/movt tracker and, on a completed
+        // pair, peek a string at the fused 32-bit constant.
+        if let Some((rd, lo)) = insn.armv7_movw() {
+            // movw resets the slot to its new low half. (A later
+            // non-movt write to the same register would invalidate it
+            // via the dest-register check below.)
+            if (rd as usize) < r_movw_lo.len() {
+                r_movw_lo[rd as usize] = Some(lo);
+            }
+        } else if let Some((rd, hi)) = insn.armv7_movt() {
+            if (rd as usize) < r_movw_lo.len() {
+                if let Some(lo) = r_movw_lo[rd as usize].take() {
+                    let fused = (u32::from(hi) << 16) | u32::from(lo);
+                    if comment_text.is_none() {
+                        // Try the fused address first (in case the
+                        // constant points directly at a string),
+                        // then dereference one level for the
+                        // pointer-to-string variant.
+                        if let Some(s) = data.peek_string(fused as u64, 64) {
+                            comment_text = Some(s);
+                        } else if let Some(ptr) = data.peek_u32_le(fused as u64) {
+                            if let Some(s) = data.peek_string(ptr as u64, 64) {
+                                comment_text = Some(s);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(dest) = insn.dest_register() {
+            // Any other write to an Arm GPR invalidates that slot —
+            // we lose the pending low half and won't try to fuse.
+            if dest.kind == RegKind::ArmGpr && (dest.index as usize) < r_movw_lo.len() {
+                r_movw_lo[dest.index as usize] = None;
+            }
+        }
+        let comment = match comment_text {
+            Some(s) => SharedString::from(format!("; \"{s}\"")),
+            None => SharedString::from(""),
+        };
         // Bytes: ARMv7 instructions are 2 or 4 bytes. The listing
-        // row carries `[u8; 4]` so we zero-pad 16-bit Thumb.
+        // row carries `[u8; 4]` so we zero-pad 16-bit Thumb; the
+        // renderer reads `len` to know how many slots are real and
+        // blanks the rest so the user doesn't see phantom `00`s
+        // after a 16-bit Thumb-1 instruction.
         let raw = insn.raw_bytes();
         let mut bytes4 = [0u8; 4];
         let copy_len = raw.len().min(4);
@@ -798,6 +904,7 @@ fn build_listing_rows_armv7(
         rows.push(ListingRow::Instruction {
             address: addr,
             bytes: bytes4,
+            len: copy_len as u8,
             mnemonic: SharedString::from(mnemonic),
             operands: Arc::new(vec![operand_chunk]),
             comment,

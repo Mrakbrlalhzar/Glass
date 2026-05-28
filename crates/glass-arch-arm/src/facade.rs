@@ -312,6 +312,61 @@ impl DecodedInsn {
             _ => None,
         }
     }
+
+    /// Recognise ARMv7 instruction shapes that the listing's
+    /// macro-fusion tracker cares about (currently `movw`/`movt`
+    /// pair tracking). Returns the destination register and the
+    /// 16-bit immediate.
+    ///
+    /// `movw Rd, #imm16` zero-extends into the low 16 bits of `Rd`;
+    /// `movt Rd, #imm16` writes the imm into the high 16 bits of `Rd`
+    /// without disturbing the low half. The pair builds a 32-bit
+    /// absolute constant that's almost always a pointer into
+    /// rodata — so the listing renderer wants to follow it.
+    pub fn armv7_movw(&self) -> Option<(u8, u16)> {
+        use armv8_encode::isa::armv7::arm::table_generated::ArmMnemonicGenerated as ArmM;
+        use armv8_encode::isa::armv7::table_generated::ThumbMnemonicGenerated as ThumbM;
+        match self {
+            DecodedInsn::Arm(i) if i.mnemonic == ArmM::Movw => {
+                armv7_movw_movt_operands(self)
+            }
+            DecodedInsn::Thumb(i) if i.mnemonic == ThumbM::Movw => {
+                armv7_movw_movt_operands(self)
+            }
+            _ => None,
+        }
+    }
+
+    /// Same shape as `armv7_movw` but for `movt`. The returned `Rd`
+    /// must be matched against the most recent `movw` target before
+    /// the pair can be fused into a 32-bit constant.
+    pub fn armv7_movt(&self) -> Option<(u8, u16)> {
+        use armv8_encode::isa::armv7::arm::table_generated::ArmMnemonicGenerated as ArmM;
+        use armv8_encode::isa::armv7::table_generated::ThumbMnemonicGenerated as ThumbM;
+        match self {
+            DecodedInsn::Arm(i) if i.mnemonic == ArmM::Movt => {
+                armv7_movw_movt_operands(self)
+            }
+            DecodedInsn::Thumb(i) if i.mnemonic == ThumbM::Movt => {
+                armv7_movw_movt_operands(self)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Extract `(Rd, imm16)` from an already-classified ARMv7
+/// `movw` / `movt` instruction. Both forms decode to operands
+/// `[Register(Rd), Immediate(imm)]`; we just project them out.
+fn armv7_movw_movt_operands(insn: &DecodedInsn) -> Option<(u8, u16)> {
+    let dest = insn.dest_register()?;
+    if dest.kind != RegKind::ArmGpr {
+        return None;
+    }
+    let imm = insn.first_imm()?;
+    // The decoder emits a non-negative i64 here; mask to 16 bits
+    // to be safe against any signed projection.
+    Some((dest.index, (imm as u32 & 0xFFFF) as u16))
 }
 
 impl From<Aarch64Insn> for DecodedInsn {

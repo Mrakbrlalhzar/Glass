@@ -141,6 +141,28 @@ fn lane_x(lane: u8) -> f32 {
     LISTING_GUTTER_WIDTH - ARROW_LANE_RIGHT_MARGIN - (lane as f32) * ARROW_LANE_SPACING
 }
 
+/// Render the listing's bytes column for an instruction row, showing
+/// only the first `len` of `bytes` as hex pairs. The trailing
+/// slot(s) become two blank spaces apiece so the column width stays
+/// stable and the mnemonic doesn't shift between 16-bit Thumb and
+/// 32-bit rows.
+fn format_bytes_column(bytes: &[u8; 4], len: u8) -> String {
+    let n = (len as usize).min(4);
+    let mut out = String::with_capacity(11);
+    for i in 0..4 {
+        if i > 0 {
+            out.push(' ');
+        }
+        if i < n {
+            use std::fmt::Write;
+            let _ = write!(out, "{:02x}", bytes[i]);
+        } else {
+            out.push_str("  ");
+        }
+    }
+    out
+}
+
 pub fn h_shift(
     inner: gpui::Div,
     h_offset: Pixels,
@@ -716,6 +738,7 @@ pub fn render_listing_row_with(
         ListingRow::Instruction {
             address,
             bytes,
+            len,
             mnemonic,
             operands,
             comment,
@@ -909,10 +932,7 @@ pub fn render_listing_row_with(
                         .whitespace_nowrap()
                         .pr_4()
                         .text_color(rgb(COLOUR_BYTES()))
-                        .child(format!(
-                            "{:02x} {:02x} {:02x} {:02x}",
-                            bytes[0], bytes[1], bytes[2], bytes[3]
-                        )),
+                        .child(format_bytes_column(bytes, *len)),
                 )
                 .child(
                     div()
