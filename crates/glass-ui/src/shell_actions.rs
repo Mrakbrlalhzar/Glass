@@ -79,6 +79,7 @@ impl Shell {
             palette_bin_list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
             palette_bin_code_only: true,
             palette_bin_results: None,
+            palette_bin_match_sources: Vec::new(),
             palette_bin_error: None,
             palette_bin_artifact: None,
             palette_bin_grammar: crate::BinaryGrammar::default(),
@@ -554,6 +555,7 @@ impl Shell {
         self.palette_bin_list_state =
             gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(2000.));
         self.palette_bin_results = None;
+        self.palette_bin_match_sources.clear();
         self.palette_bin_error = None;
         self.palette_bin_artifact = None;
         self.palette_bin_grammar = crate::BinaryGrammar::default();
@@ -1126,6 +1128,7 @@ impl Shell {
             crate::BinaryGrammar::Asm => crate::BinaryGrammar::Bytes,
         };
         self.palette_bin_results = None;
+        self.palette_bin_match_sources.clear();
         self.palette_bin_error = None;
         self.refresh_palette_asm_candidates();
         cx.notify();
@@ -1139,6 +1142,7 @@ impl Shell {
         if self.palette_bin_grammar != grammar {
             self.palette_bin_grammar = grammar;
             self.palette_bin_results = None;
+            self.palette_bin_match_sources.clear();
             self.palette_bin_error = None;
             self.refresh_palette_asm_candidates();
             cx.notify();
@@ -1192,6 +1196,7 @@ impl Shell {
         prefix.push_str(&cand.variant.template);
         self.palette_bin_query.set_text(prefix);
         self.palette_bin_results = None;
+        self.palette_bin_match_sources.clear();
         self.palette_bin_error = None;
         self.refresh_palette_asm_candidates();
         cx.notify();
@@ -2598,6 +2603,7 @@ impl Shell {
             self.refresh_palette_list();
         } else {
             self.palette_bin_results = None;
+            self.palette_bin_match_sources.clear();
             self.palette_bin_error = None;
             self.palette_selected = 0;
             self.refresh_palette_asm_candidates();
@@ -2677,21 +2683,34 @@ impl Shell {
             cx.notify();
             return;
         };
-        let Some(artifact) = self.palette_bin_artifact.clone() else {
-            self.palette_bin_error = Some("no artifact selected".to_string());
-            cx.notify();
-            return;
-        };
-        // Scan every text + data section of the artifact. Mirror
-        // the bin-search verb's filter so behaviour matches.
+        // Scan every native artifact in the bundle, not just the
+        // currently-selected one. Android apps routinely ship the
+        // same library for arm64-v8a + armeabi-v7a; a "global"
+        // search across both is what users want by default. The
+        // `palette_bin_artifact` field stays around as a future
+        // filter hook but no longer scopes the scan.
         let mut matches: Vec<glass_api::BinMatch> = Vec::new();
+        // Parallel vector: each entry pairs with `matches[i]` and
+        // carries the typed `(artifact, section)` so the activate
+        // path can route the click back to a real tab even when
+        // multiple artifacts have the same section name.
+        let mut sources: Vec<(glass_db::ArtifactId, String)> = Vec::new();
         let mut scanned_sections = 0usize;
         let mut total_bytes_scanned = 0usize;
-        // Text sections.
+        // Text sections — across every artifact.
         for ((aid, name), text) in bundle.text_sections.iter() {
-            if aid != &artifact {
-                continue;
-            }
+            // `precomputed.is_some()` is our marker for ARMv7 — the
+            // loader only populates it when the upstream recursive-
+            // descent disassembler ran, which only happens for
+            // `Architecture::Arm`. AArch64 leaves it `None` and uses
+            // fixed 4-byte decode on demand.
+            let arch = if text.precomputed.is_some() {
+                armv8_encode::container::Architecture::Arm
+            } else {
+                armv8_encode::container::Architecture::Aarch64
+            };
+            let alabel = crate::search::short_artifact_label(&bundle, aid);
+            let section_label = format!("{alabel} · {name}");
             let bytes: &[u8] = text.bytes.as_ref();
             scanned_sections += 1;
             total_bytes_scanned += bytes.len();
@@ -2700,15 +2719,17 @@ impl Shell {
                 let addr = text.base + start as u64;
                 let preview = glass_api::build_preview(
                     true,
+                    arch,
                     addr,
                     &bytes[start..abs_end.min(bytes.len())],
                 );
                 matches.push(glass_api::BinMatch {
-                    section: name.clone(),
+                    section: section_label.clone(),
                     address: format!("0x{addr:x}"),
                     length: slice_end,
                     preview,
                 });
+                sources.push((aid.clone(), name.clone()));
             }
         }
         // Data sections (non-text, non-bss, non-debug, non-zero-base).
@@ -2717,40 +2738,61 @@ impl Shell {
         // shape and doesn't want stray ADRP-looking data hits.
         let scan_data = !self.palette_bin_code_only;
         for ((aid, name), data) in bundle.data_sections.iter().filter(|_| scan_data) {
-            if aid != &artifact {
-                continue;
-            }
             if data.base == 0 || data.bytes.is_empty() {
                 continue;
             }
             if matches!(data.kind, crate::NativeSectionKind::Bss | crate::NativeSectionKind::Debug) {
                 continue;
             }
+            let alabel = crate::search::short_artifact_label(&bundle, aid);
+            let section_label = format!("{alabel} · {name}");
             let bytes: &[u8] = data.bytes.as_ref();
             scanned_sections += 1;
             total_bytes_scanned += bytes.len();
             for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = data.base + start as u64;
+                // arch is irrelevant for non-text matches (the
+                // preview always falls through to hex), but we
+                // pass it through for signature consistency.
                 let preview = glass_api::build_preview(
                     false,
+                    armv8_encode::container::Architecture::Aarch64,
                     addr,
                     &bytes[start..abs_end.min(bytes.len())],
                 );
                 matches.push(glass_api::BinMatch {
-                    section: name.clone(),
+                    section: section_label.clone(),
                     address: format!("0x{addr:x}"),
                     length: slice_end,
                     preview,
                 });
+                sources.push((aid.clone(), name.clone()));
             }
         }
-        matches.sort_by(|a, b| a.section.cmp(&b.section).then(a.address.cmp(&b.address)));
+        // Sort matches + sources together so they stay aligned.
+        let mut order: Vec<usize> = (0..matches.len()).collect();
+        order.sort_by(|&a, &b| {
+            matches[a]
+                .section
+                .cmp(&matches[b].section)
+                .then(matches[a].address.cmp(&matches[b].address))
+        });
+        let matches: Vec<glass_api::BinMatch> = order
+            .iter()
+            .map(|&i| matches[i].clone())
+            .collect();
+        let sources: Vec<(glass_db::ArtifactId, String)> = order
+            .into_iter()
+            .map(|i| sources[i].clone())
+            .collect();
+        // Stash for the activate path before falling through to
+        // the existing post-scan plumbing.
+        self.palette_bin_match_sources = sources;
         let total = matches.len();
         if scanned_sections == 0 {
             self.palette_bin_error = Some(format!(
-                "no sections to scan for artifact {} (bundle has {} text + {} data sections total)",
-                artifact.to_string().chars().take(10).collect::<String>(),
+                "no native sections to scan (bundle has {} text + {} data sections)",
                 bundle.text_sections.len(),
                 bundle.data_sections.len(),
             ));
@@ -2760,7 +2802,9 @@ impl Shell {
             ));
         }
         let result = glass_api::BinSearchResult {
-            artifact: artifact.to_string(),
+            // Global scan — no single artifact to report. Use a
+            // placeholder so the renderer's existing field is happy.
+            artifact: String::from("(all artifacts)"),
             pattern: pattern.clone(),
             total,
             shown: total,
@@ -2781,11 +2825,20 @@ impl Shell {
         let Some(results) = self.palette_bin_results.clone() else { return };
         let Some(m) = results.matches.get(self.palette_selected) else { return };
         let Some(bundle) = self.bundle().cloned() else { return };
-        let Some(artifact) = self.palette_bin_artifact.clone() else { return };
+        // The palette scans globally across artifacts, so we don't
+        // trust the active `palette_bin_artifact` here — look up
+        // the typed `(artifact, raw_section)` we stashed when the
+        // match was produced. Without this, a hit in the
+        // armeabi-v7a lib would try to open against the
+        // arm64-v8a lib's tab key.
+        let Some((artifact, section)) =
+            self.palette_bin_match_sources.get(self.palette_selected).cloned()
+        else {
+            return;
+        };
         let Ok(addr) = u64::from_str_radix(m.address.trim_start_matches("0x"), 16) else {
             return;
         };
-        let section = m.section.clone();
         self.palette_open = false;
         // Text vs data dispatch: ask the bundle which view it is.
         if bundle.text_section_for_addr(&artifact, addr).is_some() {

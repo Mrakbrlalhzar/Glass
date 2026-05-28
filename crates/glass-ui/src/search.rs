@@ -295,7 +295,7 @@ fn is_printable(b: u8) -> bool {
     (0x20..=0x7e).contains(&b) || b == b'\t'
 }
 
-fn short_artifact_label(bundle: &LoadedBundle, aid: &glass_db::ArtifactId) -> String {
+pub(crate) fn short_artifact_label(bundle: &LoadedBundle, aid: &glass_db::ArtifactId) -> String {
     for (i, k) in bundle.kinds.iter().enumerate() {
         let matches = match k {
             LeafKind::Listing { artifact, .. } => artifact == aid,

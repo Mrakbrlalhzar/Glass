@@ -1153,6 +1153,14 @@ pub(crate) struct Shell {
     /// parse / lookup error (rendered inline under the input row).
     pub(crate) palette_bin_query: crate::text_input::TextInput,
     pub(crate) palette_bin_results: Option<std::sync::Arc<glass_api::BinSearchResult>>,
+    /// One `(artifact_id, raw_section_name)` per entry in
+    /// `palette_bin_results.matches`. The palette scans every native
+    /// artifact globally, so the match's `section` field (which is
+    /// labelled `"<alabel> · <section>"` for display) isn't enough
+    /// to re-open the right tab — we stash the typed identity
+    /// alongside the rendered match here. Empty when there are no
+    /// results.
+    pub(crate) palette_bin_match_sources: Vec<(glass_db::ArtifactId, String)>,
     pub(crate) palette_bin_error: Option<String>,
     /// Persistent virtualised-list state for the bin-search
     /// results pane. Recreated on every search (with the new

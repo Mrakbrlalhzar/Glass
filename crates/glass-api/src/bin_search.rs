@@ -242,6 +242,7 @@ impl Bundle {
             .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
         let atoms = parse_pattern(pattern)?;
         let container = &art.binary.container;
+        let arch = container.architecture;
         let mut matches = Vec::new();
         let mut total = 0usize;
         let cap = limit.unwrap_or(usize::MAX);
@@ -275,6 +276,7 @@ impl Bundle {
                 }
                 let preview = build_preview(
                     is_text,
+                    arch,
                     section.address + start as u64,
                     &section.bytes[start..abs_end.min(section.bytes.len())],
                 );
@@ -298,44 +300,31 @@ impl Bundle {
 
 /// Pre-formatted preview string for a match slice. Public for
 /// the same reason as `scan_section`.
-pub fn build_preview(is_text: bool, addr: u64, bytes: &[u8]) -> String {
+///
+/// AArch64 + ARM-mode A32 decode fixed 4-byte instructions; Thumb is
+/// variable width and walks `armv7::read_instruction` byte-by-byte.
+/// For a non-text match (or anything that doesn't decode cleanly)
+/// the fallback is the first 8 bytes as space-separated hex.
+pub fn build_preview(
+    is_text: bool,
+    arch: armv8_encode::container::Architecture,
+    addr: u64,
+    bytes: &[u8],
+) -> String {
+    use armv8_encode::container::Architecture;
     if is_text {
-        // Two decoded instructions joined with ` ; `. Word
-        // alignment matters; if the match starts mid-instruction
-        // we don't gain much from the disasm and fall through to
-        // hex.
-        if addr % 4 == 0 && bytes.len() >= 4 {
-            let mut parts: Vec<String> = Vec::new();
-            for i in 0..2 {
-                let off = i * 4;
-                if off + 4 > bytes.len() {
-                    break;
+        match arch {
+            Architecture::Aarch64 => {
+                if let Some(s) = build_preview_aarch64(addr, bytes) {
+                    return s;
                 }
-                let word = u32::from_le_bytes([
-                    bytes[off],
-                    bytes[off + 1],
-                    bytes[off + 2],
-                    bytes[off + 3],
-                ]);
-                let formatted = match aarch64::decode_instruction(addr + off as u64, word) {
-                    Ok(insn) => {
-                        use glass_arch_arm::format as fmt;
-                        let mnem = fmt::mnemonic_chunk(&insn).text;
-                        let operands = fmt::operands_chunks(&insn)
-                            .into_iter()
-                            .map(|c| c.text)
-                            .collect::<String>();
-                        if operands.is_empty() {
-                            mnem
-                        } else {
-                            format!("{mnem} {operands}")
-                        }
-                    }
-                    Err(_) => format!(".word 0x{word:08x}"),
-                };
-                parts.push(formatted);
             }
-            return parts.join(" ; ");
+            Architecture::Arm => {
+                if let Some(s) = build_preview_armv7(addr, bytes) {
+                    return s;
+                }
+            }
+            Architecture::Other => {}
         }
     }
     bytes
@@ -344,6 +333,105 @@ pub fn build_preview(is_text: bool, addr: u64, bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// AArch64 preview: two fixed-width 32-bit instructions joined with
+/// ` ; `. Returns `None` when alignment / length is unusable so the
+/// caller can fall through to a hex preview.
+fn build_preview_aarch64(addr: u64, bytes: &[u8]) -> Option<String> {
+    if addr % 4 != 0 || bytes.len() < 4 {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for i in 0..2 {
+        let off = i * 4;
+        if off + 4 > bytes.len() {
+            break;
+        }
+        let word = u32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]);
+        let formatted = match aarch64::decode_instruction(addr + off as u64, word) {
+            Ok(insn) => glass_arch_arm::DecodedInsn::from(insn).format_text(),
+            Err(_) => format!(".word 0x{word:08x}"),
+        };
+        parts.push(formatted);
+    }
+    Some(parts.join(" ; "))
+}
+
+/// ARMv7 preview. Decode up to two instructions from `bytes`. Thumb
+/// (low-bit-set address) walks `read_instruction` for variable
+/// width; ARM-mode steps in fixed 4-byte units. Falls back to
+/// `None` on the first decode failure so the caller can emit hex.
+fn build_preview_armv7(addr: u64, bytes: &[u8]) -> Option<String> {
+    use armv8_encode::isa::armv7;
+    let thumb = addr & 1 == 1;
+    let base_addr = addr & !1u64;
+    let mut parts: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    let mut here = base_addr;
+    for _ in 0..2 {
+        if cursor >= bytes.len() {
+            break;
+        }
+        if thumb {
+            let (word, width) = armv7::read_instruction(bytes, cursor).ok()?;
+            use armv7::table::ThumbWidth;
+            let tw = if width == 4 { ThumbWidth::Word } else { ThumbWidth::Halfword };
+            // Use the upstream table matcher to get a decoded row,
+            // then project to a DecodedInsn for unified formatting.
+            let row = armv7::table_generated::match_generated(word, tw)?;
+            let (operands, _unhandled) = armv7::format_decode::decode_operands_from_format(
+                row.format, word, here, width,
+            );
+            let insn = armv7::sweep::ThumbDecodedInstruction {
+                address: here,
+                word,
+                width: tw,
+                mnemonic: row.mnemonic,
+                operands,
+                row: Some(row),
+                neon_row: None,
+            };
+            parts.push(glass_arch_arm::DecodedInsn::Thumb(insn).format_text());
+            cursor += width;
+            here = here.wrapping_add(width as u64);
+        } else {
+            if cursor + 4 > bytes.len() {
+                break;
+            }
+            let word = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            let row = armv7::arm::table_generated::match_generated(word)?;
+            let (operands, _unhandled) = armv7::arm::format_decode::decode_operands_from_format(
+                row.format, word, here,
+            );
+            let insn = armv7::arm::sweep::ArmDecodedInstruction {
+                address: here,
+                word,
+                mnemonic: row.mnemonic,
+                operands,
+                row: Some(row),
+                neon_row: None,
+            };
+            parts.push(glass_arch_arm::DecodedInsn::Arm(insn).format_text());
+            cursor += 4;
+            here = here.wrapping_add(4);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" ; "))
+    }
 }
 
 // ---- Tests ----------------------------------------------------

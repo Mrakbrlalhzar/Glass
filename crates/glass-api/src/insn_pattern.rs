@@ -52,6 +52,32 @@ impl Bundle {
         section_filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<InsnSearchResult> {
+        // insn-search compiles the pattern through the AArch64
+        // encoder, so it only makes sense against an AArch64
+        // artifact. ARMv7 artifacts can still use `bin-search`
+        // (byte-level — pattern is hex, not assembly); refuse
+        // typed-assembly here with a clear message rather than
+        // silently scanning AArch64-encoded bytes for an ARMv7
+        // target and returning nonsense.
+        let art = self
+            .artifacts
+            .iter()
+            .find(|a| {
+                a.label == artifact_ref || a.id.to_string().starts_with(artifact_ref)
+            })
+            .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
+        if !matches!(
+            art.binary.container.architecture,
+            armv8_encode::container::Architecture::Aarch64
+        ) {
+            anyhow::bail!(
+                "insn-search uses AArch64-only typed assembly; \
+                 artifact {} is {:?} — use bin-search with a hex \
+                 pattern instead",
+                art.label,
+                art.binary.container.architecture,
+            );
+        }
         let atoms = compile_to_atoms(pattern)
             .with_context(|| format!("compiling pattern {pattern:?}"))?;
         if atoms.is_empty() {
@@ -814,6 +840,7 @@ impl Bundle {
             })
             .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
         let container = &art.binary.container;
+        let arch = container.architecture;
         let mut matches: Vec<BinMatch> = Vec::new();
         let mut total = 0usize;
         let cap = limit.unwrap_or(usize::MAX);
@@ -840,6 +867,7 @@ impl Bundle {
                 }
                 let preview = crate::bin_search::build_preview(
                     is_text,
+                    arch,
                     section.address + start as u64,
                     &section.bytes[start..abs_end.min(section.bytes.len())],
                 );
