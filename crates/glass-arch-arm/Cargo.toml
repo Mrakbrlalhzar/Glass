@@ -1,5 +1,5 @@
 [package]
-name = "glass-arch-arm64"
+name = "glass-arch-arm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -13,7 +13,7 @@ serde = { workspace = true }
 smali.workspace = true
 zip.workspace = true
 plist.workspace = true
-glass-arch-arm64.workspace = true
+glass-arch-arm.workspace = true
 glass-arch-dex.workspace = true
 
 [lints]

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use glass_arch_arm64::{Chunk, ChunkKind};
+use glass_arch_arm::{Chunk, ChunkKind};
 
 /// One pre-rendered row of the manifest viewer. We flatten the tree
 /// into row-per-line up front so the virtualized list can render

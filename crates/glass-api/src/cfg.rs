@@ -1,7 +1,7 @@
 //! CFG verbs — function CFG, call sites.
 
 use anyhow::{Context, Result};
-use glass_arch_arm64::SymbolMap;
+use glass_arch_arm::SymbolMap;
 use serde::Serialize;
 
 use crate::bundle::Bundle;
@@ -64,7 +64,7 @@ impl Bundle {
         let symbols = SymbolMap::build(&art.binary.container);
         let entry_addr = resolve_func_ref(&symbols, func_ref)
             .with_context(|| format!("no function for {func_ref:?}"))?;
-        let cfg = glass_arch_arm64::build_function_cfg(
+        let cfg = glass_arch_arm::build_function_cfg(
             &art.binary.container,
             &symbols,
             entry_addr,
@@ -127,7 +127,7 @@ impl Bundle {
         let symbols = SymbolMap::build(&art.binary.container);
         let entry_addr = resolve_func_ref(&symbols, func_ref)
             .with_context(|| format!("no function for {func_ref:?}"))?;
-        let cfg = glass_arch_arm64::build_function_cfg(
+        let cfg = glass_arch_arm::build_function_cfg(
             &art.binary.container,
             &symbols,
             entry_addr,

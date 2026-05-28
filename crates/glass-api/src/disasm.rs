@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use armv8_encode::container::{Container, SectionKind};
 use armv8_encode::isa::aarch64;
-use glass_arch_arm64::{format as fmt, SymbolMap};
+use glass_arch_arm::{format as fmt, SymbolMap};
 use serde::Serialize;
 
 use crate::bundle::Bundle;

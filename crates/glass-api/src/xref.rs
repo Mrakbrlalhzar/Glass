@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use armv8_encode::isa::aarch64::{
     self, Aarch64Mnemonic, DecodedInstruction, DecodedOperand, RegisterClass,
 };
-use glass_arch_arm64::SymbolMap;
+use glass_arch_arm::SymbolMap;
 use serde::Serialize;
 use smali::smali_ops::{DexOp, MethodRef};
 use smali::types::SmaliOp;
@@ -206,7 +206,7 @@ fn collect_native_sites(
             let Ok(insn) = aarch64::decode_instruction(addr, word) else {
                 continue;
             };
-            if let Some(t) = glass_arch_arm64::format::primary_address_operand(&insn) {
+            if let Some(t) = glass_arch_arm::format::primary_address_operand(&insn) {
                 if t == target {
                     sites.push(addr);
                 }

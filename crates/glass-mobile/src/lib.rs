@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use glass_arch_arm64::Arm64Binary;
+use glass_arch_arm::Arm64Binary;
 use glass_arch_dex::DexBinary;
 use smali::android::zip::ApkFile;
 

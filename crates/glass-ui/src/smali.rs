@@ -4,7 +4,7 @@
 //! right level. Falls back to a single `Plain` chunk for anything we
 //! don't recognise so unknown syntax still renders.
 
-use glass_arch_arm64::{Chunk, ChunkKind};
+use glass_arch_arm::{Chunk, ChunkKind};
 
 /// Tokenise a single line of smali into coloured chunks.
 pub fn tokenize_smali_line(line: &str) -> Vec<Chunk> {

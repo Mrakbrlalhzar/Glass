@@ -27,17 +27,17 @@ pub fn build_cfg_from_text_sections(
         (glass_db::ArtifactId, String),
         TextSectionBytes,
     >,
-    symbols: &glass_arch_arm64::SymbolMap,
+    symbols: &glass_arch_arm::SymbolMap,
     artifact: &glass_db::ArtifactId,
     entry_addr: u64,
-) -> Option<glass_arch_arm64::FunctionCfg> {
+) -> Option<glass_arch_arm::FunctionCfg> {
     for ((aid, _name), section) in text_sections {
         if aid != artifact {
             continue;
         }
         let end = section.base + section.bytes.len() as u64;
         if entry_addr >= section.base && entry_addr < end {
-            return glass_arch_arm64::build_function_cfg_from_bytes(
+            return glass_arch_arm::build_function_cfg_from_bytes(
                 section.base,
                 &section.bytes,
                 symbols,
@@ -56,7 +56,7 @@ pub fn build_cfg_from_text_sections(
 /// a heavy alpha-dimmed version so the block reads as "in this
 /// function" rather than the default neutral grey.
 pub fn cfg_block_bg(
-    block: &glass_arch_arm64::BasicBlock,
+    block: &glass_arch_arm::BasicBlock,
     function_tint: Option<u32>,
 ) -> gpui::Rgba {
     if let Some(rgba) = function_tint {
@@ -115,7 +115,7 @@ pub struct CfgBlockRenderCtx {
 }
 
 pub fn render_cfg_block_pill(
-    block: &glass_arch_arm64::BasicBlock,
+    block: &glass_arch_arm::BasicBlock,
     summary: &CfgBlockSummary,
     dim: gpui::Rgba,
     function_tint: Option<u32>,
@@ -141,7 +141,7 @@ pub fn render_cfg_block_pill(
 }
 
 pub fn render_cfg_block_content(
-    block: &glass_arch_arm64::BasicBlock,
+    block: &glass_arch_arm::BasicBlock,
     summary: &CfgBlockSummary,
     plan: CfgLayoutPlan,
     ctx: Option<&CfgBlockRenderCtx>,
@@ -167,7 +167,7 @@ pub fn render_cfg_block_content(
         let c = ctx?;
         c.annotations.as_ref()?.at_address(addr).cloned()
     };
-    let render_insn = |insn: &glass_arch_arm64::InstructionEntry,
+    let render_insn = |insn: &glass_arch_arm::InstructionEntry,
                        insn_idx: usize|
      -> gpui::AnyElement {
         let annotation = annotation_at(insn.address);

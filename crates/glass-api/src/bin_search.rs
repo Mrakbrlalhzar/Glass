@@ -319,7 +319,7 @@ pub fn build_preview(is_text: bool, addr: u64, bytes: &[u8]) -> String {
                 ]);
                 let formatted = match aarch64::decode_instruction(addr + off as u64, word) {
                     Ok(insn) => {
-                        use glass_arch_arm64::format as fmt;
+                        use glass_arch_arm::format as fmt;
                         let mnem = fmt::mnemonic_chunk(&insn).text;
                         let operands = fmt::operands_chunks(&insn)
                             .into_iter()

@@ -8,7 +8,7 @@
 //! Note: this is a colour palette, not the command palette
 //! (cmd-F overlay). That overlay lives in the main shell file.
 
-use glass_arch_arm64::ChunkKind;
+use glass_arch_arm::ChunkKind;
 
 use crate::theme;
 

@@ -466,9 +466,9 @@ fn build_section_tooltip(
     let idx = shell.hovered_section?;
     let sec = sections.get(idx)?;
     let end = sec.address + sec.size;
-    let empty = glass_arch_arm64::SymbolMap::default();
+    let empty = glass_arch_arm::SymbolMap::default();
     let symbol_map = bundle.symbol_maps.get(artifact).unwrap_or(&empty);
-    let in_section: Vec<&glass_arch_arm64::Symbol> =
+    let in_section: Vec<&glass_arch_arm::Symbol> =
         symbol_map.in_range(sec.address, end).collect();
     let covering = shell
         .bar_cursor_addr

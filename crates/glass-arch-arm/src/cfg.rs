@@ -129,7 +129,13 @@ pub fn build_function_cfg(
     symbols: &SymbolMap,
     entry_addr: u64,
 ) -> Option<FunctionCfg> {
-    use armv8_encode::container::SectionKind;
+    use armv8_encode::container::{Architecture, SectionKind};
+
+    // ARMv7 path: defer to the upstream recursive-descent
+    // disassembler and the neutral `mc::build_cfg` builder.
+    if matches!(container.architecture, Architecture::Arm) {
+        return build_function_cfg_armv7(container, symbols, entry_addr);
+    }
 
     // Locate the text section containing `entry_addr`.
     let text_sec = container
@@ -146,6 +152,110 @@ pub fn build_function_cfg(
         symbols,
         entry_addr,
     )
+}
+
+/// ARMv7-specific CFG construction. Reuses the upstream
+/// recursive-descent disassembler to obtain a `Vec<DecodedInsn>`
+/// covering the function, then feeds that into the architecture-
+/// neutral `armv8_encode::mc::build_cfg` and projects the resulting
+/// generic graph into Glass's `FunctionCfg` shape.
+fn build_function_cfg_armv7(
+    container: &Container,
+    _symbols: &SymbolMap,
+    entry_addr: u64,
+) -> Option<FunctionCfg> {
+    use armv8_encode::mc::{self, EdgeKind as McEdgeKind, EdgeTarget, InstructionInfo};
+
+    let insns = crate::disasm::disassemble_function_at(container, entry_addr)?;
+    if insns.is_empty() {
+        return None;
+    }
+    let real_entry = entry_addr & !1u64;
+    let last = insns.last()?;
+    let end_addr = last.address() + last.size();
+
+    let mc_cfg = mc::build_cfg(insns.as_slice());
+    // Map from upstream BlockId to Glass BlockId (same index).
+    let mut blocks: Vec<BasicBlock> = Vec::with_capacity(mc_cfg.blocks.len());
+    for b in &mc_cfg.blocks {
+        let mut entries = Vec::with_capacity(b.instructions.end - b.instructions.start);
+        let mut calls = Vec::new();
+        for idx in b.instructions.clone() {
+            let insn = &insns[idx];
+            let raw = insn.raw_bytes();
+            let mut bytes4 = [0u8; 4];
+            let copy_len = raw.len().min(4);
+            bytes4[..copy_len].copy_from_slice(&raw[..copy_len]);
+            let line = insn.format_text();
+            let (mnemonic, operands) = match line.split_once(' ') {
+                Some((m, rest)) => (m.to_string(), rest.to_string()),
+                None => (line, String::new()),
+            };
+            entries.push(InstructionEntry {
+                address: insn.address(),
+                bytes: bytes4,
+                mnemonic,
+                operands,
+                undecoded: false,
+            });
+            // Recognise calls so the UI's call-site annotations
+            // continue to work.
+            match insn.control_flow() {
+                armv8_encode::mc::ControlFlow::Call { target, .. } => {
+                    calls.push(CallSite {
+                        site_addr: insn.address(),
+                        target_addr: Some(target),
+                    });
+                }
+                armv8_encode::mc::ControlFlow::IndirectCall { .. } => {
+                    calls.push(CallSite {
+                        site_addr: insn.address(),
+                        target_addr: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let exits = b.successors.is_empty();
+        blocks.push(BasicBlock {
+            id: BlockId(b.id.0),
+            start_addr: b.start,
+            end_addr: b.end,
+            instructions: entries,
+            calls,
+            exits_function: exits,
+        });
+    }
+
+    let mut edges: Vec<BlockEdge> = Vec::new();
+    for b in &mc_cfg.blocks {
+        for e in &b.successors {
+            let to = match e.target {
+                EdgeTarget::Block(id) => BlockId(id.0),
+                _ => continue, // skip indirect / external for now
+            };
+            let kind = match e.kind {
+                McEdgeKind::Fallthrough => BlockEdgeKind::Fallthrough,
+                McEdgeKind::Jump => BlockEdgeKind::Unconditional,
+                McEdgeKind::BranchTaken => BlockEdgeKind::TakenConditional,
+                McEdgeKind::Call => continue, // Calls handled via CallSite annotations
+            };
+            edges.push(BlockEdge {
+                from: BlockId(b.id.0),
+                to,
+                kind,
+            });
+        }
+    }
+
+    let layout = compute_layered_layout(&blocks, &edges);
+    Some(FunctionCfg {
+        entry_addr: real_entry,
+        end_addr,
+        blocks,
+        edges,
+        layout,
+    })
 }
 
 /// Same as `build_function_cfg` but works against pre-extracted

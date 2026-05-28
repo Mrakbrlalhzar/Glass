@@ -88,7 +88,7 @@ pub fn render_cfg(
 
     let symbols = bundle.symbol_maps.get(artifact);
     let symbol_for_block =
-        |b: &glass_arch_arm64::BasicBlock| -> Option<SharedString> {
+        |b: &glass_arch_arm::BasicBlock| -> Option<SharedString> {
             symbols
                 .and_then(|sm| sm.at(b.start_addr))
                 .map(|s| SharedString::from(s.display_name.clone()))
@@ -153,8 +153,8 @@ pub fn render_cfg(
         }
         let style = if matches!(
             edge.kind,
-            glass_arch_arm64::BlockEdgeKind::TakenConditional
-                | glass_arch_arm64::BlockEdgeKind::NotTakenConditional,
+            glass_arch_arm::BlockEdgeKind::TakenConditional
+                | glass_arch_arm::BlockEdgeKind::NotTakenConditional,
         ) {
             EdgeStyle::Dotted
         } else {
@@ -170,7 +170,7 @@ pub fn render_cfg(
     graph::layout_scene(&mut scene);
 
     let plans_arc: Arc<Vec<CfgLayoutPlan>> = Arc::new(plans);
-    let blocks_arc: Arc<Vec<glass_arch_arm64::BasicBlock>> = Arc::new(cfg.blocks.clone());
+    let blocks_arc: Arc<Vec<glass_arch_arm::BasicBlock>> = Arc::new(cfg.blocks.clone());
     let artifact_arc = artifact.clone();
     let dim_for_content = dim;
     // Resolve the per-artifact annotation index + the function's
@@ -349,7 +349,7 @@ const MAX_BLOCK_PX_W: f32 = 640.;
 const FULL_BLOCK_WORLD_H: f32 = 0.6;
 
 fn plan_blocks(
-    cfg: &glass_arch_arm64::FunctionCfg,
+    cfg: &glass_arch_arm::FunctionCfg,
     summaries: &[CfgBlockSummary],
     unit: f32,
 ) -> Vec<CfgLayoutPlan> {
@@ -363,7 +363,7 @@ fn plan_blocks(
 }
 
 fn plan_one(
-    b: &glass_arch_arm64::BasicBlock,
+    b: &glass_arch_arm::BasicBlock,
     has_symbol: bool,
     budget_px_h: f32,
 ) -> CfgLayoutPlan {
@@ -426,7 +426,7 @@ fn plan_one(
 }
 
 fn size_block_px(
-    block: &glass_arch_arm64::BasicBlock,
+    block: &glass_arch_arm::BasicBlock,
     summary: &CfgBlockSummary,
     plan: CfgLayoutPlan,
     _unit: f32,
@@ -436,7 +436,7 @@ fn size_block_px(
     if let Some(name) = summary.symbol.as_ref() {
         longest = longest.max(name.len() + 1);
     }
-    let insn_line_len = |insn: &glass_arch_arm64::InstructionEntry| -> usize {
+    let insn_line_len = |insn: &glass_arch_arm::InstructionEntry| -> usize {
         let operand_len = match summary.calls.get(&insn.address) {
             Some((_, name)) => name.len(),
             None => insn.operands.len(),

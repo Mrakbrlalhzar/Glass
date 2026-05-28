@@ -37,7 +37,7 @@ impl Bundle {
 
         // Native symbols (one symbol map per artifact, lazy-build).
         for art in &self.artifacts {
-            let symbols = glass_arch_arm64::SymbolMap::build(&art.binary.container);
+            let symbols = glass_arch_arm::SymbolMap::build(&art.binary.container);
             for sym in symbols.iter() {
                 let hay = sym.display_name.to_lowercase();
                 if hay.contains(&q) {

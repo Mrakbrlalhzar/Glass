@@ -16,7 +16,7 @@ use gpui::{
 use crate::context_menu::{ContextMenuItem, ContextMenuState};
 use crate::hex::{build_hex_rows, hex_row_for_addr};
 use crate::listing_model::{build_listing_rows, listing_row_for_addr, DataPeek, ListingRow};
-use crate::search::{build_search_index, is_subsequence, SearchJump};
+use crate::search::{build_search_index, SearchJump};
 use crate::SearchEntry;
 use crate::{
     flatten, scroll_into_view_with_context, Expanded, LeafId,
@@ -687,7 +687,7 @@ impl Shell {
         &self,
         tab_id: crate::TabId,
         text: TextSectionBytes,
-        symbols: Arc<glass_arch_arm64::SymbolMap>,
+        symbols: Arc<glass_arch_arm::SymbolMap>,
         data: Arc<DataPeek>,
         progress: Arc<Mutex<Progress>>,
         cx: &mut Context<Self>,
@@ -790,7 +790,7 @@ impl Shell {
                     return;
                 };
                 if tab.hex_rows.is_none() {
-                    let empty = glass_arch_arm64::SymbolMap::default();
+                    let empty = glass_arch_arm::SymbolMap::default();
                     let symbols = bundle.symbol_maps.get(artifact).unwrap_or(&empty);
                     let rows = build_hex_rows(data, symbols);
                     tab.scroll = ListState::new(rows.len(), ListAlignment::Top, px(2000.));
@@ -840,8 +840,8 @@ impl Shell {
                 // the borrow before calling spawn_listing_build.
                 let mut start_build = None;
                 if tab.listing_rows.is_none() && tab.listing_progress.is_none() {
-                    let empty = glass_arch_arm64::SymbolMap::default();
-                    let symbols_arc: Arc<glass_arch_arm64::SymbolMap> = Arc::new(
+                    let empty = glass_arch_arm::SymbolMap::default();
+                    let symbols_arc: Arc<glass_arch_arm::SymbolMap> = Arc::new(
                         bundle.symbol_maps.get(&artifact).cloned().unwrap_or(empty),
                     );
                     // Snapshot this artifact's data sections so the
@@ -1388,7 +1388,7 @@ impl Shell {
         //    - Object (data) symbol → References to <name>
         //    - No covering symbol → References to 0x<addr>
         match covering {
-            Some(sym) if matches!(sym.kind, glass_arch_arm64::SymbolKind::Function) => {
+            Some(sym) if matches!(sym.kind, glass_arch_arm::SymbolKind::Function) => {
                 let label = SharedString::from(sym.display_name.clone());
                 let entry_addr = sym.address;
                 items.push(ContextMenuItem::ShowCfg {
@@ -2650,7 +2650,7 @@ impl Shell {
     /// foreground thread; the scan typically runs in milliseconds
     /// for the kind of pattern a user types interactively.
     pub(crate) fn run_palette_bin_search(&mut self, cx: &mut Context<Self>) {
-        use glass_arch_arm64::SymbolMap;
+        use glass_arch_arm::SymbolMap;
         let _ = SymbolMap::default; // touch import for future use
         self.palette_bin_error = None;
         let pattern = self.palette_bin_query.text().to_string();
@@ -2976,8 +2976,6 @@ impl Shell {
                     0
                 } else if hay.contains(&q) {
                     1
-                } else if is_subsequence(&q, &hay) {
-                    2
                 } else {
                     continue;
                 };

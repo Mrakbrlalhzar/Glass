@@ -1,14 +1,23 @@
-//! AArch64 disassembly facade over `armv8-encode`.
+//! ARM-family disassembly facade over `armv8-encode`.
 //!
-//! Used for iOS Mach-O code, Android `lib*.so` native libraries, and any
-//! other AArch64 ELF/Mach-O that flows through `glass-mobile`.
+//! Originally an AArch64-only crate (`glass-arch-arm64`); now also
+//! covers ARMv7 (A32) and Thumb (T32) for 32-bit ELF artifacts. The
+//! [`facade::DecodedInsn`] enum gives the rest of Glass a single
+//! ISA-neutral instruction type while keeping per-ISA bits available
+//! when they're needed (encoding, AArch64-specific page-base fusion).
+//!
+//! Used for iOS Mach-O code, Android `lib*.so` native libraries, and
+//! any other ARM ELF/Mach-O that flows through `glass-mobile`.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use armv8_encode::container::Container;
 
+pub mod arm_format;
 pub mod cfg;
+pub mod disasm;
+pub mod facade;
 pub mod format;
 pub mod macho_fat;
 pub mod symbol_map;
@@ -16,6 +25,8 @@ pub use cfg::{
     build_function_cfg, build_function_cfg_from_bytes, BasicBlock, BlockEdge, BlockEdgeKind,
     BlockId, BlockLayout, CallSite, FunctionCfg, InstructionEntry,
 };
+pub use disasm::{disassemble_function_at, precompute_section_insns};
+pub use facade::{DecodedInsn, RegKind, RegRef};
 pub use format::{Chunk, ChunkKind};
 pub use macho_fat::thin_slice_macho;
 pub use symbol_map::{

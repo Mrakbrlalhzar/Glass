@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use glass_arch_arm64::{Arm64Binary, SymbolMap};
+use glass_arch_arm::{Arm64Binary, SymbolMap};
 use glass_db::ArtifactId;
 use parking_lot::RwLock;
 use smali::types::SmaliClass;

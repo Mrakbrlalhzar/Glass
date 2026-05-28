@@ -49,18 +49,17 @@ impl SearchIndex {
         for e in &self.entries {
             let hay = e.display.to_lowercase();
             let tier = if tokens.len() <= 1 {
-                // Single-token query — keep the original three-tier
-                // match (prefix / substring / char-subsequence). The
-                // subsequence tier is what lets short fuzzy queries
-                // like "frmwk" find "FooBarFrameWork", and only
-                // applies when there's no whitespace to interpret
-                // word-by-word.
+                // Single-token query: prefix beats anywhere-substring.
+                // No char-subsequence fallback — it produces too many
+                // confusing hits for normal literal searches (e.g.
+                // "whaley" matching strings that merely contain
+                // w-h-a-l-e-y in order across unrelated words). If we
+                // grow an acronym-style fuzzy mode later, it should
+                // be an explicit gesture, not a silent fallback.
                 if hay.starts_with(&q) {
                     0
                 } else if hay.contains(&q) {
                     1
-                } else if is_subsequence(&q, &hay) {
-                    2
                 } else {
                     continue;
                 }
@@ -104,19 +103,6 @@ fn tokens_in_order(tokens: &[&str], hay: &str) -> bool {
             Some(off) => cursor += off + t.len(),
             None => return false,
         }
-    }
-    true
-}
-
-pub(crate) fn is_subsequence(needle: &str, hay: &str) -> bool {
-    let mut h = hay.chars();
-    'outer: for nc in needle.chars() {
-        for hc in h.by_ref() {
-            if hc == nc {
-                continue 'outer;
-            }
-        }
-        return false;
     }
     true
 }

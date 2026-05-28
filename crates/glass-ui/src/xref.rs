@@ -187,7 +187,7 @@ pub fn build_native_xrefs(
             };
             // Direct branch target → xref.
             if let Some(target) =
-                glass_arch_arm64::format::primary_address_operand(&insn)
+                glass_arch_arm::format::primary_address_operand(&insn)
             {
                 per_artifact.entry(target).or_default().push(addr);
             }

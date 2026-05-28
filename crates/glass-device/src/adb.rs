@@ -339,8 +339,20 @@ impl AdbBackend {
                 Ok(s) => s,
                 Err(_) => return Ok(false),
             };
+        // Generous read timeout — `adb forward`'s host-side
+        // listener accepts connections immediately, regardless
+        // of whether anything's listening on the device side.
+        // The signal we need is the *EOF* that arrives once
+        // adbd notices the device-side connect failed. On a
+        // healthy gadget that EOF never comes (so the timeout
+        // fires and we report "alive"); on a closed device-
+        // side port adbd typically closes us within a few
+        // hundred ms, but a sluggish phone or saturated USB
+        // bus can take noticeably longer. 2 s is well clear
+        // of normal latency without making a "no gadget"
+        // verdict feel laggy.
         stream
-            .set_read_timeout(Some(Duration::from_millis(600)))
+            .set_read_timeout(Some(Duration::from_millis(2000)))
             .ok();
         stream
             .set_write_timeout(Some(Duration::from_millis(500)))
@@ -353,26 +365,48 @@ impl AdbBackend {
         if stream.write_all(&[0u8]).is_err() {
             return Ok(false);
         }
-        let mut buf = [0u8; 1];
+        let mut buf = [0u8; 16];
+        // Drain whatever comes back inside the timeout. We
+        // want a definitive EOF or data — never a timeout
+        // "alive" verdict if we can avoid it.
         match stream.read(&mut buf) {
             // 0 bytes = clean EOF. Means ADB closed the
             // connection because the device-side connect
             // failed — no gadget.
-            Ok(0) => Ok(false),
+            Ok(0) => {
+                tracing::debug!(serial, "probe_gadget: EOF → no gadget");
+                Ok(false)
+            }
             // Any data = a real reply, definitely a gadget.
-            Ok(_) => Ok(true),
-            // Timeout = the gadget accepted our byte and is
-            // waiting for more. That's the expected steady
-            // state for Frida's client-initiated protocol;
-            // it counts as "alive."
+            Ok(n) => {
+                tracing::debug!(
+                    serial,
+                    bytes = n,
+                    first = ?&buf[..n.min(8)],
+                    "probe_gadget: data → gadget alive",
+                );
+                Ok(true)
+            }
+            // Timeout with no EOF and no data: gadget is
+            // holding the connection open (expected for
+            // Frida's client-initiated protocol). Treat as
+            // alive — but only as a last resort.
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
                 || e.kind() == std::io::ErrorKind::TimedOut =>
             {
+                tracing::debug!(
+                    serial,
+                    "probe_gadget: read timed out (connection held \
+                     open) → reporting gadget alive",
+                );
                 Ok(true)
             }
             // Other I/O error (connection reset, etc.) — the
             // safe default is "not running."
-            Err(_) => Ok(false),
+            Err(e) => {
+                tracing::debug!(serial, ?e, "probe_gadget: I/O error → no gadget");
+                Ok(false)
+            }
         }
     }
 

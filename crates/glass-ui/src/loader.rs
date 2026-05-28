@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use glass_arch_arm64::Arm64Binary;
+use glass_arch_arm::Arm64Binary;
 use glass_mobile::{ApkBundle, Bundle, IpaBundle};
 use gpui::SharedString;
 
@@ -89,7 +89,7 @@ fn snapshot_apk_with_progress(
     > = std::collections::HashMap::new();
     let mut symbol_maps: std::collections::HashMap<
         glass_db::ArtifactId,
-        glass_arch_arm64::SymbolMap,
+        glass_arch_arm::SymbolMap,
     > = std::collections::HashMap::new();
     let mut text_sections: std::collections::HashMap<
         (glass_db::ArtifactId, String),
@@ -115,28 +115,40 @@ fn snapshot_apk_with_progress(
         native_sections.insert(aid.clone(), build_section_info(&lib.binary.container));
         symbol_maps.insert(
             aid.clone(),
-            glass_arch_arm64::SymbolMap::build(&lib.binary.container),
+            glass_arch_arm::SymbolMap::build(&lib.binary.container),
         );
         // armv8-encode parses the container regardless of architecture
-        // but its decoder is AArch64-only. For non-AArch64 (x86_64,
-        // armeabi-v7a, etc.) the listing would render meaningless
-        // AArch64 reads of the bytes, so we register every section —
+        // and Glass produces typed listings for both AArch64 and ARMv7.
+        // Anything else (x86_64, …) we register every section —
         // including text — as data so the UI routes clicks to the hex
         // view instead.
         let arch = lib.binary.container.architecture;
-        let aarch64 =
-            matches!(arch, armv8_encode::container::Architecture::Aarch64);
-        for sec in &lib.binary.container.sections {
+        let listable = is_listable(arch);
+        let symbol_addresses_all: Vec<u64> = symbol_maps
+            .get(&aid)
+            .map(|sm| sm.iter().map(|s| s.address).collect())
+            .unwrap_or_default();
+        for (sec_idx, sec) in lib.binary.container.sections.iter().enumerate() {
             let kind = NativeSectionKind::from_armv8(sec.kind);
             let is_text =
                 matches!(sec.kind, armv8_encode::container::SectionKind::Text);
-            if aarch64 && is_text {
+            if listable && is_text {
+                // Pre-compute the ARMv7 disassembly when we have one.
+                let symbol_addrs: Vec<u64> = symbol_addresses_all
+                    .iter()
+                    .copied()
+                    .filter(|&a| {
+                        let real = a & !1u64;
+                        real >= sec.address && real < sec.address + sec.size
+                    })
+                    .collect();
                 text_sections.insert(
                     (aid.clone(), sec.name.clone()),
-                    TextSectionBytes {
-                        base: sec.address,
-                        bytes: Arc::new(sec.bytes.clone()),
-                    },
+                    build_text_section_bytes(
+                        &lib.binary.container,
+                        sec_idx,
+                        &symbol_addrs,
+                    ),
                 );
             } else if !sec.bytes.is_empty() {
                 data_sections.insert(
@@ -250,18 +262,16 @@ fn snapshot_apk_with_progress(
         for (i, lib) in apk.native_libs.iter().enumerate() {
             let lib_aid = lib_artifact_ids[i].clone();
             let arch = lib.binary.container.architecture;
-            let aarch64 =
-                matches!(arch, armv8_encode::container::Architecture::Aarch64);
+            let listable = is_listable(arch);
 
             // Overview leaf (SectionMap), then one leaf per actual text
             // section. ELF uses `.text`, Mach-O uses `__text`, and some
             // ELF variants split text across `.text.startup` etc. —
             // we surface them all as siblings under the lib.
             //
-            // For non-AArch64 libs (armeabi-v7a, x86_64, …) we can't
-            // disassemble — armv8-encode is AArch64-only. Emit Hex
-            // leaves so clicking takes the user to the raw byte view
-            // instead of a fake disassembly.
+            // For non-ARM-family libs (x86_64, …) we can't disassemble
+            // through armv8-encode. Emit Hex leaves so clicking takes
+            // the user to the raw byte view instead.
             let overview_id = LeafId(bodies.len());
             bodies.push(SharedString::from("")); // SectionMap renders its own body
             origins.push(SharedString::from(format!("lib/{}", lib.abi)));
@@ -280,7 +290,7 @@ fn snapshot_apk_with_progress(
                 bodies.push(SharedString::from(""));
                 origins.push(SharedString::from(format!("lib/{}", lib.abi)));
                 labels.push(SharedString::from(sec.name.clone()));
-                if aarch64 {
+                if listable {
                     kinds.push(LeafKind::Listing {
                         artifact: lib_aid.clone(),
                         section: sec.name.clone(),
@@ -299,7 +309,7 @@ fn snapshot_apk_with_progress(
 
             // Tag the lib group label with arch when we can't
             // disassemble — makes "why is this in hex?" self-evident.
-            let lib_label = if aarch64 {
+            let lib_label = if listable {
                 lib.name.clone()
             } else {
                 format!("{} ({})", lib.name, arch_label(arch))
@@ -400,7 +410,7 @@ fn snapshot_ipa_with_progress(
     > = std::collections::HashMap::new();
     let mut symbol_maps: std::collections::HashMap<
         glass_db::ArtifactId,
-        glass_arch_arm64::SymbolMap,
+        glass_arch_arm::SymbolMap,
     > = std::collections::HashMap::new();
     let mut text_sections: std::collections::HashMap<
         (glass_db::ArtifactId, String),
@@ -441,22 +451,30 @@ fn snapshot_ipa_with_progress(
      -> (glass_db::ArtifactId, Node) {
         let aid = glass_db::ArtifactId::from_bytes(bytes);
         native_sections.insert(aid.clone(), build_section_info(container));
-        symbol_maps.insert(aid.clone(), glass_arch_arm64::SymbolMap::build(container));
+        symbol_maps.insert(aid.clone(), glass_arch_arm::SymbolMap::build(container));
 
         let arch = container.architecture;
-        let aarch64 =
-            matches!(arch, armv8_encode::container::Architecture::Aarch64);
-        for sec in &container.sections {
+        let listable = is_listable(arch);
+        let symbol_addresses_all: Vec<u64> = symbol_maps
+            .get(&aid)
+            .map(|sm| sm.iter().map(|s| s.address).collect())
+            .unwrap_or_default();
+        for (sec_idx, sec) in container.sections.iter().enumerate() {
             let kind = NativeSectionKind::from_armv8(sec.kind);
             let is_text =
                 matches!(sec.kind, armv8_encode::container::SectionKind::Text);
-            if aarch64 && is_text {
+            if listable && is_text {
+                let symbol_addrs: Vec<u64> = symbol_addresses_all
+                    .iter()
+                    .copied()
+                    .filter(|&a| {
+                        let real = a & !1u64;
+                        real >= sec.address && real < sec.address + sec.size
+                    })
+                    .collect();
                 text_sections.insert(
                     (aid.clone(), sec.name.clone()),
-                    TextSectionBytes {
-                        base: sec.address,
-                        bytes: Arc::new(sec.bytes.clone()),
-                    },
+                    build_text_section_bytes(container, sec_idx, &symbol_addrs),
                 );
             } else if !sec.bytes.is_empty() {
                 data_sections.insert(
@@ -488,7 +506,7 @@ fn snapshot_ipa_with_progress(
             bodies.push(SharedString::from(""));
             origins.push(SharedString::from(origin.clone()));
             labels.push(SharedString::from(sec.name.clone()));
-            if aarch64 {
+            if listable {
                 kinds.push(LeafKind::Listing {
                     artifact: aid.clone(),
                     section: sec.name.clone(),
@@ -504,7 +522,7 @@ fn snapshot_ipa_with_progress(
                 leaf_id,
             });
         }
-        let group_label = if aarch64 {
+        let group_label = if listable {
             display_name
         } else {
             format!("{display_name} ({})", arch_label(arch))
@@ -758,6 +776,45 @@ fn build_section_info(container: &armv8_encode::container::Container) -> Vec<Sec
         .collect()
 }
 
+/// True for architectures Glass can produce a typed listing for.
+/// Mirrors `glass_arch_arm::disassemble_function_at` — AArch64 + ARM
+/// (which covers both ARM-mode and Thumb-mode ARMv7 binaries).
+fn is_listable(arch: armv8_encode::container::Architecture) -> bool {
+    use armv8_encode::container::Architecture as A;
+    matches!(arch, A::Aarch64 | A::Arm)
+}
+
+/// Build a `TextSectionBytes` for `section`. When the container is
+/// ARMv7, runs the upstream recursive-descent disassembler against
+/// the section's symbols and stashes the precomputed instruction
+/// list on the returned `TextSectionBytes` so the listing renderer
+/// doesn't try to decode 4-byte chunks of variable-width Thumb code.
+/// For AArch64 the precomputed slot is left empty — the listing
+/// path keeps its current behavior.
+fn build_text_section_bytes(
+    container: &armv8_encode::container::Container,
+    section_index: usize,
+    symbol_addresses: &[u64],
+) -> TextSectionBytes {
+    let sec = &container.sections[section_index];
+    let precomputed = match container.architecture {
+        armv8_encode::container::Architecture::Arm => {
+            glass_arch_arm::precompute_section_insns(
+                container,
+                section_index,
+                symbol_addresses,
+            )
+            .map(Arc::new)
+        }
+        _ => None,
+    };
+    TextSectionBytes {
+        base: sec.address,
+        bytes: Arc::new(sec.bytes.clone()),
+        precomputed,
+    }
+}
+
 pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
     let body = format_arm64(&bin);
     let display_label = bin
@@ -770,18 +827,27 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
     let mut native_sections = std::collections::HashMap::new();
     native_sections.insert(aid.clone(), build_section_info(&bin.container));
     let mut symbol_maps = std::collections::HashMap::new();
-    symbol_maps.insert(aid.clone(), glass_arch_arm64::SymbolMap::build(&bin.container));
+    symbol_maps.insert(aid.clone(), glass_arch_arm::SymbolMap::build(&bin.container));
     let mut text_sections = std::collections::HashMap::new();
     let mut data_sections = std::collections::HashMap::new();
-    for sec in &bin.container.sections {
+    let symbol_addrs_all: Vec<u64> = symbol_maps
+        .get(&aid)
+        .map(|sm| sm.iter().map(|s| s.address).collect())
+        .unwrap_or_default();
+    for (sec_idx, sec) in bin.container.sections.iter().enumerate() {
         let kind = NativeSectionKind::from_armv8(sec.kind);
         if matches!(sec.kind, armv8_encode::container::SectionKind::Text) {
+            let symbol_addrs: Vec<u64> = symbol_addrs_all
+                .iter()
+                .copied()
+                .filter(|&a| {
+                    let real = a & !1u64;
+                    real >= sec.address && real < sec.address + sec.size
+                })
+                .collect();
             text_sections.insert(
                 (aid.clone(), sec.name.clone()),
-                TextSectionBytes {
-                    base: sec.address,
-                    bytes: Arc::new(sec.bytes.clone()),
-                },
+                build_text_section_bytes(&bin.container, sec_idx, &symbol_addrs),
             );
         } else if !sec.bytes.is_empty() {
             data_sections.insert(
@@ -862,7 +928,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
 }
 
 fn format_arm64(bin: &Arm64Binary) -> String {
-    let rows = match glass_arch_arm64::linear_sweep(&bin.container) {
+    let rows = match glass_arch_arm::linear_sweep(&bin.container) {
         Ok(r) => r,
         Err(e) => return format!("(disassembly failed: {e})"),
     };

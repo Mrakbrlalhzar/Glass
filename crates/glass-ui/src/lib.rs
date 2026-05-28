@@ -218,7 +218,7 @@ pub struct LoadedBundle {
     /// Empty for DEX-only artifacts.
     pub native_sections: Arc<std::collections::HashMap<glass_db::ArtifactId, Vec<SectionInfo>>>,
     /// Per-native-artifact merged symbol map (symtab + DWARF + .eh_frame).
-    pub symbol_maps: Arc<std::collections::HashMap<glass_db::ArtifactId, glass_arch_arm64::SymbolMap>>,
+    pub symbol_maps: Arc<std::collections::HashMap<glass_db::ArtifactId, glass_arch_arm::SymbolMap>>,
     /// Text sections we can disassemble on demand. One entry per
     /// `SectionKind::Text` section per native artifact. Keyed by
     /// `(artifact, section_name)` so the Listing tab can look up by
@@ -296,10 +296,20 @@ pub struct LoadedBundle {
 }
 
 /// Owned bytes + base address for a text section. Cheap to clone via Arc.
+///
+/// When the artifact is ARMv7 the loader pre-runs the upstream
+/// recursive-descent disassembler against the section's symbol set
+/// and stashes the result in `precomputed`. The listing renderer
+/// walks that vector instead of decoding 4-byte chunks on demand —
+/// Thumb is variable-width and literal pools are interleaved with
+/// code, so the fixed-4-byte path used for AArch64 doesn't work.
+/// AArch64 leaves `precomputed` as `None` and continues to decode on
+/// demand for byte-identical legacy behavior.
 #[derive(Clone)]
 pub struct TextSectionBytes {
     pub base: u64,
     pub bytes: Arc<Vec<u8>>,
+    pub precomputed: Option<Arc<Vec<glass_arch_arm::DecodedInsn>>>,
 }
 
 /// Owned bytes + base address for a non-text section, used by the hex
@@ -339,27 +349,89 @@ impl DataSectionBytes {
 }
 
 impl TextSectionBytes {
+    /// Number of "rows" the listing should render. For AArch64 (and
+    /// any section with no precomputed disassembly) this is the
+    /// fixed-4-byte instruction count. For ARMv7 it's the length of
+    /// the precomputed instruction vector — Thumb/ARM mixed code
+    /// can't be addressed by `byte_offset / 4`.
     pub fn instruction_count(&self) -> usize {
-        self.bytes.len() / 4
-    }
-
-    pub fn addr_of(&self, index: usize) -> u64 {
-        self.base + (index as u64) * 4
-    }
-
-    pub fn index_of(&self, addr: u64) -> usize {
-        let off = addr.saturating_sub(self.base) as usize;
-        (off / 4).min(self.instruction_count().saturating_sub(1))
-    }
-
-    pub fn word_at(&self, index: usize) -> Option<(u64, [u8; 4], u32)> {
-        let off = index * 4;
-        if off + 4 > self.bytes.len() {
-            return None;
+        if let Some(p) = &self.precomputed {
+            p.len()
+        } else {
+            self.bytes.len() / 4
         }
-        let chunk = &self.bytes[off..off + 4];
-        let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
-        Some((self.addr_of(index), bytes, u32::from_le_bytes(bytes)))
+    }
+
+    /// Address of the `index`-th row. AArch64: `base + index * 4`.
+    /// ARMv7: the address of the `index`-th precomputed instruction
+    /// (variable-width).
+    pub fn addr_of(&self, index: usize) -> u64 {
+        if let Some(p) = &self.precomputed {
+            use armv8_encode::mc::InstructionInfo as _;
+            p.get(index).map(|i| i.address()).unwrap_or(self.base)
+        } else {
+            self.base + (index as u64) * 4
+        }
+    }
+
+    /// Row containing `addr`, clamped to range. ARMv7 binary-searches
+    /// the precomputed vector; AArch64 uses fixed-4-byte arithmetic.
+    pub fn index_of(&self, addr: u64) -> usize {
+        if let Some(p) = &self.precomputed {
+            use armv8_encode::mc::InstructionInfo as _;
+            // Greatest index with address <= addr.
+            let pos = p.binary_search_by(|i| i.address().cmp(&addr));
+            match pos {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            }
+            .min(p.len().saturating_sub(1))
+        } else {
+            let off = addr.saturating_sub(self.base) as usize;
+            (off / 4).min(self.instruction_count().saturating_sub(1))
+        }
+    }
+
+    /// `(address, 4-byte chunk, word)` of the `index`-th row.
+    /// Returns `None` when the index is past the end OR when the
+    /// row is a >4-byte instruction (which can't fit the
+    /// `[u8; 4]` slot). Callers that need variable-width support
+    /// should use [`Self::precomputed_at`] instead.
+    pub fn word_at(&self, index: usize) -> Option<(u64, [u8; 4], u32)> {
+        if let Some(p) = &self.precomputed {
+            use armv8_encode::mc::InstructionInfo as _;
+            let insn = p.get(index)?;
+            let raw = insn.size() as usize;
+            if raw > 4 {
+                return None;
+            }
+            let off = (insn.address() - self.base) as usize;
+            if off + raw > self.bytes.len() {
+                return None;
+            }
+            // Pad short Thumb instructions out to 4 bytes; the high
+            // bytes stay zero so consumers that interpret the word
+            // as `u32::from_le_bytes` still get a meaningful value
+            // for the 16-bit halfword.
+            let mut chunk = [0u8; 4];
+            chunk[..raw].copy_from_slice(&self.bytes[off..off + raw]);
+            Some((insn.address(), chunk, u32::from_le_bytes(chunk)))
+        } else {
+            let off = index * 4;
+            if off + 4 > self.bytes.len() {
+                return None;
+            }
+            let chunk = &self.bytes[off..off + 4];
+            let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            Some((self.addr_of(index), bytes, u32::from_le_bytes(bytes)))
+        }
+    }
+
+    /// Precomputed instruction at `index`, if any. ARMv7 only —
+    /// AArch64 returns `None` so call sites that want the typed
+    /// decode fall back to their own `decode_instruction` call.
+    pub fn precomputed_at(&self, index: usize) -> Option<&glass_arch_arm::DecodedInsn> {
+        self.precomputed.as_ref().and_then(|p| p.get(index))
     }
 }
 
@@ -840,7 +912,7 @@ pub(crate) struct Tab {
 #[derive(Clone)]
 pub(crate) struct CfgViewState {
     pub(crate) camera: graph::GraphCamera,
-    pub(crate) cfg: Option<Arc<glass_arch_arm64::FunctionCfg>>,
+    pub(crate) cfg: Option<Arc<glass_arch_arm::FunctionCfg>>,
 }
 
 impl CfgViewState {

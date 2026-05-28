@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/glass-core",
-    "crates/glass-arch-arm64",
+    "crates/glass-arch-arm",
     "crates/glass-arch-dex",
     "crates/glass-mobile",
     "crates/glass-db",
@@ -107,7 +107,7 @@ rquickjs = { version = "0.11", features = ["loader", "futures"] }
 
 # Internal
 glass-core = { path = "crates/glass-core" }
-glass-arch-arm64 = { path = "crates/glass-arch-arm64" }
+glass-arch-arm = { path = "crates/glass-arch-arm" }
 glass-arch-dex = { path = "crates/glass-arch-dex" }
 glass-mobile = { path = "crates/glass-mobile" }
 glass-api = { path = "crates/glass-api" }

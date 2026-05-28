@@ -46,7 +46,7 @@ pub(crate) fn item_extent_for(
     // (1) Symbol-defined data item.
     if let Some(sm) = bundle.symbol_maps.get(artifact) {
         if let Some(sym) = sm.covering(addr) {
-            if matches!(sym.kind, glass_arch_arm64::SymbolKind::Object) && sym.size > 0 {
+            if matches!(sym.kind, glass_arch_arm::SymbolKind::Object) && sym.size > 0 {
                 return Some((sym.address, sym.address + sym.size));
             }
         }
@@ -929,7 +929,7 @@ pub fn render_listing_row_with(
                     .text_color(rgb(chunk_colour(chunk.kind)))
                     .child(SharedString::from(chunk.text.clone()));
                 let cell: gpui::AnyElement = match (chunk.kind, chunk.target, ctx) {
-                    (glass_arch_arm64::ChunkKind::Address, Some(t), Some(ctx)) => {
+                    (glass_arch_arm::ChunkKind::Address, Some(t), Some(ctx)) => {
                         let weak = ctx.shell.clone();
                         let artifact = ctx.artifact.clone();
                         let target = ctx

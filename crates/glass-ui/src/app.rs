@@ -632,14 +632,51 @@ fn spawn_frida_probe(shell: &gpui::Entity<Shell>, cx: &mut App) {
             let device_manager = cx.update_entity(&entity, |shell, _cx| {
                 shell.device_manager.clone()
             });
-            // Move the actual frida call to the background
-            // executor so a stuck enumerate doesn't lock up the
-            // poll task.
+            // Run the actual frida call on a dedicated OS
+            // thread, with a hard timeout on the async side.
+            // frida-core's `enumerate_processes` can block
+            // indefinitely against a device that's connected
+            // but unresponsive (no frida-server running, ADB
+            // shim in a weird state, etc.). Without the
+            // timeout the probe future never completes, so
+            // `frida_probes` never gets a result and the chip
+            // sticks on "probing Frida…". We synthesise a
+            // ServerUnreachable result on timeout so the UI
+            // can fall through to the gadget-port check and,
+            // failing that, surface the inject option.
             let probe_id = id.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { glass_frida::FridaRuntime::probe(&probe_id) })
-                .await;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<
+                Result<glass_frida::ProbeReport, glass_frida::FridaError>,
+            >(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(glass_frida::FridaRuntime::probe(&probe_id));
+            });
+            const PROBE_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(4);
+            // Poll the channel + race against a timer task.
+            // 50 ms granularity is plenty for a 4 s budget and
+            // keeps the poll task itself responsive.
+            let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+            let result = loop {
+                match rx.try_recv() {
+                    Ok(r) => break r,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err(glass_frida::FridaError::ServerUnreachable);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        device = %id.serial,
+                        "frida probe timed out after {PROBE_TIMEOUT:?}; \
+                         treating as unreachable",
+                    );
+                    break Err(glass_frida::FridaError::ServerUnreachable);
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            };
             // Cross-check gadget reports against ADB. Frida-
             // core caches process listings aggressively and
             // continues to enumerate gadgeted apps after

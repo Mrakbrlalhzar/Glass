@@ -688,10 +688,10 @@ fn main() -> Result<()> {
         Cmd::PltProbe { path } => plt_probe(path),
         Cmd::Cfg { path, entry_hex } => {
             let entry = u64::from_str_radix(entry_hex.trim_start_matches("0x"), 16)?;
-            let bin = glass_arch_arm64::Arm64Binary::open(&path)?;
-            let symbols = glass_arch_arm64::SymbolMap::build(&bin.container);
+            let bin = glass_arch_arm::Arm64Binary::open(&path)?;
+            let symbols = glass_arch_arm::SymbolMap::build(&bin.container);
             let Some(cfg) =
-                glass_arch_arm64::build_function_cfg(&bin.container, &symbols, entry)
+                glass_arch_arm::build_function_cfg(&bin.container, &symbols, entry)
             else {
                 anyhow::bail!("no function at 0x{entry:x}");
             };
@@ -779,7 +779,7 @@ fn main() -> Result<()> {
 }
 
 fn plt_probe(path: PathBuf) -> Result<()> {
-    let bin = glass_arch_arm64::Arm64Binary::open(&path)?;
+    let bin = glass_arch_arm::Arm64Binary::open(&path)?;
     let c = &bin.container;
     println!("=== plt-like sections ===");
     for s in &c.sections {
@@ -831,8 +831,8 @@ fn dump_string_comments(
     limit: usize,
 ) -> Result<()> {
     use std::sync::Arc;
-    let bin = glass_arch_arm64::Arm64Binary::open(&path)?;
-    let symbols = glass_arch_arm64::SymbolMap::build(&bin.container);
+    let bin = glass_arch_arm::Arm64Binary::open(&path)?;
+    let symbols = glass_arch_arm::SymbolMap::build(&bin.container);
 
     // Find the requested text section.
     let pick = section_arg.as_deref();
@@ -854,6 +854,7 @@ fn dump_string_comments(
     let text = glass_ui::TextSectionBytes {
         base: text_sec.address,
         bytes: Arc::new(text_sec.bytes.clone()),
+        precomputed: None,
     };
     // Build a DataPeek from non-text non-debug non-zero-base sections.
     // See LoadedBundle::data_sections loader for matching filter.
@@ -950,8 +951,8 @@ fn run_gui(path: Option<PathBuf>, fresh: bool) -> Result<()> {
 }
 
 fn dump_arm64(path: PathBuf, limit: usize) -> Result<()> {
-    let binary = glass_arch_arm64::Arm64Binary::open(&path)?;
-    let rows = glass_arch_arm64::linear_sweep(&binary.container)?;
+    let binary = glass_arch_arm::Arm64Binary::open(&path)?;
+    let rows = glass_arch_arm::linear_sweep(&binary.container)?;
     println!("# {} ({} bytes) — {} rows", path.display(), binary.bytes.len(), rows.len());
     for row in rows.iter().take(limit) {
         println!(
@@ -973,9 +974,9 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
             }
             println!("  Native libs: {}", apk.native_libs.len());
             for lib in &apk.native_libs {
-                let sm = glass_arch_arm64::SymbolMap::build(&lib.binary.container);
+                let sm = glass_arch_arm::SymbolMap::build(&lib.binary.container);
                 println!("    {}/{}  ({} symbols)", lib.abi, lib.name, sm.len());
-                let mut plt_examples: Vec<&glass_arch_arm64::Symbol> = sm
+                let mut plt_examples: Vec<&glass_arch_arm::Symbol> = sm
                     .iter()
                     .filter(|s| s.display_name.ends_with("@plt"))
                     .take(5)
@@ -1011,7 +1012,7 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
             println!("  platform      : {:?}", ipa.info.platform);
             match &ipa.main_executable {
                 Some(bin) => {
-                    let sm = glass_arch_arm64::SymbolMap::build(&bin.container);
+                    let sm = glass_arch_arm::SymbolMap::build(&bin.container);
                     println!("  main exec     : loaded ({} bytes, {} symbols)", bin.bytes.len(), sm.len());
                     for sym in sm.iter().take(5) {
                         println!("      {:016x}  {}", sym.address, sym.display_name);
@@ -1019,7 +1020,7 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
                     if sm.len() > 5 {
                         println!("      … ({} more)", sm.len() - 5);
                     }
-                    let stub_examples: Vec<&glass_arch_arm64::Symbol> = sm
+                    let stub_examples: Vec<&glass_arch_arm::Symbol> = sm
                         .iter()
                         .filter(|s| s.display_name.ends_with("@stubs"))
                         .take(5)

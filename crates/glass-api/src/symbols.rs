@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use glass_arch_arm64::{Symbol, SymbolKind, SymbolMap, SymbolSources};
+use glass_arch_arm::{Symbol, SymbolKind, SymbolMap, SymbolSources};
 use serde::Serialize;
 
 use crate::bundle::{Bundle, ParsedArtifact};
 
-/// JSON-friendly projection of `glass_arch_arm64::Symbol`. Differs
+/// JSON-friendly projection of `glass_arch_arm::Symbol`. Differs
 /// from the upstream type only in that address is a hex string and
 /// `sources` is an explicit list of strings (the bitflags type
 /// doesn't serialise as JSON cleanly).
@@ -170,6 +170,6 @@ pub struct DemangleResult {
 pub fn demangle(name: &str) -> DemangleResult {
     DemangleResult {
         input: name.to_string(),
-        demangled: glass_arch_arm64::demangle_symbol(name),
+        demangled: glass_arch_arm::demangle_symbol(name),
     }
 }

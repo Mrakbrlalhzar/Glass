@@ -25,7 +25,7 @@ pub enum ListingRow {
         address: u64,
         bytes: [u8; 4],
         mnemonic: SharedString,
-        operands: Arc<Vec<glass_arch_arm64::Chunk>>,
+        operands: Arc<Vec<glass_arch_arm::Chunk>>,
         /// Trailing `; ...` comment chunks. Empty if no annotation.
         comment: SharedString,
         /// Control-flow arrow segments this row contributes to the
@@ -241,11 +241,21 @@ fn dest_x_reg(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Option<u
 
 pub fn build_listing_rows(
     text: &TextSectionBytes,
-    symbols: &glass_arch_arm64::SymbolMap,
+    symbols: &glass_arch_arm::SymbolMap,
     data: &DataPeek,
     progress: Option<&Arc<Mutex<Progress>>>,
 ) -> Vec<ListingRow> {
-    use glass_arch_arm64::format as fmt;
+    // ARMv7 sections come in with a precomputed `Vec<DecodedInsn>`
+    // attached — the upstream recursive-descent disassembler ran at
+    // load time to honor literal pools and the variable Thumb
+    // encoding width. Route those through a dedicated builder that
+    // walks the precomputed vector instead of the AArch64-only
+    // 4-byte-chunk path below.
+    if text.precomputed.is_some() {
+        let _ = data;
+        return build_listing_rows_armv7(text, symbols, progress);
+    }
+    use glass_arch_arm::format as fmt;
     let n = text.instruction_count();
     // Tracks the row index of the ADRP that produced each
     // x_page_bases entry. When a later ADD resolves an ADRP+ADD
@@ -302,9 +312,9 @@ pub fn build_listing_rows(
             }
             None => (
                 ".word".to_string(),
-                vec![glass_arch_arm64::Chunk {
+                vec![glass_arch_arm::Chunk {
                     text: format!("0x{word:08x}"),
-                    kind: glass_arch_arm64::ChunkKind::Immediate,
+                    kind: glass_arch_arm::ChunkKind::Immediate,
                     target: None,
                     target_text: None,
                 }],
@@ -333,7 +343,7 @@ pub fn build_listing_rows(
         // a resolved ADRP+ADD string peek.
         let mut named_in_operand = false;
         for op in &mut operands {
-            if op.kind != glass_arch_arm64::ChunkKind::Address {
+            if op.kind != glass_arch_arm::ChunkKind::Address {
                 continue;
             }
             let Some(t) = op.target else { continue };
@@ -498,7 +508,7 @@ pub fn build_listing_rows(
                                 let ops_mut = Arc::make_mut(operands);
                                 for op in ops_mut.iter_mut() {
                                     if op.kind
-                                        != glass_arch_arm64::ChunkKind::Address
+                                        != glass_arch_arm::ChunkKind::Address
                                     {
                                         continue;
                                     }
@@ -558,7 +568,7 @@ pub fn build_listing_rows(
 /// active arrows don't visually merge. Lane 0 is closest to the
 /// address column; higher lanes sit further left.
 fn assign_arrows(rows: &mut [ListingRow]) {
-    use glass_arch_arm64::format as fmt;
+    use glass_arch_arm::format as fmt;
     // Build address → row-index lookup, and segment the rows into
     // [start, end) function ranges using SymbolHeader positions.
     let mut addr_to_row: std::collections::HashMap<u64, usize> =
@@ -709,6 +719,109 @@ fn assign_arrows(rows: &mut [ListingRow]) {
         }
     }
 }
+/// ARMv7-specific listing builder. Walks the precomputed
+/// `Vec<DecodedInsn>` rather than decoding 4-byte chunks on demand;
+/// uses the `DecodedInsn` facade for mnemonic+operands text and
+/// terminator classification.
+///
+/// This is a bootstrap-quality implementation:
+///   * branch-target resolution is done via the facade's
+///     `branch_target()` plus a covering-symbol lookup.
+///   * AArch64's ADRP+ADD page-base fusion has no analog here —
+///     ARMv7's `ldr Rt, [pc, #imm]` decodes straight to an absolute
+///     `PcRelative` operand, which we surface as a comment when the
+///     pointed-at bytes look like a printable string.
+///   * arrows / basic-block separators use the same
+///     `assign_arrows` pass as the AArch64 path, but we hand it the
+///     pre-classified terminator info via a tiny shim.
+fn build_listing_rows_armv7(
+    text: &TextSectionBytes,
+    symbols: &glass_arch_arm::SymbolMap,
+    progress: Option<&Arc<Mutex<Progress>>>,
+) -> Vec<ListingRow> {
+    use armv8_encode::mc::InstructionInfo;
+    let Some(precomputed) = text.precomputed.as_ref() else {
+        return Vec::new();
+    };
+    let n = precomputed.len();
+    if let Some(p) = progress {
+        if let Ok(mut p) = p.lock() {
+            p.phase = SharedString::from("Disassembling…");
+            p.current = 0;
+            p.total = n;
+        }
+    }
+    let mut rows = Vec::with_capacity(n + n / 8);
+    for (i, insn) in precomputed.iter().enumerate() {
+        if i % 1024 == 0 {
+            if let Some(p) = progress {
+                if let Ok(mut p) = p.lock() {
+                    p.current = i;
+                }
+            }
+        }
+        let addr = insn.address();
+        // Symbol header. Thumb symbol addresses carry the low-bit
+        // marker, so check both forms.
+        let header = symbols
+            .at(addr)
+            .or_else(|| symbols.at(addr | 1));
+        if let Some(sym) = header {
+            rows.push(ListingRow::SymbolHeader {
+                name: SharedString::from(sym.display_name.clone()),
+            });
+        }
+        // Mnemonic + operands as a single Plain chunk for now.
+        // Splitting into typed chunks (Register / Immediate / …)
+        // happens in a follow-up — the listing renderer already
+        // accepts a single Plain chunk and just won't colourise the
+        // operands.
+        let text_line = insn.format_text();
+        let (mnemonic, operands) = match text_line.split_once(' ') {
+            Some((m, rest)) => (m.to_string(), rest.to_string()),
+            None => (text_line, String::new()),
+        };
+        let operand_chunk = glass_arch_arm::Chunk {
+            text: operands,
+            kind: glass_arch_arm::ChunkKind::Plain,
+            target: insn.branch_target(),
+            target_text: None,
+        };
+        let comment = SharedString::from("");
+        // Bytes: ARMv7 instructions are 2 or 4 bytes. The listing
+        // row carries `[u8; 4]` so we zero-pad 16-bit Thumb.
+        let raw = insn.raw_bytes();
+        let mut bytes4 = [0u8; 4];
+        let copy_len = raw.len().min(4);
+        bytes4[..copy_len].copy_from_slice(&raw[..copy_len]);
+        let terminates = insn.control_flow().is_terminator();
+        rows.push(ListingRow::Instruction {
+            address: addr,
+            bytes: bytes4,
+            mnemonic: SharedString::from(mnemonic),
+            operands: Arc::new(vec![operand_chunk]),
+            comment,
+            arrows: Arc::new(Vec::new()),
+        });
+        if terminates {
+            rows.push(ListingRow::BasicBlockSeparator {
+                arrows: Arc::new(Vec::new()),
+            });
+        }
+    }
+    if let Some(p) = progress {
+        if let Ok(mut p) = p.lock() {
+            p.current = n;
+            p.done = true;
+        }
+    }
+    // The arrow assigner re-decodes from `bytes` as AArch64; for
+    // ARMv7 that decode returns `Err` and the assigner emits no
+    // arrows. Leaving arrows empty here is fine for the bootstrap;
+    // a follow-up can add an ARMv7-aware assigner.
+    rows
+}
+
 pub fn listing_row_for_addr(rows: &[ListingRow], addr: u64) -> Option<usize> {
     // Linear is fine for now — listings are at most ~200k rows. A
     // BTreeMap<address, row_index> would scale better; revisit when

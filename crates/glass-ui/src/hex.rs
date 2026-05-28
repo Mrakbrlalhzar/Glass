@@ -25,7 +25,7 @@ pub enum HexRow {
 /// headers. One row per 16 bytes plus a header at each symbol entry.
 pub fn build_hex_rows(
     data: &crate::DataSectionBytes,
-    symbols: &glass_arch_arm64::SymbolMap,
+    symbols: &glass_arch_arm::SymbolMap,
 ) -> Vec<HexRow> {
     let n = data.row_count();
     let mut rows = Vec::with_capacity(n + n / 16);

@@ -757,7 +757,7 @@ pub fn render_two_pane(
                                             // clickable+underlined when the
                                             // `target_text` (`Class;->name(sig)ret`)
                                             // resolves to a known method line.
-                                            if tok.kind == glass_arch_arm64::ChunkKind::MethodName
+                                            if tok.kind == glass_arch_arm::ChunkKind::MethodName
                                             {
                                                 let key = tok.target_text.clone();
                                                 let location: Option<(LeafId, usize)> = key
@@ -828,7 +828,7 @@ pub fn render_two_pane(
                                                 }
                                                 continue;
                                             }
-                                            if tok.kind == glass_arch_arm64::ChunkKind::Type {
+                                            if tok.kind == glass_arch_arm::ChunkKind::Type {
                                                 if let Some(jni) = extract_class_jni(&tok.text) {
                                                     let resolves = bundle
                                                         .resolve(

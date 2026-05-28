@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-pub use glass_arch_arm64::thin_slice_macho;
+pub use glass_arch_arm::thin_slice_macho;
 
 /// Subset of `Info.plist` fields we currently surface in the UI.
 /// Anything we don't model here is still available via `extras` for

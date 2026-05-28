@@ -222,4 +222,4 @@ pub fn hash_file(path: impl AsRef<Path>) -> Result<HashResult> {
 // Re-export the underlying domain types so consumers depend on
 // glass-api only, not the whole crate graph.
 pub use glass_db::{ArtifactId, BundleId};
-pub use glass_arch_arm64::{Symbol, SymbolKind, SymbolMap, SymbolSources};
+pub use glass_arch_arm::{Symbol, SymbolKind, SymbolMap, SymbolSources};
