@@ -2660,24 +2660,52 @@ impl Shell {
         let _ = SymbolMap::default; // touch import for future use
         self.palette_bin_error = None;
         let pattern = self.palette_bin_query.text().to_string();
-        let atoms = match self.palette_bin_grammar {
-            crate::BinaryGrammar::Bytes => match glass_api::parse_pattern(&pattern) {
-                Ok(a) => a,
-                Err(e) => {
-                    self.palette_bin_error = Some(format!("{e:#}"));
-                    cx.notify();
-                    return;
+        // Build per-architecture atom sets. Bytes-grammar
+        // patterns are byte-literal so they apply to every
+        // architecture uniformly. Asm-grammar patterns may parse
+        // as AArch64, ARMv7, or both — we compile against each
+        // and only scan the artifacts that match.
+        use armv8_encode::container::Architecture;
+        let atoms_per_arch: Vec<(Option<Architecture>, Vec<glass_api::Atom>)> =
+            match self.palette_bin_grammar {
+                crate::BinaryGrammar::Bytes => match glass_api::parse_pattern(&pattern) {
+                    Ok(a) => vec![(None, a)],
+                    Err(e) => {
+                        self.palette_bin_error = Some(format!("{e:#}"));
+                        cx.notify();
+                        return;
+                    }
+                },
+                crate::BinaryGrammar::Asm => {
+                    match glass_api::compile_insn_atoms_for_all_arches(&pattern) {
+                        Ok(per_arch) => per_arch
+                            .into_iter()
+                            .map(|(a, atoms)| (Some(a), atoms))
+                            .collect(),
+                        Err(e) => {
+                            self.palette_bin_error = Some(format!("{e:#}"));
+                            cx.notify();
+                            return;
+                        }
+                    }
                 }
-            },
-            crate::BinaryGrammar::Asm => match glass_api::compile_insn_atoms(&pattern) {
-                Ok(atoms) => atoms,
-                Err(e) => {
-                    self.palette_bin_error = Some(format!("{e:#}"));
-                    cx.notify();
-                    return;
-                }
-            },
+            };
+        let atoms_for_arch = |arch: Architecture| -> Option<&[glass_api::Atom]> {
+            atoms_per_arch.iter().find_map(|(a, atoms)| match a {
+                None => Some(atoms.as_slice()),
+                Some(ar) if *ar == arch => Some(atoms.as_slice()),
+                _ => None,
+            })
         };
+        // Atoms for data-section scans (arch-agnostic byte hits).
+        // Use the first compiled set; in the Asm-grammar case
+        // that's whichever arch parsed first (typically AArch64
+        // when both worked). Data hits are best-effort and the
+        // preview always renders as hex, so the choice is fine.
+        let data_atoms: &[glass_api::Atom] = atoms_per_arch
+            .first()
+            .map(|(_, a)| a.as_slice())
+            .unwrap_or(&[]);
         let Some(bundle) = self.bundle().cloned() else {
             self.palette_bin_error = Some("no bundle loaded".to_string());
             cx.notify();
@@ -2709,12 +2737,18 @@ impl Shell {
             } else {
                 armv8_encode::container::Architecture::Aarch64
             };
+            let Some(atoms) = atoms_for_arch(arch) else {
+                // No atoms compiled for this artifact's arch —
+                // skip (e.g. an ARMv7 pattern with no AArch64
+                // form against an arm64 lib).
+                continue;
+            };
             let alabel = crate::search::short_artifact_label(&bundle, aid);
             let section_label = format!("{alabel} · {name}");
             let bytes: &[u8] = text.bytes.as_ref();
             scanned_sections += 1;
             total_bytes_scanned += bytes.len();
-            for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
+            for (start, slice_end) in glass_api::scan_section(atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = text.base + start as u64;
                 let preview = glass_api::build_preview(
@@ -2749,7 +2783,7 @@ impl Shell {
             let bytes: &[u8] = data.bytes.as_ref();
             scanned_sections += 1;
             total_bytes_scanned += bytes.len();
-            for (start, slice_end) in glass_api::scan_section(&atoms, bytes) {
+            for (start, slice_end) in glass_api::scan_section(data_atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = data.base + start as u64;
                 // arch is irrelevant for non-text matches (the

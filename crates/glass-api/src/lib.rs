@@ -30,6 +30,7 @@ mod export;
 mod insn_cursor;
 mod insn_matcher;
 mod insn_pattern;
+mod insn_pattern_armv7;
 mod insn_variants;
 mod patch_file;
 mod inspect;
@@ -172,8 +173,10 @@ pub use dex::{
 pub use disasm::{decode_word, DecodeResult, DisasmListing, DisasmRow};
 pub use insn_pattern::{
     compile as compile_insn_pattern, compile_at as compile_insn_at,
+    compile_insn_atoms_for_all_arches, compile_insn_atoms_for_arch,
     compile_to_atoms as compile_insn_atoms, InsnSearchResult,
 };
+pub use insn_pattern_armv7::compile_armv7_to_atoms;
 pub use insn_cursor::{classify as classify_insn_cursor, CursorContext, CursorKind};
 pub use insn_matcher::{match_variants as match_insn_variants, MatchCandidate};
 pub use insn_variants::{variants as insn_variants, SlotSpec, Variant};

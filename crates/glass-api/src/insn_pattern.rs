@@ -42,9 +42,12 @@ pub struct InsnSearchResult {
 }
 
 impl Bundle {
-    /// Compile `pattern` (one or more `;`-separated AArch64
+    /// Compile `pattern` (one or more `;`-separated assembly
     /// instructions) to byte atoms and scan the artifact for
-    /// them. Supports concrete operands and wildcards.
+    /// them. Supports concrete operands and wildcards. Routes
+    /// AArch64 artifacts through the AArch64 encoder and ARM
+    /// (ARMv7) artifacts through the Thumb/A32 encoders; other
+    /// architectures fail with a clear error.
     pub fn insn_search(
         &self,
         artifact_ref: &str,
@@ -52,13 +55,6 @@ impl Bundle {
         section_filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<InsnSearchResult> {
-        // insn-search compiles the pattern through the AArch64
-        // encoder, so it only makes sense against an AArch64
-        // artifact. ARMv7 artifacts can still use `bin-search`
-        // (byte-level — pattern is hex, not assembly); refuse
-        // typed-assembly here with a clear message rather than
-        // silently scanning AArch64-encoded bytes for an ARMv7
-        // target and returning nonsense.
         let art = self
             .artifacts
             .iter()
@@ -66,19 +62,8 @@ impl Bundle {
                 a.label == artifact_ref || a.id.to_string().starts_with(artifact_ref)
             })
             .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
-        if !matches!(
-            art.binary.container.architecture,
-            armv8_encode::container::Architecture::Aarch64
-        ) {
-            anyhow::bail!(
-                "insn-search uses AArch64-only typed assembly; \
-                 artifact {} is {:?} — use bin-search with a hex \
-                 pattern instead",
-                art.label,
-                art.binary.container.architecture,
-            );
-        }
-        let atoms = compile_to_atoms(pattern)
+        let arch = art.binary.container.architecture;
+        let atoms = compile_insn_atoms_for_arch(pattern, arch)
             .with_context(|| format!("compiling pattern {pattern:?}"))?;
         if atoms.is_empty() {
             anyhow::bail!("pattern compiled to zero atoms");
@@ -889,6 +874,67 @@ impl Bundle {
     }
 }
 
+// ---- Architecture-aware compile dispatcher --------------------
+
+/// Compile `pattern` to the byte atoms appropriate for the
+/// supplied architecture. AArch64 goes through the existing
+/// AArch64 path; ARM (ARMv7) routes to the Thumb/A32 compiler
+/// in `insn_pattern_armv7`. Other architectures error out.
+pub fn compile_insn_atoms_for_arch(
+    pattern: &str,
+    arch: armv8_encode::container::Architecture,
+) -> Result<Vec<Atom>> {
+    use armv8_encode::container::Architecture;
+    match arch {
+        Architecture::Aarch64 => compile_to_atoms(pattern),
+        Architecture::Arm => crate::insn_pattern_armv7::compile_armv7_to_atoms(pattern),
+        other => anyhow::bail!(
+            "insn-search: typed-assembly grammar isn't implemented for {other:?}; \
+             use bin-search with a hex pattern"
+        ),
+    }
+}
+
+/// Compile `pattern` for every architecture Glass's typed-
+/// assembly grammar supports, returning a `(arch, atoms)` entry
+/// per architecture whose parse + encode succeeded. Used by the
+/// global-scan palette path so an AArch64 pattern lands on
+/// AArch64 artifacts and an ARMv7 pattern lands on ARMv7
+/// artifacts, without the caller having to decide up-front.
+///
+/// Returns an error only if *no* architecture accepted the
+/// pattern. Per-arch errors are swallowed since "ARMv7 syntax
+/// doesn't parse as AArch64" is the expected case, not a
+/// failure mode.
+pub fn compile_insn_atoms_for_all_arches(
+    pattern: &str,
+) -> Result<Vec<(armv8_encode::container::Architecture, Vec<Atom>)>> {
+    use armv8_encode::container::Architecture;
+    let mut out = Vec::new();
+    let mut last_err: Option<String> = None;
+    match compile_to_atoms(pattern) {
+        Ok(a) => out.push((Architecture::Aarch64, a)),
+        Err(e) => last_err = Some(format!("aarch64: {e:#}")),
+    }
+    match crate::insn_pattern_armv7::compile_armv7_to_atoms(pattern) {
+        Ok(a) => out.push((Architecture::Arm, a)),
+        Err(e) => {
+            let msg = format!("armv7: {e:#}");
+            last_err = Some(match last_err {
+                Some(prev) => format!("{prev}; {msg}"),
+                None => msg,
+            });
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!(
+            "pattern doesn't parse as any supported architecture ({})",
+            last_err.unwrap_or_else(|| "no diagnostic".to_string())
+        );
+    }
+    Ok(out)
+}
+
 // ---- Tests ----------------------------------------------------
 
 #[cfg(test)]
@@ -1023,5 +1069,34 @@ mod tests {
     fn symbol_with_no_resolver_errors() {
         let err = compile_at("bl decode_packet", 0, None).expect_err("no resolver");
         assert!(format!("{err:#}").contains("resolver"));
+    }
+
+    /// End-to-end: compile an ARMv7 pattern through the typed-
+    /// assembly grammar and scan the libtool-checker.so fixture
+    /// for matches. Sanity-checks that the architecture dispatch
+    /// routes ARM artifacts to the Thumb encoder and that a
+    /// well-formed pattern returns >0 matches against a known-
+    /// non-empty Thumb binary.
+    #[test]
+    fn insn_search_finds_matches_in_armv7_fixture() {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("glass-arch-arm")
+            .join("tests")
+            .join("libtool-checker.so");
+        if !fixture.exists() {
+            // Path is relative to this manifest; tolerate skips
+            // if the fixture was relocated.
+            eprintln!("skipping: fixture not found at {}", fixture.display());
+            return;
+        }
+        let bundle = crate::bundle::open(&fixture).expect("open fixture bundle");
+        let label = bundle.artifacts[0].label.clone();
+        // `bx lr` is overwhelmingly common in Thumb prologues —
+        // expect plenty of hits.
+        let res = bundle
+            .insn_search(&label, "bx lr", None, Some(64))
+            .expect("insn_search");
+        assert!(res.total > 0, "expected matches for 'bx lr', got {}", res.total);
     }
 }

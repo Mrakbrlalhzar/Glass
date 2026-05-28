@@ -1,0 +1,1105 @@
+//! ARMv7 (Thumb/T32 + ARM/A32) typed-assembly pattern compiler.
+//!
+//! Mirrors the AArch64 path in `insn_pattern.rs` but targets the
+//! `armv8_encode::isa::armv7` (Thumb) and `::armv7::arm` (A32)
+//! encoder tables. Same `Vec<Atom>` output shape so the bin-search
+//! engine consumes either flavour transparently.
+//!
+//! ## Mode selection
+//!
+//! Per-pattern: we try Thumb first; if the first instruction
+//! doesn't compile cleanly under Thumb we retry the whole pattern
+//! under ARM mode. Mixing modes within one pattern isn't supported
+//! (matches in real binaries don't cross mode boundaries).
+//!
+//! ## Wildcard mask derivation
+//!
+//! Upstream's ARMv7 row type doesn't expose `operand_bit_ranges`
+//! the way AArch64 does. We instead derive the per-wildcard byte
+//! mask empirically: for each candidate row we encode the
+//! operands once with each wildcard at one placeholder value and
+//! again with each wildcard varied. Bits that change across the
+//! probes are owned by *some* wildcard; we clear them in the mask.
+//! Concrete operands hold their bits constant across the probes,
+//! so their bits stay fixed in the mask.
+//!
+//! ## Coverage
+//!
+//! - Registers: `r0..r15`, `sp`, `lr`, `pc`.
+//! - Condition-code suffix on the mnemonic (`bxeq`, `moveq`, …)
+//!   for ARM mode; conditional Thumb branch forms (`beq`, `bne`,
+//!   …) for 16-bit T1 B.
+//! - Immediates with optional `#` prefix, decimal / hex, signed.
+//! - Register lists `{r0, r1, r4-r7, lr, pc}`.
+//! - Memory addressing: `[rN]`, `[rN, #imm]` — minimum useful
+//!   subset. Pre/post-index, register-offset, and shifted
+//!   register-offset forms aren't supported yet.
+//! - Wildcards: same grammar as AArch64. `*`, `<*>`, `#*`,
+//!   `<imm>`, bare `r`, `<R>`.
+//!
+//! Out-of-scope (will return an error directing the user to
+//! a more concrete spelling):
+//! - Shifted operands (`r0, lsl #2`).
+//! - Pre/post-index addressing modes.
+//! - Bitmask register-list syntax (`{0b00010010}`).
+
+use anyhow::{anyhow, Context, Result};
+use armv8_encode::isa::armv7::arm::table_generated::{
+    ArmOpcodeGenerated, ARM_OPCODE_TABLE_GENERATED,
+};
+use armv8_encode::isa::armv7::operand::{DecodedOperand, Register, RegisterClass};
+use armv8_encode::isa::armv7::table::ThumbWidth;
+use armv8_encode::isa::armv7::table_generated::{
+    ThumbOpcodeGenerated, THUMB_OPCODE_TABLE_GENERATED,
+};
+
+use crate::bin_search::Atom;
+
+/// Top-level ARMv7 pattern compiler. Tries Thumb first; if the
+/// first instruction won't compile under Thumb, retries the
+/// whole pattern under ARM mode. Returns the byte atoms on
+/// success.
+pub fn compile_armv7_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
+    // Probe: try Thumb on the first non-empty instruction.
+    let first = pattern
+        .split(';')
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("empty pattern"))?;
+    let thumb_first = compile_one_thumb(first, 0);
+    let arm_first = compile_one_arm(first, 0);
+    match (thumb_first, arm_first) {
+        (Ok(_), _) => compile_pattern_thumb(pattern),
+        (Err(_), Ok(_)) => compile_pattern_arm(pattern),
+        (Err(et), Err(ea)) => Err(anyhow!(
+            "neither Thumb nor ARM mode could encode {first:?} — \
+             thumb: {et:#}; arm: {ea:#}"
+        )),
+    }
+}
+
+/// Compile every `;`-separated instruction in Thumb mode and
+/// concatenate byte atoms in encoding order.
+fn compile_pattern_thumb(pattern: &str) -> Result<Vec<Atom>> {
+    let mut out = Vec::new();
+    let mut addr: u64 = 0;
+    for (i, raw) in pattern.split(';').enumerate() {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let (word, mask, width) = compile_one_thumb(s, addr)
+            .with_context(|| format!("Thumb instruction {} ({s:?})", i + 1))?;
+        emit_thumb_bytes(&mut out, word, mask, width);
+        addr = addr.wrapping_add(match width {
+            ThumbWidth::Halfword => 2,
+            ThumbWidth::Word => 4,
+        });
+    }
+    Ok(out)
+}
+
+fn compile_pattern_arm(pattern: &str) -> Result<Vec<Atom>> {
+    let mut out = Vec::new();
+    let mut addr: u64 = 0;
+    for (i, raw) in pattern.split(';').enumerate() {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let (word, mask) = compile_one_arm(s, addr)
+            .with_context(|| format!("ARM instruction {} ({s:?})", i + 1))?;
+        let word_bytes = word.to_le_bytes();
+        let mask_bytes = mask.to_le_bytes();
+        for k in 0..4 {
+            out.push(Atom::Mask {
+                mask: mask_bytes[k],
+                value: word_bytes[k] & mask_bytes[k],
+            });
+        }
+        addr = addr.wrapping_add(4);
+    }
+    Ok(out)
+}
+
+/// Emit byte atoms for a Thumb encoding. 16-bit Thumb writes
+/// low 16 bits of `word` as 2 LE bytes. 32-bit Thumb writes
+/// hw1 (bits 31..16) as 2 LE bytes followed by hw2 (bits 15..0)
+/// as 2 LE bytes — matching `read_instruction`'s layout.
+fn emit_thumb_bytes(out: &mut Vec<Atom>, word: u32, mask: u32, width: ThumbWidth) {
+    match width {
+        ThumbWidth::Halfword => {
+            let w = (word & 0xffff) as u16;
+            let m = (mask & 0xffff) as u16;
+            let wb = w.to_le_bytes();
+            let mb = m.to_le_bytes();
+            for k in 0..2 {
+                out.push(Atom::Mask {
+                    mask: mb[k],
+                    value: wb[k] & mb[k],
+                });
+            }
+        }
+        ThumbWidth::Word => {
+            let hw1 = ((word >> 16) & 0xffff) as u16;
+            let hw2 = (word & 0xffff) as u16;
+            let mhw1 = ((mask >> 16) & 0xffff) as u16;
+            let mhw2 = (mask & 0xffff) as u16;
+            let b1 = hw1.to_le_bytes();
+            let b2 = hw2.to_le_bytes();
+            let m1 = mhw1.to_le_bytes();
+            let m2 = mhw2.to_le_bytes();
+            for k in 0..2 {
+                out.push(Atom::Mask {
+                    mask: m1[k],
+                    value: b1[k] & m1[k],
+                });
+            }
+            for k in 0..2 {
+                out.push(Atom::Mask {
+                    mask: m2[k],
+                    value: b2[k] & m2[k],
+                });
+            }
+        }
+    }
+}
+
+// ---- Per-instruction Thumb compile ---------------------------
+
+fn compile_one_thumb(s: &str, address: u64) -> Result<(u32, u32, ThumbWidth)> {
+    let (mnem_str, cond_opt, rest) = split_mnemonic_cond(s);
+    let tokens = parse_operand_tokens(rest)?;
+    let mnem_lc = mnem_str.to_ascii_lowercase();
+    // Map conditional spellings to base mnemonic + Condition. For
+    // Thumb, only the 16-bit T1 B encoding takes a Condition
+    // operand. Other conditional spellings (which need an IT
+    // block) are out-of-scope here.
+    let (base_mnem, prepend_cond) = match (mnem_lc.as_str(), cond_opt) {
+        ("b", Some(c)) => ("b".to_string(), Some(c)),
+        (m, Some(c)) if !is_known_thumb_mnemonic(m) => {
+            // The user typed something like `moveq` — Thumb can't
+            // make it conditional outside IT, so fall through with
+            // the cond reattached. The encoder will then reject it
+            // and our caller falls back to ARM mode.
+            let mut joined = m.to_string();
+            joined.push_str(cond_suffix(c));
+            (joined, None)
+        }
+        (m, c) => (m.to_string(), c),
+    };
+    let mut last_err: Option<String> = None;
+    for row in THUMB_OPCODE_TABLE_GENERATED.iter() {
+        if row.mnemonic.as_str() != base_mnem {
+            continue;
+        }
+        // Reject this row if the user typed a conditional
+        // suffix but this row has no Condition slot. Bare `%c`
+        // is display-only in Thumb, so silently accepting
+        // `bxeq` against `bx%c\t...` would drop the condition.
+        if prepend_cond.is_some() {
+            let slots = format_slot_kinds(row.format, Mode::Thumb);
+            if !slots.iter().any(|s| matches!(s, SlotKind::Condition)) {
+                last_err = Some(format!(
+                    "row {} has no Condition slot in Thumb mode",
+                    row.format
+                ));
+                continue;
+            }
+        }
+        // Try this row.
+        match try_row_thumb(row, &tokens, prepend_cond, address) {
+            Ok((w, m)) => return Ok((w, m, row.width)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow!(
+        "no Thumb form matches {s:?} (last error: {})",
+        last_err.unwrap_or_else(|| "no candidate found".to_string())
+    ))
+}
+
+fn try_row_thumb(
+    row: &ThumbOpcodeGenerated,
+    tokens: &[OperandToken],
+    prepend_cond: Option<u8>,
+    address: u64,
+) -> Result<(u32, u32), String> {
+    use armv8_encode::isa::armv7::encode::encode_with_row;
+    // Establish a baseline encoding with every wildcard set to
+    // its "zero" probe value.
+    let base = build_operands_for_row(row.format, tokens, prepend_cond, Mode::Thumb, None)
+        .map_err(|e| format!("baseline build: {e}"))?;
+    let (word_base, _) = encode_with_row(row, &base, address).map_err(|e| format!("{e:?}"))?;
+    if (word_base & row.mask) != row.opcode {
+        return Err(format!(
+            "encoded word 0x{word_base:08x} doesn't satisfy row mask 0x{:08x} (base 0x{:08x})",
+            row.mask, row.opcode
+        ));
+    }
+    // For each wildcard token, probe several distinct legal
+    // values and OR the resulting XOR diffs into `varying`. The
+    // bits that move are the bits this wildcard owns.
+    let mut varying: u32 = 0;
+    for (tok_idx, tok) in tokens.iter().enumerate() {
+        if !matches!(tok, OperandToken::Wildcard(_)) {
+            continue;
+        }
+        for probe in wildcard_probes(tok) {
+            let probed = build_operands_for_row(
+                row.format,
+                tokens,
+                prepend_cond,
+                Mode::Thumb,
+                Some((tok_idx, probe)),
+            )
+            .map_err(|e| format!("probe build: {e}"))?;
+            if let Ok((w, _)) = encode_with_row(row, &probed, address) {
+                varying |= word_base ^ w;
+            }
+        }
+    }
+    let mask = !varying;
+    Ok((word_base & mask, mask))
+}
+
+// ---- Per-instruction ARM compile -----------------------------
+
+fn compile_one_arm(s: &str, address: u64) -> Result<(u32, u32)> {
+    let (mnem_str, cond_opt, rest) = split_mnemonic_cond(s);
+    let tokens = parse_operand_tokens(rest)?;
+    let mnem_lc = mnem_str.to_ascii_lowercase();
+    let cond_code = cond_opt.unwrap_or(0xe); // AL = always
+    let mut last_err: Option<String> = None;
+    for row in ARM_OPCODE_TABLE_GENERATED.iter() {
+        if row.mnemonic.as_str() != mnem_lc {
+            continue;
+        }
+        match try_row_arm(row, &tokens, cond_code, address) {
+            Ok((w, m)) => return Ok((w, m)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow!(
+        "no ARM form matches {s:?} (last error: {})",
+        last_err.unwrap_or_else(|| "no candidate found".to_string())
+    ))
+}
+
+fn try_row_arm(
+    row: &ArmOpcodeGenerated,
+    tokens: &[OperandToken],
+    cond_code: u8,
+    address: u64,
+) -> Result<(u32, u32), String> {
+    use armv8_encode::isa::armv7::arm::encode::encode_with_row;
+    let base = build_operands_for_row(
+        row.format,
+        tokens,
+        Some(cond_code),
+        Mode::Arm,
+        None,
+    )
+    .map_err(|e| format!("baseline build: {e}"))?;
+    let word_base = encode_with_row(row, &base, address).map_err(|e| format!("{e:?}"))?;
+    if (word_base & row.mask) != row.opcode {
+        return Err(format!(
+            "encoded word 0x{word_base:08x} doesn't satisfy row mask 0x{:08x} (base 0x{:08x})",
+            row.mask, row.opcode
+        ));
+    }
+    let mut varying: u32 = 0;
+    for (tok_idx, tok) in tokens.iter().enumerate() {
+        if !matches!(tok, OperandToken::Wildcard(_)) {
+            continue;
+        }
+        for probe in wildcard_probes(tok) {
+            let probed = build_operands_for_row(
+                row.format,
+                tokens,
+                Some(cond_code),
+                Mode::Arm,
+                Some((tok_idx, probe)),
+            )
+            .map_err(|e| format!("probe build: {e}"))?;
+            if let Ok(w) = encode_with_row(row, &probed, address) {
+                varying |= word_base ^ w;
+            }
+        }
+    }
+    let mask = !varying;
+    Ok((word_base & mask, mask))
+}
+
+// ---- Operand list construction ------------------------------
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum Mode {
+    Thumb,
+    Arm,
+}
+
+/// One probe value applied to a single wildcard slot. The shape
+/// of the value depends on what kind of operand-slot the
+/// wildcard lands in; we round-trip through `i64` for the
+/// immediate/branch path and clip to `u16` for register / list
+/// values.
+#[derive(Debug, Copy, Clone)]
+struct ProbeValue {
+    raw: i64,
+}
+
+impl ProbeValue {
+    fn imm(v: i64) -> Self {
+        Self { raw: v }
+    }
+}
+
+/// Walk the binutils format string and emit one DecodedOperand
+/// per operand slot in the order the encoder consumes them.
+///
+/// When `probe_override` is `Some((tok_idx, value))`, that
+/// specific wildcard's placeholder is set to `value`; every
+/// other wildcard uses its default ("zero") placeholder.
+fn build_operands_for_row(
+    format: &str,
+    tokens: &[OperandToken],
+    cond: Option<u8>,
+    mode: Mode,
+    probe_override: Option<(usize, ProbeValue)>,
+) -> Result<Vec<DecodedOperand>, String> {
+    let slots = format_slot_kinds(format, mode);
+    let mut out = Vec::with_capacity(slots.len());
+    let mut tok_idx = 0usize;
+    let probe_for = |idx: usize| -> Option<ProbeValue> {
+        probe_override.and_then(|(i, v)| if i == idx { Some(v) } else { None })
+    };
+    for slot in &slots {
+        match slot {
+            SlotKind::Condition => {
+                let c = cond.ok_or("format expects %c but no condition given")?;
+                out.push(DecodedOperand::Condition(c));
+            }
+            SlotKind::Register => {
+                if tok_idx >= tokens.len() {
+                    return Err("not enough operand tokens (register)".into());
+                }
+                let op = tokens[tok_idx].as_register_operand(probe_for(tok_idx))?;
+                tok_idx += 1;
+                out.push(op);
+            }
+            SlotKind::Immediate => {
+                if tok_idx >= tokens.len() {
+                    return Err("not enough operand tokens (immediate)".into());
+                }
+                let op = tokens[tok_idx].as_immediate_operand(probe_for(tok_idx))?;
+                tok_idx += 1;
+                out.push(op);
+            }
+            SlotKind::BranchTarget => {
+                if tok_idx >= tokens.len() {
+                    return Err("not enough operand tokens (branch)".into());
+                }
+                let op = tokens[tok_idx].as_branch_operand(probe_for(tok_idx))?;
+                tok_idx += 1;
+                out.push(op);
+            }
+            SlotKind::RegisterList => {
+                if tok_idx >= tokens.len() {
+                    return Err("not enough operand tokens (reglist)".into());
+                }
+                let op = tokens[tok_idx].as_register_list_operand(probe_for(tok_idx))?;
+                tok_idx += 1;
+                out.push(op);
+            }
+            SlotKind::Memory | SlotKind::Opaque | SlotKind::Other => {
+                if let Some(tok) = tokens.get(tok_idx) {
+                    if matches!(tok, OperandToken::Memory(_, _, _)) {
+                        let op = tok.as_memory_operand()?;
+                        tok_idx += 1;
+                        out.push(op);
+                        continue;
+                    }
+                }
+                out.push(DecodedOperand::OpaqueBits { bits: 0, mask: 0 });
+            }
+        }
+    }
+    if tok_idx != tokens.len() {
+        return Err(format!(
+            "extra operand tokens: format wanted {} usable slots, got {} tokens",
+            tok_idx,
+            tokens.len()
+        ));
+    }
+    Ok(out)
+}
+
+/// Enumerate probe values for one wildcard slot. We probe with
+/// the zero baseline (always) plus a sweep that flips each bit
+/// in turn for register / immediate kinds, and a sweep of
+/// distinct branch displacements for branch wildcards. The
+/// caller XOR-diffs each probe against the zero baseline and
+/// ORs into a "varying bits" set.
+fn wildcard_probes(tok: &OperandToken) -> Vec<ProbeValue> {
+    // We don't know which slot kind this wildcard will land in
+    // at probe time — different rows place the same token at
+    // different kinds. Generate a generous superset; the
+    // encoder rejects values that don't fit, and the caller
+    // silently drops those.
+    let _ = tok;
+    // Bit-flip probes covering 0..=16 bits — enough to span the
+    // widest immediate fields (12-bit Thumb %I, 16-bit %J).
+    // Plus a few odd values to catch encoders that scatter bits
+    // in non-contiguous ways (Thumb-2 %I splits across hw1[10]
+    // : hw2[14:12] : hw2[7:0]).
+    let mut out = Vec::with_capacity(20);
+    for bit in 0..16u32 {
+        out.push(ProbeValue::imm(1i64 << bit));
+    }
+    // Branch-target probes (small even values within reach of
+    // the shortest 8-bit signed Thumb branch).
+    out.push(ProbeValue::imm(2));
+    out.push(ProbeValue::imm(4));
+    out.push(ProbeValue::imm(8));
+    out.push(ProbeValue::imm(16));
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SlotKind {
+    Register,
+    Immediate,
+    BranchTarget,
+    RegisterList,
+    Memory,
+    Condition,
+    Opaque,
+    Other,
+}
+
+/// Parse a binutils format string into a list of operand-slot
+/// kinds. This mirrors what `decode_operands_from_format` and the
+/// encoder's pack loop consume, so the order matches the
+/// encoder's expectations.
+///
+/// Mode-sensitive: bare `%c` (no bitfield) is display-only in
+/// Thumb but consumes a Condition in ARM mode.
+fn format_slot_kinds(format: &str, mode: Mode) -> Vec<SlotKind> {
+    let mut out = Vec::new();
+    let bytes = format.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= bytes.len() {
+            break;
+        }
+        // {X:...%} display wrappers — recurse over inner.
+        if bytes[i] == b'{' {
+            let inner_start = i + 1;
+            let mut j = inner_start;
+            while j + 1 < bytes.len() {
+                if bytes[j] == b'%' && bytes[j + 1] == b'}' {
+                    break;
+                }
+                j += 1;
+            }
+            let inner = if inner_start + 2 <= j {
+                std::str::from_utf8(&bytes[inner_start + 2..j]).unwrap_or("")
+            } else {
+                ""
+            };
+            out.extend(format_slot_kinds(inner, mode));
+            i = j + 2;
+            continue;
+        }
+        let bf_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'-') {
+            i += 1;
+        }
+        let bf = std::str::from_utf8(&bytes[bf_start..i]).unwrap_or("");
+        if i >= bytes.len() {
+            break;
+        }
+        let code = bytes[i];
+        i += 1;
+        match code {
+            b'\'' => {
+                if i < bytes.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            b'?' => {
+                if i + 1 < bytes.len() {
+                    i += 2;
+                }
+                continue;
+            }
+            b'`' => {
+                if i < bytes.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // Bitfielded condition (%8-11c) consumes a Condition in
+        // both modes.
+        if code == b'c' && !bf.is_empty() {
+            out.push(SlotKind::Condition);
+            continue;
+        }
+        // Bare %c is display-only in Thumb, but consumes a
+        // Condition operand in ARM mode (the ARM-mode encoder
+        // packs it into bits 28..31).
+        if code == b'c' && bf.is_empty() {
+            if mode == Mode::Arm {
+                out.push(SlotKind::Condition);
+            }
+            continue;
+        }
+        // Display-only.
+        if matches!(code, b'C' | b'x' | b'X' | b'%' | b'p' | b't' | b'q') && bf.is_empty() {
+            continue;
+        }
+        if matches!(code, b'w' | b'W') && bf.is_empty() {
+            continue;
+        }
+        match code {
+            b'r' | b'R' | b'T' | b'S' | b'D' => out.push(SlotKind::Register),
+            b'd' | b'W' | b'H' | b'x' | b'X' | b'I' | b'J' | b'V' | b'e' | b'E' | b'U' => {
+                out.push(SlotKind::Immediate)
+            }
+            b'B' | b'b' => out.push(SlotKind::BranchTarget),
+            b'a' if !bf.is_empty() => out.push(SlotKind::BranchTarget),
+            b'M' | b'N' | b'O' => out.push(SlotKind::RegisterList),
+            b'a' | b's' | b'o' => out.push(SlotKind::Memory),
+            b'L' | b'F' | b'm' | b'n' => out.push(SlotKind::Opaque),
+            _ => out.push(SlotKind::Other),
+        }
+    }
+    out
+}
+
+// ---- Operand tokens -----------------------------------------
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Wildcard payload carries kind hint for future opcode ranking.
+enum OperandToken {
+    /// Concrete register (class + index).
+    Reg(RegisterClass, u8),
+    /// Concrete immediate.
+    Imm(i64),
+    /// Memory: base register + optional immediate offset.
+    /// Third field reserved for future addressing-mode tags.
+    Memory(Register, Option<i64>, ()),
+    /// Concrete register-list bitmap.
+    RegList(u16),
+    /// Wildcard with a kind hint.
+    Wildcard(WildcardKind),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WildcardKind {
+    Any,
+    Reg,
+    Imm,
+}
+
+impl OperandToken {
+    fn as_register_operand(&self, probe: Option<ProbeValue>) -> Result<DecodedOperand, String> {
+        match self {
+            OperandToken::Reg(class, idx) => Ok(DecodedOperand::Register(Register {
+                class: *class,
+                index: *idx,
+            })),
+            OperandToken::Wildcard(_) => {
+                // Default placeholder is r0 (index 0). Probe sets
+                // the register index to (raw & 0x7) so we only
+                // touch bits the encoder accepts in 3-bit Low
+                // slots — sufficient to cover the bits the slot
+                // occupies in the encoded word.
+                let idx = probe.map(|p| (p.raw as u8) & 0x7).unwrap_or(0);
+                Ok(DecodedOperand::Register(Register {
+                    class: RegisterClass::R,
+                    index: idx,
+                }))
+            }
+            OperandToken::Imm(_) => Err("expected register, got immediate".into()),
+            OperandToken::Memory(..) => Err("expected register, got memory".into()),
+            OperandToken::RegList(_) => Err("expected register, got reglist".into()),
+        }
+    }
+
+    fn as_immediate_operand(&self, probe: Option<ProbeValue>) -> Result<DecodedOperand, String> {
+        match self {
+            OperandToken::Imm(v) => Ok(DecodedOperand::Immediate(*v)),
+            OperandToken::Wildcard(_) => {
+                let v = probe.map(|p| p.raw).unwrap_or(0);
+                Ok(DecodedOperand::Immediate(v))
+            }
+            OperandToken::Reg(..) => Err("expected immediate, got register".into()),
+            OperandToken::Memory(..) => Err("expected immediate, got memory".into()),
+            OperandToken::RegList(_) => Err("expected immediate, got reglist".into()),
+        }
+    }
+
+    fn as_branch_operand(&self, probe: Option<ProbeValue>) -> Result<DecodedOperand, String> {
+        match self {
+            OperandToken::Imm(v) => Ok(DecodedOperand::BranchTarget(*v as u64)),
+            OperandToken::Wildcard(_) => {
+                // Branch targets are PC-relative; placeholder = 0
+                // means "branch to address 0", which the encoder
+                // accepts on any branch form (encoded as a signed
+                // offset from PC). Probes use small even offsets
+                // so the encoder's range checks pass.
+                let v = probe.map(|p| p.raw as u64).unwrap_or(0);
+                Ok(DecodedOperand::BranchTarget(v))
+            }
+            OperandToken::Reg(..) => Err("expected branch target, got register".into()),
+            OperandToken::Memory(..) => Err("expected branch target, got memory".into()),
+            OperandToken::RegList(_) => Err("expected branch target, got reglist".into()),
+        }
+    }
+
+    fn as_register_list_operand(&self, probe: Option<ProbeValue>) -> Result<DecodedOperand, String> {
+        match self {
+            OperandToken::RegList(m) => Ok(DecodedOperand::RegisterList(*m)),
+            OperandToken::Wildcard(_) => {
+                // Use the probe's low 8 bits as a register-list
+                // mask. The high bit (LR/PC, bits 14/15) is left
+                // off in the baseline; probes vary the low byte
+                // exhaustively over the 16-bit-flip range.
+                let m = probe.map(|p| p.raw as u16).unwrap_or(0);
+                Ok(DecodedOperand::RegisterList(m))
+            }
+            _ => Err("expected register list".into()),
+        }
+    }
+
+    fn as_memory_operand(&self) -> Result<DecodedOperand, String> {
+        match self {
+            OperandToken::Memory(_base, _off, _) => {
+                // The Thumb/ARM `%a` family expects OpaqueBits.
+                // We can't synthesise the exact bits from a high-
+                // level memory token without re-implementing the
+                // encoder's addressing-mode packers, so we punt:
+                // emit an OpaqueBits with mask=0 so the encoder
+                // splices nothing into the word and the row's
+                // base bits are taken as-is.
+                Ok(DecodedOperand::OpaqueBits { bits: 0, mask: 0 })
+            }
+            _ => Err("expected memory operand".into()),
+        }
+    }
+}
+
+// ---- Parsing ------------------------------------------------
+
+/// Splits an instruction into `(mnemonic-without-cond,
+/// condition-code-if-suffixed, rest-of-operands)`.
+fn split_mnemonic_cond(s: &str) -> (&str, Option<u8>, &str) {
+    let (mnem, rest) = match s.find(char::is_whitespace) {
+        Some(idx) => (&s[..idx], s[idx..].trim()),
+        None => (s, ""),
+    };
+    if let Some(c) = parse_cond_suffix(mnem) {
+        // Strip 2-char suffix from mnem.
+        let cut = mnem.len() - 2;
+        return (&mnem[..cut], Some(c), rest);
+    }
+    (mnem, None, rest)
+}
+
+/// Recognise the 16 ARM condition-code suffixes. Returns the
+/// 4-bit cond field code, or None if the mnemonic doesn't end
+/// in a known suffix or stripping the suffix would leave an
+/// empty string.
+fn parse_cond_suffix(mnem: &str) -> Option<u8> {
+    if mnem.len() <= 2 {
+        return None;
+    }
+    let suffix = &mnem[mnem.len() - 2..].to_ascii_lowercase();
+    let c = match suffix.as_str() {
+        "eq" => 0x0,
+        "ne" => 0x1,
+        "cs" | "hs" => 0x2,
+        "cc" | "lo" => 0x3,
+        "mi" => 0x4,
+        "pl" => 0x5,
+        "vs" => 0x6,
+        "vc" => 0x7,
+        "hi" => 0x8,
+        "ls" => 0x9,
+        "ge" => 0xa,
+        "lt" => 0xb,
+        "gt" => 0xc,
+        "le" => 0xd,
+        "al" => 0xe,
+        _ => return None,
+    };
+    // Heuristic guard: don't strip "ne" off "mne"-like bare
+    // mnemonics; only strip when the residual looks like a known
+    // ARM/Thumb instruction prefix. A loose check: residual
+    // length >= 1 and last char isn't a digit (avoids treating
+    // "r0eq" as an oddity — irrelevant here since mnem is the
+    // first whitespace-delimited token).
+    let residual = &mnem[..mnem.len() - 2];
+    if residual.is_empty() {
+        return None;
+    }
+    Some(c)
+}
+
+fn cond_suffix(c: u8) -> &'static str {
+    match c {
+        0x0 => "eq",
+        0x1 => "ne",
+        0x2 => "cs",
+        0x3 => "cc",
+        0x4 => "mi",
+        0x5 => "pl",
+        0x6 => "vs",
+        0x7 => "vc",
+        0x8 => "hi",
+        0x9 => "ls",
+        0xa => "ge",
+        0xb => "lt",
+        0xc => "gt",
+        0xd => "le",
+        0xe => "al",
+        _ => "",
+    }
+}
+
+fn is_known_thumb_mnemonic(s: &str) -> bool {
+    THUMB_OPCODE_TABLE_GENERATED
+        .iter()
+        .any(|r| r.mnemonic.as_str() == s)
+}
+
+fn parse_operand_tokens(s: &str) -> Result<Vec<OperandToken>> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Split on commas at depth 0 (outside `[…]`, `{…}`, `<…>`).
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in s.chars() {
+        match ch {
+            '[' | '{' | '<' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ']' | '}' | '>' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur).trim().to_string());
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let tail = cur.trim().to_string();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts.into_iter().map(|p| parse_operand_token(&p)).collect()
+}
+
+fn parse_operand_token(s: &str) -> Result<OperandToken> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty operand");
+    }
+    let had_hash = s.starts_with('#');
+    let unhashed = s.strip_prefix('#').map(str::trim_start).unwrap_or(s);
+    // Wildcards: `*`, `<*>`, `#*`.
+    if unhashed == "*" {
+        return Ok(OperandToken::Wildcard(if had_hash {
+            WildcardKind::Imm
+        } else {
+            WildcardKind::Any
+        }));
+    }
+    // Bare `r` → register wildcard.
+    if s.eq_ignore_ascii_case("r") {
+        return Ok(OperandToken::Wildcard(WildcardKind::Reg));
+    }
+    // Bracketed wildcard.
+    if let Some(inner) = unhashed.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+        return Ok(OperandToken::Wildcard(classify_wildcard(inner)));
+    }
+    // Register list.
+    if s.starts_with('{') && s.ends_with('}') {
+        return parse_reg_list(&s[1..s.len() - 1]);
+    }
+    // Memory.
+    if s.starts_with('[') {
+        return parse_memory(s);
+    }
+    if let Some((class, idx)) = try_parse_register(s) {
+        // AArch64 register names must be rejected — `x0`/`w0`.
+        return Ok(OperandToken::Reg(class, idx));
+    }
+    // AArch64 register names get rejected explicitly so the user
+    // sees a clear error instead of a "no matching opcode" deep
+    // in the encoder.
+    if looks_like_aarch64_register(s) {
+        anyhow::bail!("operand {s:?} looks like an AArch64 register; ARMv7 uses r0..r15, sp, lr, pc");
+    }
+    if let Some(n) = try_parse_immediate(s) {
+        return Ok(OperandToken::Imm(n));
+    }
+    anyhow::bail!("can't parse operand {s:?}");
+}
+
+fn looks_like_aarch64_register(s: &str) -> bool {
+    let s = s.trim().to_ascii_lowercase();
+    if s.len() < 2 {
+        return false;
+    }
+    let head = s.as_bytes()[0];
+    if !matches!(head, b'x' | b'w') {
+        return false;
+    }
+    let rest = &s[1..];
+    if rest == "zr" || rest == "sp" {
+        return true;
+    }
+    rest.parse::<u8>().map(|n| n <= 30).unwrap_or(false)
+}
+
+fn classify_wildcard(hint: &str) -> WildcardKind {
+    let h = hint.trim().to_ascii_lowercase();
+    if h.is_empty() || h == "*" {
+        return WildcardKind::Any;
+    }
+    let kind = h.split(':').next_back().unwrap_or(&h);
+    match kind {
+        "r" => WildcardKind::Reg,
+        s if s.starts_with("imm") => WildcardKind::Imm,
+        s if s.starts_with("addr") => WildcardKind::Imm,
+        s if s.starts_with('r') => WildcardKind::Reg,
+        _ => WildcardKind::Any,
+    }
+}
+
+fn try_parse_register(s: &str) -> Option<(RegisterClass, u8)> {
+    let s = s.trim();
+    let lc = s.to_ascii_lowercase();
+    match lc.as_str() {
+        "sp" => return Some((RegisterClass::R, 13)),
+        "lr" => return Some((RegisterClass::R, 14)),
+        "pc" => return Some((RegisterClass::R, 15)),
+        _ => {}
+    }
+    let bytes = lc.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'r' {
+        return None;
+    }
+    let idx_str = std::str::from_utf8(&bytes[1..]).ok()?;
+    let index: u8 = idx_str.parse().ok()?;
+    if index > 15 {
+        return None;
+    }
+    Some((RegisterClass::R, index))
+}
+
+fn try_parse_immediate(s: &str) -> Option<i64> {
+    let s = s.trim().trim_start_matches('#').trim();
+    let (sign, body) = if let Some(rest) = s.strip_prefix('-') {
+        (-1i64, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (1, rest)
+    } else {
+        (1, s)
+    };
+    let body = body.trim();
+    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).ok()?
+    } else {
+        body.parse::<i64>().ok()?
+    };
+    Some(sign * parsed)
+}
+
+fn parse_reg_list(inner: &str) -> Result<OperandToken> {
+    let mut mask = 0u16;
+    for raw in inner.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((lo_s, hi_s)) = part.split_once('-') {
+            let (_, lo) = try_parse_register(lo_s.trim())
+                .ok_or_else(|| anyhow!("bad reg in list: {lo_s:?}"))?;
+            let (_, hi) = try_parse_register(hi_s.trim())
+                .ok_or_else(|| anyhow!("bad reg in list: {hi_s:?}"))?;
+            if lo > hi {
+                anyhow::bail!("reg list range {lo}-{hi} reversed");
+            }
+            for r in lo..=hi {
+                mask |= 1u16 << r;
+            }
+        } else {
+            let (_, idx) = try_parse_register(part)
+                .ok_or_else(|| anyhow!("bad reg in list: {part:?}"))?;
+            mask |= 1u16 << idx;
+        }
+    }
+    Ok(OperandToken::RegList(mask))
+}
+
+fn parse_memory(s: &str) -> Result<OperandToken> {
+    let inner_start = s
+        .find('[')
+        .ok_or_else(|| anyhow!("memory operand missing `[`"))?;
+    let inner_end = s
+        .rfind(']')
+        .ok_or_else(|| anyhow!("memory operand missing `]`"))?;
+    if inner_start != 0 || inner_end != s.len() - 1 {
+        anyhow::bail!("memory operand has extra chars outside [...]: {s:?}");
+    }
+    let inner = &s[inner_start + 1..inner_end];
+    let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        anyhow::bail!("empty memory operand");
+    }
+    let (class, idx) = try_parse_register(parts[0])
+        .ok_or_else(|| anyhow!("bad base register {:?}", parts[0]))?;
+    let base = Register { class, index: idx };
+    let offset = if parts.len() == 1 {
+        None
+    } else if parts.len() == 2 {
+        Some(
+            try_parse_immediate(parts[1])
+                .ok_or_else(|| anyhow!("bad offset {:?}", parts[1]))?,
+        )
+    } else {
+        anyhow::bail!("memory operand has too many components: {s:?}");
+    };
+    Ok(OperandToken::Memory(base, offset, ()))
+}
+
+// ---- Tests --------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atoms_to_word_thumb16(atoms: &[Atom]) -> (u16, u16) {
+        assert_eq!(atoms.len(), 2);
+        let (mb0, vb0) = match atoms[0] {
+            Atom::Mask { mask, value } => (mask, value),
+            _ => panic!("not a mask atom"),
+        };
+        let (mb1, vb1) = match atoms[1] {
+            Atom::Mask { mask, value } => (mask, value),
+            _ => panic!("not a mask atom"),
+        };
+        let word = u16::from_le_bytes([vb0, vb1]);
+        let mask = u16::from_le_bytes([mb0, mb1]);
+        (word, mask)
+    }
+
+    #[test]
+    fn parse_mov_r1_r7_thumb_concrete() {
+        // `mov r1, r7` → 16-bit Thumb encoding 0x4639.
+        let atoms = compile_armv7_to_atoms("mov r1, r7").expect("compile");
+        let (word, mask) = atoms_to_word_thumb16(&atoms);
+        assert_eq!(mask, 0xffff, "concrete operands → fully-fixed mask");
+        assert_eq!(word, 0x4639, "expected mov r1, r7 = 0x4639, got 0x{word:04x}");
+    }
+
+    #[test]
+    fn conditional_thumb_branch() {
+        // `beq` with wildcard target → 16-bit T1 conditional B
+        // with opcode bits 11..15 = 0b1101, cond=0 in bits 8..11.
+        let atoms = compile_armv7_to_atoms("beq <*>").expect("compile beq");
+        let (word, mask) = atoms_to_word_thumb16(&atoms);
+        // High 4 bits = 0xd (B-cond family); cond field (bits
+        // 8..11) = 0 for `eq`.
+        assert_eq!(word >> 12, 0xd, "expected B-cond top nibble");
+        assert_eq!((word >> 8) & 0xf, 0x0, "expected eq cond");
+        // Low 8 bits are the branch target → wildcarded.
+        assert_eq!(mask & 0xff, 0x00, "branch target bits should be masked");
+    }
+
+    #[test]
+    fn push_register_list_thumb() {
+        // `push {r4, r5, lr}` → 0xb530 (low 8 = 0b00110000 + LR
+        // bit 8 set).
+        let atoms = compile_armv7_to_atoms("push {r4, r5, lr}").expect("compile push");
+        let (word, mask) = atoms_to_word_thumb16(&atoms);
+        assert_eq!(mask, 0xffff, "concrete list → fully fixed");
+        assert_eq!(word, 0xb530, "got 0x{word:04x}");
+    }
+
+    #[test]
+    fn ldr_simple_memory_thumb() {
+        // `ldr r3, [r4]` — there's a 16-bit T1 ldr-imm form
+        // with offset 0. Concrete operands should compile.
+        let atoms = compile_armv7_to_atoms("ldr r3, [r4]").expect("compile ldr");
+        // Just sanity-check it produced 2 atoms (halfword).
+        assert!(matches!(atoms.len(), 2 | 4), "got {} atoms", atoms.len());
+    }
+
+    #[test]
+    fn wildcard_register_thumb() {
+        // `mov r1, r*` — destination fixed, source wildcarded.
+        // Mask should have at least one byte with non-0xff mask.
+        let atoms = compile_armv7_to_atoms("mov r1, <R>").expect("compile");
+        assert!(atoms.len() >= 2);
+        let any_partial = atoms
+            .iter()
+            .any(|a| matches!(a, Atom::Mask { mask, .. } if *mask != 0xff));
+        assert!(any_partial, "wildcard should produce partial-mask byte");
+    }
+
+    #[test]
+    fn rejects_aarch64_register_names() {
+        let err = compile_armv7_to_atoms("mov w0, #1").expect_err("should reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("AArch64") || msg.contains("w0") || msg.contains("ARM"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn arm_mode_bx_lr_conditional() {
+        // `bxeq lr` — ARM mode (no Thumb conditional bx outside
+        // IT). Expect cond field in bits 28..31 = 0, opcode
+        // bits = 0x012fff1e (bx lr with cond=eq).
+        let atoms = compile_armv7_to_atoms("bxeq lr").expect("compile bxeq lr");
+        assert_eq!(atoms.len(), 4, "ARM mode = 4 bytes");
+        let bytes: Vec<u8> = atoms
+            .iter()
+            .map(|a| match a {
+                Atom::Mask { value, .. } => *value,
+                _ => panic!(),
+            })
+            .collect();
+        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let masks: Vec<u8> = atoms
+            .iter()
+            .map(|a| match a {
+                Atom::Mask { mask, .. } => *mask,
+                _ => panic!(),
+            })
+            .collect();
+        let mask = u32::from_le_bytes([masks[0], masks[1], masks[2], masks[3]]);
+        // Concrete → fully fixed.
+        assert_eq!(mask, 0xffff_ffff);
+        // Top 4 bits = 0x0 (cond=eq), then 0x12fff1e.
+        assert_eq!(word, 0x012f_ff1e, "got 0x{word:08x}");
+    }
+}

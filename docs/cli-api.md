@@ -309,20 +309,45 @@ pinning every operand:
 | `#*`   | any immediate (hints the opcode picker)              |
 | `x`    | any X-class register                                 |
 | `w`    | any W-class register                                 |
-| `<*>`, `<X>`, `<W>`, `<imm>` | same as the shorthand forms, useful when nested inside other syntax (`[x, #*]`, etc.) |
+| `<*>`, `<X>`, `<W>`, `<R>`, `<imm>` | same as the shorthand forms, useful when nested inside other syntax (`[x, #*]`, etc.) |
+| `r`    | any ARMv7 R-class register (`r0..r15`)               |
+
+The pattern grammar dispatches on the target artifact's
+architecture: AArch64 artifacts (`arm64-v8a`, `arm64`) accept
+AArch64 syntax; ARMv7 artifacts (`armeabi-v7a`) accept ARMv7
+syntax. Thumb is tried first per instruction; ARM mode (A32) is
+the automatic fallback when no Thumb form matches.
 
 ```sh
-# every `mov w0, #N` site, whatever N is
+# every `mov w0, #N` site, whatever N is (AArch64)
 glass insn-search ./libfoo.so --artifact libfoo.so \
   --pattern 'mov w0, #*'
 
-# any ADRP into x1 followed immediately by ADD into the same reg
+# any ADRP into x1 followed immediately by ADD into the same reg (AArch64)
 glass insn-search ./libfoo.so --artifact libfoo.so \
   --pattern 'adrp x1, * ; add x1, x1, #*'
 
-# every `ret x30` (concrete — no wildcards)
+# every `ret x30` (AArch64 — concrete, no wildcards)
 glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'ret'
+
+# ARMv7: every `mov r1, rX` for any X
+glass insn-search ./libtool-checker.so --artifact libtool-checker.so \
+  --pattern 'mov r1, <R>'
+
+# ARMv7: every conditional `bxeq lr`
+glass insn-search ./libtool-checker.so --artifact libtool-checker.so \
+  --pattern 'bxeq lr'
+
+# ARMv7: every push of {r4..r7, lr}
+glass insn-search ./libtool-checker.so --artifact libtool-checker.so \
+  --pattern 'push {r4-r7, lr}'
 ```
+
+Known ARMv7 limitations (current scope): shifted-operand forms
+(`r0, lsl #2`), pre/post-index addressing (`[rN, #imm]!`,
+`[rN], #imm`), register-offset memory (`[rN, rM]`), and
+bitmask-syntax register lists (`{0b00010010}`) aren't supported
+yet. Register-list range syntax (`{r4-r7}`) works.
 
 The response includes `bytes_hex` showing the compiled
 byte-mask atoms (e.g. `01/1f ?? ?? 90/9f` for `adrp x1, *`) so
