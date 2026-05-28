@@ -10,13 +10,18 @@
 //! `variants()` list on every call, scoring each entry by:
 //!
 //! 1. Mnemonic prefix match (longest-common-prefix length).
+//!    For ARMv7 variants with `cond_suffix_allowed`, the input
+//!    is also tested against `mnemonic + <cond-prefix>` so
+//!    typing `bxeq` matches the base-mnemonic `bx` row.
 //! 2. Operand prefix compatibility (does what the user has
 //!    typed so far fit the variant's slot layout up to the
-//!    same point?).
+//!    same point?). ISA-aware: typing `r1` rules out every
+//!    AArch64 variant; typing `w0`/`x0` rules out every ARMv7
+//!    variant.
 //!
-//! Returned candidates are deduplicated by `template` (the
-//! armv8-encode opcode table has multiple table entries that
-//! collapse to the same user-visible form via aliasing).
+//! Returned candidates are deduplicated by `template` (multiple
+//! table entries collapse to the same user-visible form via
+//! aliasing).
 //!
 //! The ranking is a simple score:
 //! - +10 per matched mnemonic character
@@ -24,11 +29,10 @@
 //!   what the user typed
 //! - -1 per slot still empty (so shorter variants surface first
 //!   when nothing tells them apart)
-//!
-//! Anything contradictory (e.g. user typed `w0` but the slot is
-//! an X register) drops the variant from the list entirely.
 
 use crate::insn_variants::{variants, SlotSpec, Variant};
+#[cfg(test)]
+use crate::insn_variants::VariantIsa;
 
 #[derive(Debug, Clone)]
 pub struct MatchCandidate {
@@ -82,8 +86,8 @@ fn tokenize_operands(s: &str) -> Vec<&str> {
     let mut depth = 0i32;
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'[' => depth += 1,
-            b']' => depth -= 1,
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => depth -= 1,
             b',' if depth == 0 => {
                 out.push(s[start..i].trim());
                 start = i + 1;
@@ -96,8 +100,11 @@ fn tokenize_operands(s: &str) -> Vec<&str> {
 }
 
 fn score_variant(v: &Variant, mnem_input: &str, operand_tokens: &[&str]) -> Option<i32> {
-    // Mnemonic prefix check (case-insensitive).
-    if !v.mnemonic.starts_with(&mnem_input.to_ascii_lowercase()) {
+    // Mnemonic prefix check (case-insensitive). For variants
+    // whose mnemonic admits a conditional suffix, also try
+    // matching `mnemonic + cond-prefix`.
+    let lc = mnem_input.to_ascii_lowercase();
+    if !mnemonic_prefix_matches(v, &lc) {
         return None;
     }
 
@@ -118,6 +125,34 @@ fn score_variant(v: &Variant, mnem_input: &str, operand_tokens: &[&str]) -> Opti
     Some(score)
 }
 
+/// Returns true iff `input_lc` (lowercase) is a prefix of (or
+/// equal to) the variant's textual mnemonic, OR — for variants
+/// with `cond_suffix_allowed` — a prefix of `mnemonic + <known
+/// cond suffix prefix>`.
+fn mnemonic_prefix_matches(v: &Variant, input_lc: &str) -> bool {
+    if v.mnemonic.starts_with(input_lc) {
+        return true;
+    }
+    if !v.cond_suffix_allowed {
+        return false;
+    }
+    let Some(tail) = input_lc.strip_prefix(v.mnemonic) else {
+        return false;
+    };
+    // Empty tail is the base case (covered above); here tail is
+    // non-empty. Accept it if it's a 1-or-2 character prefix of
+    // any known cond suffix.
+    if tail.len() > 2 {
+        return false;
+    }
+    KNOWN_CONDS.iter().any(|c| c.starts_with(tail))
+}
+
+const KNOWN_CONDS: &[&str] = &[
+    "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le",
+    "al",
+];
+
 /// Best-effort: does `token` (possibly partial) look compatible
 /// with `slot`? Empty token = "user hasn't started typing this
 /// slot yet" → always compatible.
@@ -127,6 +162,17 @@ fn operand_consistent(token: &str, slot: SlotSpec) -> bool {
         return true;
     }
     let lower = t.to_ascii_lowercase();
+
+    // Cross-ISA hard rejections. Typing `r1` in a slot that's
+    // a clearly-AArch64 GP/FP register rules out the variant.
+    // Typing `w0` / `x0` in an Arm slot does the same.
+    if slot.is_aarch64() && looks_like_arm_only_token(&lower) {
+        return false;
+    }
+    if slot.is_armv7() && looks_like_aarch64_only_token(&lower) {
+        return false;
+    }
+
     match slot {
         SlotSpec::Gp { sp } => looks_like_w_reg(&lower, sp) || looks_like_x_reg(&lower, sp),
         SlotSpec::FpReg => starts_with_any(&lower, &['b', 'h', 's', 'd', 'q']),
@@ -134,9 +180,18 @@ fn operand_consistent(token: &str, slot: SlotSpec) -> bool {
         SlotSpec::Imm => starts_with_immediate(&lower),
         SlotSpec::PcRel => starts_with_immediate(&lower),
         SlotSpec::Mem => lower.starts_with('['),
-        SlotSpec::Cond => true, // cond codes are 2-letter, defer judging until full
+        SlotSpec::Cond => true,
         SlotSpec::System => true,
         SlotSpec::Other => true,
+
+        SlotSpec::ArmGp { sp } => looks_like_arm_reg(&lower, sp),
+        SlotSpec::ArmImm => starts_with_immediate(&lower),
+        SlotSpec::ArmMem => lower.starts_with('['),
+        SlotSpec::ArmRegList => lower.starts_with('{'),
+        SlotSpec::ArmCond => true,
+        // Shifted operand starts with a register.
+        SlotSpec::ArmShifted => looks_like_arm_reg(&lower, true),
+        SlotSpec::ArmBranch => starts_with_immediate(&lower) || lower.starts_with("0x"),
     }
 }
 
@@ -147,7 +202,7 @@ fn starts_with_any(s: &str, chars: &[char]) -> bool {
 
 fn starts_with_immediate(s: &str) -> bool {
     let Some(c) = s.chars().next() else { return false };
-    c == '#' || c == '-' || c == '0' || c.is_ascii_digit()
+    c == '#' || c == '-' || c == '+' || c == '0' || c.is_ascii_digit()
 }
 
 fn looks_like_w_reg(s: &str, sp: bool) -> bool {
@@ -176,6 +231,66 @@ fn looks_like_x_reg(s: &str, sp: bool) -> bool {
     false
 }
 
+/// Is `s` plausibly the start of an ARMv7 GPR? Includes the
+/// numbered forms (`r0..r15`), the named ones (`sp`, `lr`, `pc`),
+/// and partial prefixes of those so we don't kill candidates
+/// mid-type.
+fn looks_like_arm_reg(s: &str, _sp_allowed: bool) -> bool {
+    // Named regs (and their 1-char prefixes).
+    if matches!(s, "s" | "sp" | "l" | "lr" | "p" | "pc") {
+        return true;
+    }
+    // `r`, `r0`, `r12`, …
+    if let Some(rest) = s.strip_prefix('r') {
+        return rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Strict ARMv7-only tokens: text that can ONLY be an ARMv7
+/// register (used to kill AArch64 variants). Note `s`/`sp` is
+/// shared between ISAs so we exclude it here.
+fn looks_like_arm_only_token(s: &str) -> bool {
+    // r0..r15 or `r` followed by digits.
+    if let Some(rest) = s.strip_prefix('r') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    matches!(s, "lr" | "pc")
+}
+
+/// Strict AArch64-only tokens. `w0`, `x0`, `wzr`, `xzr`, `v0`,
+/// `b0`/`h0`/`s0`/`d0`/`q0` followed by digits — any of these
+/// can't be ARMv7 register names.
+fn looks_like_aarch64_only_token(s: &str) -> bool {
+    // w<digit>+ or x<digit>+ but NOT bare "w"/"x" (those are
+    // also ambiguous in-progress typing).
+    if let Some(rest) = s.strip_prefix('w') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        if rest == "zr" || rest == "sp" {
+            return true;
+        }
+    }
+    if let Some(rest) = s.strip_prefix('x') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        if rest == "zr" {
+            return true;
+        }
+    }
+    // v0..v31 vector regs.
+    if let Some(rest) = s.strip_prefix('v') {
+        if !rest.is_empty() && rest.chars().take_while(|c| c.is_ascii_digit()).count() > 0 {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,9 +303,15 @@ mod tests {
 
     #[test]
     fn mov_narrows() {
-        let m = match_variants("mov", 50);
+        let m = match_variants("mov", 200);
         assert!(!m.is_empty());
-        assert!(m.iter().all(|c| c.variant.mnemonic.starts_with("mov")));
+        // Includes both AArch64 and ARMv7 mov variants.
+        let has_aa64 = m.iter().any(|c| c.variant.isa == VariantIsa::Aarch64);
+        let has_arm = m
+            .iter()
+            .any(|c| matches!(c.variant.isa, VariantIsa::ArmThumb | VariantIsa::ArmA32));
+        assert!(has_aa64, "mov should include at least one AArch64 variant");
+        assert!(has_arm, "mov should include at least one ARMv7 variant");
     }
 
     #[test]
@@ -213,5 +334,54 @@ mod tests {
     fn tokenizer_handles_bracketed_mem() {
         let toks = tokenize_operands("x0, [sp, #16]");
         assert_eq!(toks, vec!["x0", "[sp, #16]"]);
+    }
+
+    // ---- ARMv7 autocomplete tests ----
+
+    #[test]
+    fn arm_mov_r1_drops_aarch64() {
+        let m = match_variants("mov r1, ", 200);
+        assert!(!m.is_empty(), "should still have ARMv7 candidates");
+        for c in &m {
+            assert!(
+                matches!(c.variant.isa, VariantIsa::ArmThumb | VariantIsa::ArmA32),
+                "expected ARMv7 only, got {:?} ({})",
+                c.variant.isa,
+                c.variant.template
+            );
+        }
+    }
+
+    #[test]
+    fn arm_bxeq_present() {
+        let m = match_variants("bxeq", 50);
+        assert!(
+            m.iter()
+                .any(|c| matches!(c.variant.isa, VariantIsa::ArmThumb | VariantIsa::ArmA32)),
+            "bxeq should match at least one ARMv7 variant"
+        );
+    }
+
+    #[test]
+    fn arm_push_shows_reglist() {
+        let m = match_variants("push", 50);
+        assert!(
+            m.iter().any(|c| c.variant.template.contains("{regs}")),
+            "push should surface a variant with the {{regs}} placeholder"
+        );
+    }
+
+    #[test]
+    fn aarch64_w0_drops_arm() {
+        let m = match_variants("mov w0, ", 200);
+        assert!(!m.is_empty(), "should still have AArch64 candidates");
+        for c in &m {
+            assert!(
+                c.variant.isa == VariantIsa::Aarch64,
+                "expected AArch64 only, got {:?} ({})",
+                c.variant.isa,
+                c.variant.template
+            );
+        }
     }
 }
