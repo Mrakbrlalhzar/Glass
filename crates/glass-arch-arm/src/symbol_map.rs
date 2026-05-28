@@ -141,10 +141,25 @@ impl SymbolMap {
         // We surface those as function symbols so the listing renders
         // a symbol header at the stub and any `bl <stub>` call shows
         // the demangled extern name.
+        //
+        // Two things differ from the other symbol sources here:
+        //
+        //   1. The synthetic `@plt` name is *more* informative than
+        //      whatever symtab entry might have landed at the same
+        //      address (often a `$a`/`$t`/`$d` ARM mapping symbol or
+        //      a generic stub mark) — so this pass *overwrites* any
+        //      pre-existing non-`@plt` name on collisions instead of
+        //      using the default first-writer-wins rule.
+        //   2. PLT slot size is architecture-specific: AArch64 = 16,
+        //      ARM = 12. Both ISAs use 4-byte instructions in the
+        //      stub but ARM PLT slots have three instructions where
+        //      AArch64 stubs have four (plus padding).
         if let Some(image) = container.elf_image.as_ref() {
-            // PLT stubs on AArch64 are 16 bytes per slot. We use that
-            // as the synthetic symbol's size so `covering` works.
-            const AARCH64_PLT_SLOT: u64 = 16;
+            let plt_slot = match container.architecture {
+                armv8_encode::container::Architecture::Aarch64 => 16u64,
+                armv8_encode::container::Architecture::Arm => 12u64,
+                _ => 16u64,
+            };
             for (sym_id, plt_addr) in &image.plt_stubs {
                 let Some(dyn_sym) = container.symbols.get(sym_id.0) else {
                     continue;
@@ -152,17 +167,27 @@ impl SymbolMap {
                 let imported = &dyn_sym.name;
                 let raw = format!("{imported}@plt");
                 let display_name = format!("{}@plt", demangle(imported));
-                insert_or_merge(
-                    &mut by_address,
-                    Symbol {
-                        name: raw,
-                        display_name,
-                        address: *plt_addr,
-                        size: AARCH64_PLT_SLOT,
-                        kind: SymbolKind::Function,
-                        sources: SymbolSources::SYMTAB,
-                    },
-                );
+                let plt_sym = Symbol {
+                    name: raw,
+                    display_name,
+                    address: *plt_addr,
+                    size: plt_slot,
+                    kind: SymbolKind::Function,
+                    sources: SymbolSources::SYMTAB,
+                };
+                // Replace whatever's there if the existing entry
+                // isn't already a `@plt` form (i.e. don't clobber
+                // ourselves on a duplicate iteration; do clobber
+                // mapping / generic symbols that drowned us out).
+                match by_address.get(plt_addr) {
+                    Some(existing) if existing.name.ends_with("@plt") => {
+                        // Keep the existing PLT entry; merge sources only.
+                        insert_or_merge(&mut by_address, plt_sym);
+                    }
+                    _ => {
+                        by_address.insert(*plt_addr, plt_sym);
+                    }
+                }
             }
         }
 
