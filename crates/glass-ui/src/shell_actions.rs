@@ -2746,11 +2746,37 @@ impl Shell {
             let alabel = crate::search::short_artifact_label(&bundle, aid);
             let section_label = format!("{alabel} · {name}");
             let bytes: &[u8] = text.bytes.as_ref();
+            // For ARMv7 (variable-width Thumb + literal pools
+            // inline with code) raw byte scanning produces many
+            // matches that don't correspond to real instruction
+            // starts — they may sit mid-instruction inside a
+            // Thumb-2 32-bit encoding, or inside a literal pool's
+            // 4-byte pointer word. Opening any of those in the
+            // listing would either land the cursor on the
+            // *containing* code row (confusing) or on a
+            // pre-pool branch (very confusing). Build a set of
+            // real instruction-start addresses from the
+            // precomputed disassembly and filter byte hits to
+            // those. AArch64 doesn't need this — every 4-byte
+            // aligned word is an instruction or a known data
+            // hole that already excluded.
+            let insn_starts: Option<std::collections::HashSet<u64>> = text
+                .precomputed
+                .as_ref()
+                .map(|v| {
+                    use armv8_encode::mc::InstructionInfo;
+                    v.iter().map(|i| i.address()).collect()
+                });
             scanned_sections += 1;
             total_bytes_scanned += bytes.len();
             for (start, slice_end) in glass_api::scan_section(atoms, bytes) {
                 let abs_end = start + slice_end;
                 let addr = text.base + start as u64;
+                if let Some(starts) = insn_starts.as_ref() {
+                    if !starts.contains(&addr) {
+                        continue;
+                    }
+                }
                 let preview = glass_api::build_preview(
                     true,
                     arch,

@@ -816,13 +816,56 @@ fn build_listing_rows_armv7(
         // accepts a single Plain chunk and just won't colourise the
         // operands.
         let text_line = insn.format_text();
-        let (mnemonic, operands) = match text_line.split_once(' ') {
+        let (mnemonic, mut operands) = match text_line.split_once(' ') {
             Some((m, rest)) => (m.to_string(), rest.to_string()),
             None => (text_line, String::new()),
         };
+        // Relabel branch / PC-relative targets to symbol names
+        // when the target hits a known symbol. The ARMv7
+        // formatter emits these as `0x{addr:x}` — we string-
+        // replace that token with the symbol's `display_name` so
+        // the listing reads `bl pthread_mutex_init` instead of
+        // `bl 0x216ac`. The Chunk's `target: Option<u64>` still
+        // carries the absolute address so click-through works.
+        // We check both `branch_target()` (the typical direct
+        // branch) and `pcrel_target()` (literal-pool / movw+movt
+        // resolved by upstream — covered via the chunk-target,
+        // not relabelled here because the literal-pool addr is
+        // a data address that already gets a comment).
+        let mut named_in_operand = false;
+        let mut chunk_kind = glass_arch_arm::ChunkKind::Plain;
+        if let Some(t) = insn.branch_target() {
+            let needle = format!("0x{t:x}");
+            // `symbols.at(t)` matches the AArch64-style entry; for
+            // Thumb the symtab carries `t | 1`, so also check the
+            // marker form.
+            let sym = symbols.at(t).or_else(|| symbols.at(t | 1));
+            if let Some(sym) = sym {
+                let off = t.saturating_sub(sym.address & !1u64);
+                let label = if off == 0 {
+                    sym.display_name.clone()
+                } else {
+                    format!("{}+0x{off:x}", sym.display_name)
+                };
+                if operands.contains(&needle) {
+                    operands = operands.replacen(&needle, &label, 1);
+                    named_in_operand = true;
+                    chunk_kind = glass_arch_arm::ChunkKind::Address;
+                }
+            } else if let Some(sym) = symbols.covering(t) {
+                let off = t - (sym.address & !1u64);
+                let label = format!("{}+0x{off:x}", sym.display_name);
+                if operands.contains(&needle) {
+                    operands = operands.replacen(&needle, &label, 1);
+                    named_in_operand = true;
+                    chunk_kind = glass_arch_arm::ChunkKind::Address;
+                }
+            }
+        }
+        let _ = named_in_operand;
         let operand_chunk = glass_arch_arm::Chunk {
             text: operands,
-            kind: glass_arch_arm::ChunkKind::Plain,
+            kind: chunk_kind,
             target: insn.branch_target(),
             target_text: None,
         };
@@ -922,11 +965,143 @@ fn build_listing_rows_armv7(
             p.done = true;
         }
     }
-    // The arrow assigner re-decodes from `bytes` as AArch64; for
-    // ARMv7 that decode returns `Err` and the assigner emits no
-    // arrows. Leaving arrows empty here is fine for the bootstrap;
-    // a follow-up can add an ARMv7-aware assigner.
+    // ARMv7-aware control-flow arrows. The AArch64 path's
+    // `assign_arrows` decodes each row's bytes as a 4-byte
+    // AArch64 instruction to find branches — that won't work for
+    // variable-width Thumb. We walk the precomputed vector
+    // instead and use the architecture-neutral `mc::ControlFlow`
+    // classification, which gives us "Jump / ConditionalJump /
+    // call / return / fall" for free across all three ISAs.
+    assign_arrows_armv7(&mut rows, precomputed);
     rows
+}
+
+/// Build arrow segments for an ARMv7 listing using the precomputed
+/// `Vec<DecodedInsn>`'s `ControlFlow` classifications. Mirrors the
+/// shape of [`assign_arrows`] but skips the bytes-re-decode step
+/// (which is AArch64-only).
+fn assign_arrows_armv7(
+    rows: &mut [ListingRow],
+    precomputed: &[glass_arch_arm::DecodedInsn],
+) {
+    use armv8_encode::mc::{ControlFlow, InstructionInfo};
+    // address → row-index lookup; function ranges split at every
+    // SymbolHeader (matches the AArch64 path's segmentation rule).
+    let mut addr_to_row: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut header_rows: Vec<usize> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        match r {
+            ListingRow::SymbolHeader { .. } => header_rows.push(i),
+            ListingRow::Instruction { address, .. } => {
+                addr_to_row.insert(*address, i);
+            }
+            _ => {}
+        }
+    }
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut prev = 0usize;
+    for &h in &header_rows {
+        if h > prev {
+            ranges.push((prev, h));
+        }
+        prev = h;
+    }
+    if prev < rows.len() {
+        ranges.push((prev, rows.len()));
+    }
+
+    // Build the pending-arrow list straight from ControlFlow.
+    #[derive(Clone)]
+    struct PendingArrow {
+        src_row: usize,
+        tgt_row: usize,
+        style: ArrowStyle,
+    }
+    let mut pending: Vec<PendingArrow> = Vec::new();
+    for insn in precomputed {
+        let (target, style) = match insn.control_flow() {
+            ControlFlow::Jump { target } => (target, ArrowStyle::Solid),
+            ControlFlow::ConditionalJump { target, .. } => (target, ArrowStyle::Dotted),
+            // Direct calls and the rest don't draw in-function
+            // arrows — `Call`'s target is usually outside the
+            // function, and indirect / return / fall don't have
+            // a known direct target.
+            _ => continue,
+        };
+        let src_addr = insn.address();
+        let Some(&src_row) = addr_to_row.get(&src_addr) else { continue };
+        let Some(&tgt_row) = addr_to_row.get(&target) else { continue };
+        // Inside-function check: source and target must share a
+        // range. Walk the ranges list — small enough that linear
+        // is fine.
+        let same_fn = ranges
+            .iter()
+            .any(|(lo, hi)| src_row >= *lo && src_row < *hi
+                && tgt_row >= *lo && tgt_row < *hi);
+        if !same_fn || src_row == tgt_row {
+            continue;
+        }
+        pending.push(PendingArrow { src_row, tgt_row, style });
+    }
+    pending.sort_by_key(|a| a.src_row);
+
+    // Lane assignment — identical to the AArch64 path's sweep.
+    let mut lane_free_at: Vec<usize> = Vec::new();
+    for a in &pending {
+        let (lo, hi) = if a.src_row <= a.tgt_row {
+            (a.src_row, a.tgt_row)
+        } else {
+            (a.tgt_row, a.src_row)
+        };
+        let lane = match lane_free_at.iter().position(|&free_at| free_at <= lo) {
+            Some(l) => {
+                lane_free_at[l] = hi + 1;
+                l
+            }
+            None => {
+                lane_free_at.push(hi + 1);
+                lane_free_at.len() - 1
+            }
+        };
+        if (lane as u8) >= ARROW_MAX_LANES {
+            continue;
+        }
+        let dir = if a.src_row < a.tgt_row {
+            ArrowDirection::Down
+        } else {
+            ArrowDirection::Up
+        };
+        let push_seg = |rows: &mut [ListingRow], row: usize, role: ArrowRole| {
+            let seg = ArrowSegment {
+                lane: lane as u8,
+                style: a.style,
+                role,
+                direction: dir,
+            };
+            match &mut rows[row] {
+                ListingRow::Instruction { arrows, .. } => {
+                    Arc::make_mut(arrows).push(seg);
+                }
+                ListingRow::BasicBlockSeparator { arrows } => {
+                    let mut pass = seg;
+                    pass.role = ArrowRole::Pass;
+                    Arc::make_mut(arrows).push(pass);
+                }
+                _ => {}
+            }
+        };
+        push_seg(rows, a.src_row, ArrowRole::Source);
+        push_seg(rows, a.tgt_row, ArrowRole::Target);
+        let (mid_lo, mid_hi) = if a.src_row < a.tgt_row {
+            (a.src_row + 1, a.tgt_row)
+        } else {
+            (a.tgt_row + 1, a.src_row)
+        };
+        for r in mid_lo..mid_hi {
+            push_seg(rows, r, ArrowRole::Pass);
+        }
+    }
 }
 
 pub fn listing_row_for_addr(rows: &[ListingRow], addr: u64) -> Option<usize> {
