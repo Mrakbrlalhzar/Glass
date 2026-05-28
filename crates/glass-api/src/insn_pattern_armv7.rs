@@ -55,6 +55,65 @@ use armv8_encode::isa::armv7::table_generated::{
 
 use crate::bin_search::Atom;
 
+/// Compile a single ARMv7 instruction at `address` to concrete
+/// bytes — 2 bytes for Thumb-1, 4 bytes for Thumb-2 / A32. Tries
+/// Thumb first; falls back to ARM mode if Thumb refuses. Wildcards
+/// are rejected (caller is the GUI editor staging real bytes).
+///
+/// `prefer_thumb`: when the source binary is Thumb-only or the
+/// editor knows the row is Thumb, set true so we don't slip into
+/// ARM-mode encodings. AArch64 doesn't call into this; the
+/// dispatch happens in [`commit_disasm_edit`].
+pub fn compile_armv7_at(source: &str, address: u64, prefer_thumb: bool) -> Result<Vec<u8>> {
+    // Refuse multi-instruction patterns at the editor layer —
+    // the registry stores one edit per address and we'd need
+    // downstream-row shifting to splice multiple instructions
+    // in place.
+    let pieces: Vec<&str> = source
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pieces.len() != 1 {
+        anyhow::bail!(
+            "expected exactly one instruction; got {} (multi-instruction edits aren't supported)",
+            pieces.len()
+        );
+    }
+    let s = pieces[0];
+    if prefer_thumb {
+        if let Ok((word, _mask, width)) = compile_one_thumb(s, address) {
+            return Ok(thumb_word_to_le_bytes(word, width));
+        }
+        if let Ok((word, _mask)) = compile_one_arm(s, address) {
+            return Ok(word.to_le_bytes().to_vec());
+        }
+        anyhow::bail!("neither Thumb nor ARM mode could encode {s:?}");
+    } else {
+        if let Ok((word, _mask)) = compile_one_arm(s, address) {
+            return Ok(word.to_le_bytes().to_vec());
+        }
+        if let Ok((word, _mask, width)) = compile_one_thumb(s, address) {
+            return Ok(thumb_word_to_le_bytes(word, width));
+        }
+        anyhow::bail!("neither ARM nor Thumb mode could encode {s:?}");
+    }
+}
+
+fn thumb_word_to_le_bytes(word: u32, width: ThumbWidth) -> Vec<u8> {
+    match width {
+        ThumbWidth::Halfword => ((word & 0xffff) as u16).to_le_bytes().to_vec(),
+        ThumbWidth::Word => {
+            let hw1 = ((word >> 16) & 0xffff) as u16;
+            let hw2 = (word & 0xffff) as u16;
+            let mut out = Vec::with_capacity(4);
+            out.extend_from_slice(&hw1.to_le_bytes());
+            out.extend_from_slice(&hw2.to_le_bytes());
+            out
+        }
+    }
+}
+
 /// Top-level ARMv7 pattern compiler. Tries Thumb first; if the
 /// first instruction won't compile under Thumb, retries the
 /// whole pattern under ARM mode. Returns the byte atoms on
@@ -1070,6 +1129,41 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(
             msg.contains("AArch64") || msg.contains("w0") || msg.contains("ARM"),
+            "msg: {msg}"
+        );
+    }
+
+    // ---- compile_armv7_at editor smoke ------------------------
+
+    #[test]
+    fn compile_armv7_at_thumb_16bit_returns_two_bytes() {
+        // `nop` in Thumb is `0xbf 0x00` (16-bit T1).
+        let bytes = compile_armv7_at("nop", 0x1000, true).expect("compile thumb nop");
+        assert_eq!(bytes, vec![0x00, 0xbf]);
+    }
+
+    #[test]
+    fn compile_armv7_at_thumb_32bit_returns_four_bytes() {
+        // `mov.w` style 32-bit Thumb (movw is T-2): always 4 bytes.
+        let bytes =
+            compile_armv7_at("movw r3, #0x1234", 0x1000, true).expect("compile movw");
+        assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn compile_armv7_at_arm_mode_returns_four_bytes() {
+        // ARM-mode A32: every instruction is exactly 4 bytes.
+        let bytes = compile_armv7_at("bx lr", 0x1000, false).expect("compile bx lr");
+        assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn compile_armv7_at_rejects_multi_instruction() {
+        let err = compile_armv7_at("nop; nop", 0x1000, true)
+            .expect_err("should reject multi-instruction");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("multi") || msg.contains("one instruction"),
             "msg: {msg}"
         );
     }

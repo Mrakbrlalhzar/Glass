@@ -90,6 +90,22 @@ impl DecodedInsn {
         InstructionInfo::size(self) as usize
     }
 
+    /// True if this instruction is a 16-bit Thumb-1 NOP
+    /// (encoded as `0xbf 0x00`). The editor uses this to decide
+    /// whether a 2-byte Thumb-1 instruction can be grown to a
+    /// 4-byte form by absorbing the following slot.
+    pub fn is_thumb1_nop(&self) -> bool {
+        use armv8_encode::isa::armv7::table::ThumbWidth;
+        use armv8_encode::isa::armv7::table_generated::ThumbMnemonicGenerated;
+        match self {
+            DecodedInsn::Thumb(i) => {
+                matches!(i.width, ThumbWidth::Halfword)
+                    && i.mnemonic == ThumbMnemonicGenerated::Nop
+            }
+            _ => false,
+        }
+    }
+
     /// Raw little-endian bytes of this instruction. Returns up to 4
     /// bytes; AArch64 and ARM-mode always yield exactly 4, Thumb
     /// yields 2 or 4 depending on width.

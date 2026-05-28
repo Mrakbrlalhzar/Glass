@@ -744,6 +744,18 @@ pub fn render_listing_row_with(
             comment,
             arrows,
         } => {
+            // Hide rows whose original-byte slot was absorbed by
+            // an adjacent grow-edit (e.g. a 2-byte Thumb-1 grew
+            // to 4 bytes by eating the following NOP). Rendering
+            // a zero-height empty div keeps row-index math intact
+            // for the list state without showing the absorbed
+            // instruction. The predecessor edit's row already
+            // displays the merged 4 bytes.
+            if let Some(c) = ctx {
+                if c.bundle.is_absorbed_row(&c.artifact, *address) {
+                    return div().id(("absorbed-row", row_index));
+                }
+            }
             // If this row is the active disasm-edit target, swap
             // the mnemonic + operand columns for an inline editor.
             // Address + bytes columns stay so the user keeps spatial
@@ -757,17 +769,22 @@ pub fn render_listing_row_with(
                 use gpui::rgb;
                 let edit_bg = gpui::rgba(0x3a2f1080);
                 // Display bytes in the live edit reflect any
-                // already-staged edit at this address.
-                let live_bytes = ctx
-                    .and_then(|c| c.bundle.edits.get(&c.artifact, *address))
-                    .filter(|e| e.new_bytes.len() == 4)
-                    .map(|e| [
-                        e.new_bytes[0],
-                        e.new_bytes[1],
-                        e.new_bytes[2],
-                        e.new_bytes[3],
-                    ])
-                    .unwrap_or(*bytes);
+                // already-staged edit at this address. ARMv7 edits
+                // are variable-width (2 or 4 bytes); we pad short
+                // staged edits to the 4-byte display slot and pass
+                // an explicit `len` to `format_bytes_column` below
+                // so the trailing slot reads blank.
+                let staged_for_row = ctx
+                    .and_then(|c| c.bundle.edits.get(&c.artifact, *address));
+                let (live_bytes, live_len) = match staged_for_row {
+                    Some(e) => {
+                        let n = e.new_bytes.len().min(4);
+                        let mut b = [0u8; 4];
+                        b[..n].copy_from_slice(&e.new_bytes[..n]);
+                        (b, n as u8)
+                    }
+                    None => (*bytes, *len),
+                };
                 let mut row = div()
                     .flex()
                     .flex_row()
@@ -792,10 +809,7 @@ pub fn render_listing_row_with(
                             .whitespace_nowrap()
                             .pr_4()
                             .text_color(rgb(COLOUR_BYTES()))
-                            .child(format!(
-                                "{:02x} {:02x} {:02x} {:02x}",
-                                live_bytes[0], live_bytes[1], live_bytes[2], live_bytes[3]
-                            )),
+                            .child(format_bytes_column(&live_bytes, live_len)),
                     )
                     .child(
                         div().flex_1().min_w(px(0.)).child(edit_state.input.render(
@@ -845,7 +859,7 @@ pub fn render_listing_row_with(
                         // addresses are still data edits and the
                         // hex view owns their display.
                         e.kind == crate::edits::EditKind::Instruction
-                            && e.new_bytes.len() == 4
+                            && matches!(e.new_bytes.len(), 2 | 4)
                     })
                     .cloned()
             });
@@ -876,13 +890,12 @@ pub fn render_listing_row_with(
                             .whitespace_nowrap()
                             .pr_4()
                             .text_color(rgb(COLOUR_BYTES()))
-                            .child(format!(
-                                "{:02x} {:02x} {:02x} {:02x}",
-                                edit.new_bytes[0],
-                                edit.new_bytes[1],
-                                edit.new_bytes[2],
-                                edit.new_bytes[3]
-                            )),
+                            .child({
+                                let n = edit.new_bytes.len().min(4);
+                                let mut b = [0u8; 4];
+                                b[..n].copy_from_slice(&edit.new_bytes[..n]);
+                                format_bytes_column(&b, n as u8)
+                            }),
                     )
                     .child(
                         div()

@@ -658,14 +658,10 @@ impl LoadedBundle {
         addr: u64,
     ) -> Option<[u8; 4]> {
         if let Some(edit) = self.edits.get(artifact, addr) {
-            if edit.new_bytes.len() == 4 {
-                return Some([
-                    edit.new_bytes[0],
-                    edit.new_bytes[1],
-                    edit.new_bytes[2],
-                    edit.new_bytes[3],
-                ]);
-            }
+            let n = edit.new_bytes.len().min(4);
+            let mut out = [0u8; 4];
+            out[..n].copy_from_slice(&edit.new_bytes[..n]);
+            return Some(out);
         }
         let section_name = self.text_section_for_addr(artifact, addr)?;
         let key = (artifact.clone(), section_name.to_string());
@@ -712,6 +708,77 @@ impl LoadedBundle {
             }
         }
         None
+    }
+
+    /// ARMv7-only: look up the precomputed `DecodedInsn` whose
+    /// `address()` equals `addr` in any text section of `artifact`.
+    /// Returns `None` for AArch64 sections (no precomputed
+    /// vector) or when no instruction starts at exactly `addr`
+    /// — mid-instruction addresses don't match.
+    ///
+    /// Used by the disasm editor to discover the *width* of the
+    /// existing instruction so it can classify a same-size /
+    /// shrink / grow edit, and to inspect adjacent rows for the
+    /// nop-absorption case.
+    pub fn precomputed_insn_at(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        addr: u64,
+    ) -> Option<&glass_arch_arm::DecodedInsn> {
+        use armv8_encode::mc::InstructionInfo;
+        let section_name = self.text_section_for_addr(artifact, addr)?;
+        let key = (artifact.clone(), section_name.to_string());
+        let section = self.text_sections.get(&key)?;
+        let p = section.precomputed.as_ref()?;
+        let pos = p.binary_search_by(|i| i.address().cmp(&addr)).ok()?;
+        p.get(pos)
+    }
+
+    /// True when the text section containing `addr` is the
+    /// ARMv7 (precomputed) flavour. Used by the editor to pick
+    /// which encoder dispatch path to take.
+    pub fn is_armv7_text(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        addr: u64,
+    ) -> bool {
+        let Some(section_name) = self.text_section_for_addr(artifact, addr) else {
+            return false;
+        };
+        let key = (artifact.clone(), section_name.to_string());
+        self.text_sections
+            .get(&key)
+            .map(|s| s.precomputed.is_some())
+            .unwrap_or(false)
+    }
+
+    /// True when there is a staged edit that *absorbed* the row at
+    /// `addr` — i.e. some edit at `vaddr < addr` consumed a
+    /// trailing slot covering this address. The listing renderer
+    /// uses this to hide the row at `addr` (its bytes are now
+    /// owned by the predecessor edit's `new_bytes`).
+    pub fn is_absorbed_row(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        addr: u64,
+    ) -> bool {
+        for edit in self.edits.entries() {
+            if &edit.artifact != artifact {
+                continue;
+            }
+            if edit.absorbed_following == 0 {
+                continue;
+            }
+            let absorbed_start = edit
+                .vaddr
+                .saturating_add(edit.original_bytes.len() as u64);
+            let absorbed_end =
+                absorbed_start.saturating_add(edit.absorbed_following as u64);
+            if addr >= absorbed_start && addr < absorbed_end {
+                return true;
+            }
+        }
+        false
     }
 
     /// Mirror of `text_section_for_addr` for non-text sections that we

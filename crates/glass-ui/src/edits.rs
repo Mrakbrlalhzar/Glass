@@ -34,8 +34,12 @@ pub struct Edit {
     /// Virtual address where the splice begins.
     pub vaddr: u64,
     pub kind: EditKind,
-    /// New bytes to splice in. `len() == original_bytes.len()` —
-    /// the registry rejects length-changing edits.
+    /// New bytes to splice in. For same-size and shrink edits,
+    /// `len() == original_bytes.len()`. For 2-byte → 4-byte
+    /// Thumb edits that absorb a following NOP, `len()` is 4
+    /// while `original_bytes.len()` is 2 and
+    /// `absorbed_following` records how many extra original
+    /// bytes (here: 2) were consumed.
     pub new_bytes: Vec<u8>,
     /// Bytes that were there before. Kept so the Changes dialog
     /// can render "was X, now Y" and Revert can roll back without
@@ -48,6 +52,16 @@ pub struct Edit {
     /// of `new_bytes`. For Bytes: the hex (`"42"`). For String:
     /// the new text (matching `source_text`).
     pub display: String,
+    /// Number of bytes from the original instruction stream this
+    /// edit consumed *beyond* its own original slot. Used for
+    /// nop-absorbing grow edits: a 2-byte Thumb-1 instruction
+    /// grown to 4 bytes by consuming an adjacent Thumb-1 NOP
+    /// at `vaddr + 2` records `absorbed_following = 2`. The
+    /// listing renderer hides instruction rows whose addresses
+    /// fall inside the absorbed range, so the user sees a
+    /// single 4-byte row in place of the original 2 + 2.
+    /// 0 for the typical same-width and shrink cases.
+    pub absorbed_following: u8,
 }
 
 impl Edit {

@@ -33,13 +33,23 @@ pub fn render_changes_dialog(
                 .into_iter()
                 .map(|e| {
                     let (old_display, new_display) = match e.kind {
-                        crate::edits::EditKind::Instruction => (
-                            crate::shell_actions::decode_insn_pretty(
-                                &edit_bytes_4(&e.original_bytes),
-                                e.vaddr,
-                            ),
-                            e.display.clone(),
-                        ),
+                        crate::edits::EditKind::Instruction => {
+                            // 4-byte original: decode as AArch64 for the
+                            // historical pretty-print. 2-byte (Thumb-1)
+                            // originals don't decode that way — show the
+                            // raw bytes so the dialog at least reads
+                            // sensibly until the ARMv7 dialog decoder
+                            // lands.
+                            let old = if e.original_bytes.len() == 4 {
+                                crate::shell_actions::decode_insn_pretty(
+                                    &edit_bytes_4(&e.original_bytes),
+                                    e.vaddr,
+                                )
+                            } else {
+                                hex_bytes(&e.original_bytes)
+                            };
+                            (old, e.display.clone())
+                        }
                         crate::edits::EditKind::Bytes => (
                             hex_bytes(&e.original_bytes),
                             hex_bytes(&e.new_bytes),

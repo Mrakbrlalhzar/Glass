@@ -4200,40 +4200,67 @@ impl Shell {
         // Look up the original bytes from the bundle so we can
         // store them for revert / dialog rendering.
         let Some(bundle) = self.bundle() else { return };
-        let original = bundle.bytes_at(&edit.artifact, edit.address);
-        let Some(original_bytes) = original else {
-            if let Some(e) = self.disasm_edit.as_mut() {
-                e.error = Some(format!("no instruction at 0x{:x}", edit.address));
+        // Decide arch + original instruction width. ARMv7 sections
+        // have a precomputed vector so we can look up the typed
+        // instruction at `addr`; AArch64 sections fall through to
+        // the fixed-4-byte path used historically.
+        let is_armv7 = bundle.is_armv7_text(&edit.artifact, edit.address);
+        let (original_bytes, original_width, prefer_thumb) = if is_armv7 {
+            match bundle.precomputed_insn_at(&edit.artifact, edit.address) {
+                Some(insn) => {
+                    let raw = insn.raw_bytes();
+                    let width = raw.len();
+                    let is_thumb = matches!(
+                        insn,
+                        glass_arch_arm::DecodedInsn::Thumb(_)
+                    );
+                    (raw, width, is_thumb)
+                }
+                None => {
+                    if let Some(e) = self.disasm_edit.as_mut() {
+                        e.error = Some(format!(
+                            "no instruction starts at 0x{:x} (mid-instruction edit?)",
+                            edit.address
+                        ));
+                    }
+                    cx.notify();
+                    return;
+                }
             }
-            cx.notify();
-            return;
+        } else {
+            // AArch64: fixed 4-byte word from `bytes_at`.
+            match bundle.bytes_at(&edit.artifact, edit.address) {
+                Some(b) => (b.to_vec(), 4usize, false),
+                None => {
+                    if let Some(e) = self.disasm_edit.as_mut() {
+                        e.error = Some(format!("no instruction at 0x{:x}", edit.address));
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
         };
         // Compile with the row's address (so PC-relative
-        // encodings come out correctly) and a symbol resolver
-        // backed by the artifact's symbol map (so `bl foo`
-        // works).
-        let sym_map = bundle.symbol_maps.get(&edit.artifact).cloned();
-        let lookup: Box<dyn Fn(&str) -> Option<u64>> = match sym_map {
-            Some(map) => Box::new(move |needle: &str| {
-                map.iter()
-                    .find(|s| s.display_name == needle || s.name == needle)
-                    .map(|s| s.address)
-            }),
-            None => Box::new(|_| None),
+        // encodings come out correctly). AArch64 has a symbol
+        // resolver via the artifact's symbol map; ARMv7's
+        // encoder doesn't take a resolver yet (branches must be
+        // typed as absolute addresses for now).
+        let compile_result: anyhow::Result<Vec<u8>> = if is_armv7 {
+            glass_api::compile_armv7_at(&source_text, edit.address, prefer_thumb)
+        } else {
+            let sym_map = bundle.symbol_maps.get(&edit.artifact).cloned();
+            let lookup: Box<dyn Fn(&str) -> Option<u64>> = match sym_map {
+                Some(map) => Box::new(move |needle: &str| {
+                    map.iter()
+                        .find(|s| s.display_name == needle || s.name == needle)
+                        .map(|s| s.address)
+                }),
+                None => Box::new(|_| None),
+            };
+            glass_api::compile_insn_at(&source_text, edit.address, Some(lookup.as_ref()))
         };
-        let new_bytes = match glass_api::compile_insn_at(
-            &source_text,
-            edit.address,
-            Some(lookup.as_ref()),
-        ) {
-            Ok(b) if b.len() == 4 => [b[0], b[1], b[2], b[3]],
-            Ok(_) => {
-                if let Some(e) = self.disasm_edit.as_mut() {
-                    e.error = Some("must encode exactly one instruction".to_string());
-                }
-                cx.notify();
-                return;
-            }
+        let raw_new_bytes = match compile_result {
+            Ok(b) => b,
             Err(err) => {
                 if let Some(e) = self.disasm_edit.as_mut() {
                     e.error = Some(format!("{err:#}"));
@@ -4242,28 +4269,107 @@ impl Shell {
                 return;
             }
         };
-        // Decode the new bytes for the cached pretty-print,
-        // resolving address operands to symbol names so the
-        // modified row + Changes dialog show `bl decode_packet`
-        // instead of `bl 0x...`.
-        let sym_map_for_display = bundle.symbol_maps.get(&edit.artifact).cloned();
-        let new_disasm = decode_insn_pretty_with_symbols(
-            &new_bytes,
-            edit.address,
-            |addr: u64| {
-                sym_map_for_display
-                    .as_ref()
-                    .and_then(|m| m.at(addr).map(|s| s.display_name.clone()))
-            },
-        );
+        // Width classification: same-width / shrink / grow-with-
+        // nop-absorption / refuse-anything-else. AArch64 and
+        // ARM-mode A32 are fixed-4-byte so only the same-width
+        // case applies; Thumb is variable (2 or 4).
+        let new_len = raw_new_bytes.len();
+        if new_len != 2 && new_len != 4 {
+            if let Some(e) = self.disasm_edit.as_mut() {
+                e.error = Some(format!(
+                    "encoder produced {new_len} bytes; only 2- and 4-byte instructions are supported"
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        let (final_new_bytes, absorbed_following) = match new_len.cmp(&original_width) {
+            std::cmp::Ordering::Equal => (raw_new_bytes, 0u8),
+            std::cmp::Ordering::Less => {
+                // Shrink. Only legal in Thumb (variable-width).
+                // ARM-mode A32 and AArch64 are uniform 4 bytes, so
+                // the only legal shrink is 4→2 with prefer_thumb.
+                if !(is_armv7 && prefer_thumb && original_width == 4 && new_len == 2) {
+                    if let Some(e) = self.disasm_edit.as_mut() {
+                        e.error = Some(format!(
+                            "can't shrink a {original_width}-byte instruction to {new_len} bytes in this section"
+                        ));
+                    }
+                    cx.notify();
+                    return;
+                }
+                // Pad the trailing slot with a Thumb-1 NOP
+                // (`0xbf 0x00`). The listing's next paint walks
+                // the original-bytes layout, so this gives the
+                // user a clean "instruction + explicit nop" pair.
+                let mut padded = raw_new_bytes;
+                padded.push(0xbf);
+                padded.push(0x00);
+                (padded, 0u8)
+            }
+            std::cmp::Ordering::Greater => {
+                // Grow. Only legal if the following slot is a
+                // Thumb-1 NOP we can absorb (2→4). Anything else
+                // refuses — branch-rebinding / downstream shift
+                // is out of scope for this pass.
+                if !(is_armv7 && prefer_thumb && original_width == 2 && new_len == 4) {
+                    if let Some(e) = self.disasm_edit.as_mut() {
+                        e.error = Some(format!(
+                            "can't grow a {original_width}-byte instruction to {new_len} bytes without downstream shifting"
+                        ));
+                    }
+                    cx.notify();
+                    return;
+                }
+                let next_addr = edit.address.saturating_add(original_width as u64);
+                let next_is_nop = bundle
+                    .precomputed_insn_at(&edit.artifact, next_addr)
+                    .map(|i| i.is_thumb1_nop())
+                    .unwrap_or(false);
+                if !next_is_nop {
+                    if let Some(e) = self.disasm_edit.as_mut() {
+                        e.error = Some(format!(
+                            "2-byte → 4-byte edit needs an adjacent NOP at 0x{next_addr:x} (none found)"
+                        ));
+                    }
+                    cx.notify();
+                    return;
+                }
+                (raw_new_bytes, 2u8)
+            }
+        };
+        // Decode the new bytes for the cached pretty-print.
+        // AArch64 goes through the existing decode helper;
+        // for ARMv7 we don't have a one-shot Vec<u8> → text
+        // decoder yet, so fall back to the source text the user
+        // typed (it's already the canonical form they want to
+        // see in the listing).
+        let display = if is_armv7 {
+            source_text.clone()
+        } else {
+            let sym_map_for_display = bundle.symbol_maps.get(&edit.artifact).cloned();
+            let mut bytes4 = [0u8; 4];
+            let n = final_new_bytes.len().min(4);
+            bytes4[..n].copy_from_slice(&final_new_bytes[..n]);
+            decode_insn_pretty_with_symbols(
+                &bytes4,
+                edit.address,
+                |addr: u64| {
+                    sym_map_for_display
+                        .as_ref()
+                        .and_then(|m| m.at(addr).map(|s| s.display_name.clone()))
+                },
+            )
+        };
         let staged = crate::edits::Edit {
             artifact: edit.artifact.clone(),
             vaddr: edit.address,
             kind: crate::edits::EditKind::Instruction,
-            new_bytes: new_bytes.to_vec(),
-            original_bytes: original_bytes.to_vec(),
+            new_bytes: final_new_bytes,
+            original_bytes,
             source_text,
-            display: new_disasm,
+            display,
+            absorbed_following,
         };
         if let Some(b) = self.bundle_mut() {
             b.edits.insert(staged);
@@ -4457,6 +4563,7 @@ impl Shell {
             original_bytes: original,
             source_text: source,
             display,
+            absorbed_following: 0,
         };
         if let Some(b) = self.bundle_mut() {
             b.edits.insert(staged);
