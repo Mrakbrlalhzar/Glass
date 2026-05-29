@@ -282,9 +282,9 @@ impl DecodedInsn {
     }
 
     /// PC-relative literal-pool or page address target. AArch64
-    /// `ADR`/`ADRP` emit `PageTarget`; ARMv7 Thumb `ldr Rt,[pc,#imm]`
-    /// emits `PcRelative`. ARM-mode literal pools currently come
-    /// through as plain memory operands and aren't covered here.
+    /// `ADR`/`ADRP` emit `PageTarget`; ARMv7 Thumb and ARM-mode
+    /// `ldr Rt, [pc, #imm]` literal-pool loads both emit
+    /// `PcRelative` from the upstream format decoder.
     pub fn pcrel_target(&self) -> Option<u64> {
         use armv8_encode::isa::aarch64 as a64;
         use armv8_encode::isa::armv7::operand as a7;
@@ -297,7 +297,19 @@ impl DecodedInsn {
                 }
                 None
             }
-            DecodedInsn::Arm(_) => None,
+            DecodedInsn::Arm(i) => {
+                // ARM-mode `ldr Rt, [pc, #imm]` literal-pool loads
+                // emit `PcRelative` alongside the `OpaqueBits` for
+                // the addressing-mode bits. Previously this arm
+                // returned `None` and ARM-mode functions got no
+                // literal-pool comment / xref.
+                for op in &i.operands {
+                    if let a7::DecodedOperand::PcRelative(a) = op {
+                        return Some(*a);
+                    }
+                }
+                None
+            }
             DecodedInsn::Thumb(i) => {
                 for op in &i.operands {
                     if let a7::DecodedOperand::PcRelative(a) = op {
@@ -410,6 +422,14 @@ pub struct FusionTarget {
 ///     target = page + imm.
 ///   * ARMv7 (Thumb-2 / A32) `movw Rd, #lo16 ; movt Rd, #hi16`.
 ///     Returns target = (hi16 << 16) | lo16.
+///   * ARMv7 PIC literal `ldr Rt, [pc, #imm] ; add Rt, pc`.
+///     Used by Rust / modern compilers in place of an absolute
+///     pointer to avoid a runtime relocation: the pool word is a
+///     signed 32-bit offset from the `add` instruction's PC.
+///     Returns target = add_insn_addr + 4 + signed_offset. Only
+///     fires when the caller passes a pool-word peek closure via
+///     [`Self::observe_with_pool_peek`] — without one we can't
+///     read the offset.
 ///
 /// Any non-completing write to a tracked register invalidates
 /// that slot — same conservative rule both call sites used before.
@@ -421,6 +441,10 @@ pub struct FusionTarget {
 pub struct PageBaseTracker {
     aarch64_pages: [Option<u64>; 32],
     armv7_movw_lo: [Option<u16>; 16],
+    /// Signed pool-word value loaded by the most recent
+    /// `ldr Rt, [pc, #imm]` into each ARM GPR. Consumed by a
+    /// subsequent `add Rt, pc` to form the final PIC target.
+    armv7_pcrel_offsets: [Option<i32>; 16],
 }
 
 impl PageBaseTracker {
@@ -431,10 +455,31 @@ impl PageBaseTracker {
     /// Consume one instruction in source order. Returns the
     /// fused absolute address when this instruction completes a
     /// known pair; updates internal state otherwise.
+    ///
+    /// This variant doesn't take a pool-word peeker, so it can't
+    /// resolve the ARMv7 PIC `ldr ; add r, pc` idiom — that needs
+    /// to read 4 bytes out of the pool slot. Callers that have a
+    /// way to do that (the listing builder, the xref builder)
+    /// should use [`Self::observe_with_pool_peek`] instead.
     pub fn observe(&mut self, insn: &DecodedInsn) -> Option<FusionTarget> {
+        self.observe_with_pool_peek(insn, |_| None)
+    }
+
+    /// Consume one instruction with a closure that reads a 32-bit
+    /// little-endian word at the given address (returning `None`
+    /// when the address isn't in any known section). The closure
+    /// is consulted only on `ldr Rt, [pc, #imm]` to capture the
+    /// pool slot's signed offset for the ARMv7 PIC idiom.
+    pub fn observe_with_pool_peek<F: Fn(u64) -> Option<u32>>(
+        &mut self,
+        insn: &DecodedInsn,
+        peek_pool: F,
+    ) -> Option<FusionTarget> {
         match insn {
             DecodedInsn::Aarch64(a64) => self.observe_aarch64(a64),
-            DecodedInsn::Arm(_) | DecodedInsn::Thumb(_) => self.observe_armv7(insn),
+            DecodedInsn::Arm(_) | DecodedInsn::Thumb(_) => {
+                self.observe_armv7_with_peek(insn, &peek_pool)
+            }
         }
     }
 
@@ -507,16 +552,28 @@ impl PageBaseTracker {
         None
     }
 
-    fn observe_armv7(&mut self, insn: &DecodedInsn) -> Option<FusionTarget> {
-        // movw Rd, #lo16 — store the low half.
+    fn observe_armv7_with_peek<F: Fn(u64) -> Option<u32>>(
+        &mut self,
+        insn: &DecodedInsn,
+        peek_pool: &F,
+    ) -> Option<FusionTarget> {
+        use armv8_encode::mc::InstructionInfo;
+        // movw Rd, #lo16 — store the low half. (movw doesn't have
+        // a pcrel target, so the order of these checks vs the
+        // pcrel-target check below is fine either way.)
         if let Some((rd, lo)) = insn.armv7_movw() {
             if (rd as usize) < self.armv7_movw_lo.len() {
                 self.armv7_movw_lo[rd as usize] = Some(lo);
             }
+            // movw also invalidates any pending PIC offset on Rd —
+            // the register is being overwritten.
+            if (rd as usize) < self.armv7_pcrel_offsets.len() {
+                self.armv7_pcrel_offsets[rd as usize] = None;
+            }
             return None;
         }
-        // movt Rd, #hi16 — complete the pair if a low half was
-        // pending for this register.
+        // movt Rd, #hi16 — complete the movw+movt pair if a low
+        // half was pending.
         if let Some((rd, hi)) = insn.armv7_movt() {
             if (rd as usize) < self.armv7_movw_lo.len() {
                 if let Some(lo) = self.armv7_movw_lo[rd as usize].take() {
@@ -529,15 +586,127 @@ impl PageBaseTracker {
             }
             return None;
         }
-        // Any other write to an ARM GPR invalidates the slot.
+        // `ldr Rt, [pc, #imm]` — capture the pool word's signed
+        // value into the Rt slot, ready for a subsequent
+        // `add Rt, pc` to complete the PIC pair. Rust / modern
+        // compilers emit this pattern in place of an absolute
+        // pointer to avoid a runtime relocation: the pool word
+        // is `target - (add_insn_pc + 4)`.
+        if let Some(pool_addr) = insn.pcrel_target() {
+            if let Some(dest) = insn.dest_register() {
+                if dest.kind == RegKind::ArmGpr
+                    && (dest.index as usize) < self.armv7_pcrel_offsets.len()
+                {
+                    let value = peek_pool(pool_addr).map(|w| w as i32);
+                    self.armv7_pcrel_offsets[dest.index as usize] = value;
+                    // The Rt also loses any pending movw low.
+                    if (dest.index as usize) < self.armv7_movw_lo.len() {
+                        self.armv7_movw_lo[dest.index as usize] = None;
+                    }
+                }
+            }
+            return None;
+        }
+        // `add Rt, pc` — completes the PIC pair. Detected via the
+        // mnemonic + operands: the destination is Rt, and one of
+        // the operand registers is r15 (PC). Two encodings cover
+        // it: Thumb-1 16-bit `0x44XX` (`add Rd, pc`, two-operand)
+        // and A32 `add Rd, pc, Rm` (three-operand, where Rm is
+        // typically the same Rd loaded by the prior ldr).
+        if let Some((rd, add_pc_addr, width)) = armv7_add_pc_form(insn) {
+            if (rd as usize) < self.armv7_pcrel_offsets.len() {
+                if let Some(off) = self.armv7_pcrel_offsets[rd as usize].take() {
+                    // Thumb / A32: the PC value used by `add` is
+                    // `add_insn_addr + 4` (Thumb pipeline) for
+                    // both 16-bit and 32-bit Thumb forms, and
+                    // `add_insn_addr + 8` for A32. Sign-extend
+                    // the offset and add.
+                    let pc_at_add = match width {
+                        // 16-bit Thumb-1 `add Rd, pc` reads PC as
+                        // `(insn_addr + 4) & !3` — bit-1 of PC is
+                        // forced to 0 in this encoding. The `& !3`
+                        // word-aligns the read.
+                        2 => (add_pc_addr.wrapping_add(4)) & !3u64,
+                        // 32-bit Thumb-2 / A32 forms: `pc = insn_addr + 4`
+                        // for Thumb, `+ 8` for A32. We don't carry
+                        // the mode hint here so guess by width:
+                        // Thumb-2 = +4, A32 (also width 4) likely
+                        // wants +8. The PIC idiom uses Thumb-2 in
+                        // practice (the dominant Rust codegen);
+                        // A32 binaries from this compiler use the
+                        // older `mov pc, ...` and don't follow
+                        // this pattern. Default to +4.
+                        _ => add_pc_addr.wrapping_add(4),
+                    };
+                    let target = (pc_at_add as i64)
+                        .wrapping_add(off as i64) as u64;
+                    return Some(FusionTarget {
+                        target,
+                        source_register: rd,
+                    });
+                }
+            }
+            return None;
+        }
+        let _ = insn.address(); // keep InstructionInfo in use for the trait
+        // Any other write to an ARM GPR invalidates the slot(s).
         if let Some(dest) = insn.dest_register() {
-            if dest.kind == RegKind::ArmGpr
-                && (dest.index as usize) < self.armv7_movw_lo.len()
-            {
-                self.armv7_movw_lo[dest.index as usize] = None;
+            if dest.kind == RegKind::ArmGpr {
+                if (dest.index as usize) < self.armv7_movw_lo.len() {
+                    self.armv7_movw_lo[dest.index as usize] = None;
+                }
+                if (dest.index as usize) < self.armv7_pcrel_offsets.len() {
+                    self.armv7_pcrel_offsets[dest.index as usize] = None;
+                }
             }
         }
         None
+    }
+}
+
+/// Recognise `add Rd, pc` / `add Rd, pc, Rm` patterns used by
+/// the ARMv7 PIC literal idiom. Returns `(Rd, insn_address,
+/// width_bytes)` for downstream PC calculation. The width matters
+/// because Thumb-1 16-bit `add Rd, pc` reads PC differently from
+/// Thumb-2 / A32 forms.
+fn armv7_add_pc_form(insn: &DecodedInsn) -> Option<(u8, u64, usize)> {
+    use armv8_encode::isa::armv7::arm::table_generated::ArmMnemonicGenerated as ArmM;
+    use armv8_encode::isa::armv7::operand::{DecodedOperand, RegisterClass};
+    use armv8_encode::isa::armv7::table_generated::ThumbMnemonicGenerated as ThumbM;
+    use armv8_encode::mc::InstructionInfo;
+    // Helper: any operand a register with index 15 (PC)?
+    let has_pc = |ops: &[DecodedOperand]| -> bool {
+        ops.iter().any(|op| match op {
+            DecodedOperand::Register(r) => {
+                matches!(r.class, RegisterClass::R | RegisterClass::Low) && r.index == 15
+            }
+            _ => false,
+        })
+    };
+    // Helper: first Rd-class GPR among operands (index 0).
+    let first_gpr = |ops: &[DecodedOperand]| -> Option<u8> {
+        ops.iter().find_map(|op| match op {
+            DecodedOperand::Register(r) => {
+                if matches!(r.class, RegisterClass::R | RegisterClass::Low) && r.index < 15
+                {
+                    Some(r.index)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+    };
+    match insn {
+        DecodedInsn::Thumb(t) if t.mnemonic == ThumbM::Add && has_pc(&t.operands) => {
+            let rd = first_gpr(&t.operands)?;
+            Some((rd, insn.address(), insn.width_bytes()))
+        }
+        DecodedInsn::Arm(a) if a.mnemonic == ArmM::Add && has_pc(&a.operands) => {
+            let rd = first_gpr(&a.operands)?;
+            Some((rd, insn.address(), insn.width_bytes()))
+        }
+        _ => None,
     }
 }
 

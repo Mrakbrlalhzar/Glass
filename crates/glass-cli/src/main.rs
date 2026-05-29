@@ -875,7 +875,11 @@ fn dump_string_comments(
             size: s.bytes.len() as u64,
         });
     }
-    let data = glass_ui::DataPeek { sections: data_sections, section_meta };
+    let data = glass_ui::DataPeek {
+        sections: data_sections,
+        code_sections: Vec::new(),
+        section_meta,
+    };
     println!("# DataPeek has {} sections", data.sections.len());
     for (b, bytes) in &data.sections {
         println!("#   0x{:x}  ({} bytes)", b, bytes.len());

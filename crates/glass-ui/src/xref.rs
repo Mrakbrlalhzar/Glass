@@ -205,7 +205,17 @@ pub fn build_native_xrefs(
                 size: ds.bytes.len() as u64,
             });
         }
-        DataPeek { sections, section_meta }
+        // Code sections — needed by `peek_u32_le` for Thumb
+        // literal-pool dereferences (the pool word lives inside
+        // `.text`). Same artifact filter as the data side.
+        let mut code_sections = Vec::new();
+        for ((other_aid, _name), ts) in text_sections.iter() {
+            if other_aid != aid {
+                continue;
+            }
+            code_sections.push((ts.base, ts.bytes.clone()));
+        }
+        DataPeek { sections, code_sections, section_meta }
     };
     for ((aid, _name), section) in text_sections {
         let base = section.base;
@@ -238,12 +248,14 @@ pub fn build_native_xrefs(
                 if let Some(t) = insn.branch_target() {
                     per_artifact.entry(t & !1u64).or_default().push(addr);
                 }
-                // movw+movt fusion via the shared tracker. The
-                // fused 32-bit constant is typically a pointer
-                // into rodata; record it as an xref target so
-                // "references to this address" finds the call
-                // site that materialised the pointer.
-                if let Some(ft) = tracker.observe(insn) {
+                // Fusion via the shared tracker. Covers movw+movt
+                // (fused 32-bit constant, typically a pointer) and
+                // the Rust PIC idiom `ldr Rt, [pc, #imm] ; add Rt,
+                // pc` (target = (add_insn_pc + 4) + signed pool
+                // value). Pass the per-artifact data peek so the
+                // tracker can read the pool slot.
+                let pool_peek = |a: u64| peek.peek_u32_le(a);
+                if let Some(ft) = tracker.observe_with_pool_peek(insn, pool_peek) {
                     per_artifact.entry(ft.target).or_default().push(addr);
                 }
                 // Thumb literal-pool loads (`ldr Rt, [pc, #imm]`)

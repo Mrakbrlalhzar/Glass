@@ -17,6 +17,25 @@ use crate::{Progress, TextSectionBytes};
 /// dropped rather than drawn clipped.
 pub const ARROW_MAX_LANES: u8 = 5;
 
+/// Cap for inline string-literal previews in listing comments.
+/// Past this length the listing comment column starts running
+/// into the next instruction's space; 40 is a pragmatic balance
+/// that fits the typical short C string and surfaces an explicit
+/// ellipsis for anything longer.
+pub const STRING_PEEK_CAP: usize = 40;
+
+/// Render a peeked string for inline display in a listing comment.
+/// Appends `…` when the peek hit the cap without finding a
+/// terminator so the reader can tell `"some terminated string"`
+/// from `"some really long thing th…"` at a glance.
+pub fn render_peek(p: &PeekedString) -> String {
+    if p.truncated {
+        format!("\"{}…\"", p.text)
+    } else {
+        format!("\"{}\"", p.text)
+    }
+}
+
 pub enum ListingRow {
     /// `<symbol>:` line preceding a symbol entry point.
     SymbolHeader { name: SharedString },
@@ -88,7 +107,16 @@ pub enum ArrowRole {
 /// literals. The bytes are shared via `Arc` so passing this to a
 /// worker thread is cheap.
 pub struct DataPeek {
+    /// Data-section bytes. `peek_string` consults these so we
+    /// only ever treat data as candidate-string content.
     pub sections: Vec<(u64, Arc<Vec<u8>>)>, // (base, bytes)
+    /// Code-section bytes — used **only** by `peek_u32_le` to
+    /// dereference ARMv7 Thumb literal-pool words which live
+    /// *inside* `.text` (the pool slots sit between functions or
+    /// at the end of a function, holding a 32-bit pointer into
+    /// rodata). Excluded from `peek_string` so we never treat
+    /// instructions as printable string content.
+    pub code_sections: Vec<(u64, Arc<Vec<u8>>)>,
     /// Parallel list of (name, base, size) — used by section-name
     /// labelling on ADRP target operands. Optional and additive to
     /// the bytes vector above; sections without a name entry just
@@ -105,7 +133,11 @@ pub struct DataSectionMeta {
 
 impl DataPeek {
     pub fn empty() -> Self {
-        Self { sections: Vec::new(), section_meta: Vec::new() }
+        Self {
+            sections: Vec::new(),
+            code_sections: Vec::new(),
+            section_meta: Vec::new(),
+        }
     }
 
     /// `(section_name, section_base)` containing `addr`, if known.
@@ -121,34 +153,45 @@ impl DataPeek {
     }
 
     /// Read a 32-bit little-endian word at `addr` from any covering
-    /// section. Used by the ARMv7 builder to dereference literal-pool
-    /// words: `ldr Rt, [pc, #imm]` loads a 4-byte pointer that
-    /// usually points into rodata, so we peek the word and then
-    /// peek a string at *that* address.
+    /// section. Consults BOTH data and code sections — ARMv7 Thumb
+    /// literal-pool words live *inside* `.text` (the compiler
+    /// places constant pointers between functions or at the end
+    /// of a function), and without checking code sections we'd
+    /// miss every Thumb literal-pool dereference. `peek_string`
+    /// stays data-only.
     pub fn peek_u32_le(&self, addr: u64) -> Option<u32> {
-        for (base, bytes) in &self.sections {
-            if addr < *base {
-                continue;
+        let read_from = |sections: &[(u64, Arc<Vec<u8>>)]| -> Option<u32> {
+            for (base, bytes) in sections {
+                if addr < *base {
+                    continue;
+                }
+                let off = (addr - base) as usize;
+                if off + 4 > bytes.len() {
+                    continue;
+                }
+                return Some(u32::from_le_bytes([
+                    bytes[off],
+                    bytes[off + 1],
+                    bytes[off + 2],
+                    bytes[off + 3],
+                ]));
             }
-            let off = (addr - base) as usize;
-            if off + 4 > bytes.len() {
-                continue;
-            }
-            return Some(u32::from_le_bytes([
-                bytes[off],
-                bytes[off + 1],
-                bytes[off + 2],
-                bytes[off + 3],
-            ]));
-        }
-        None
+            None
+        };
+        read_from(&self.sections).or_else(|| read_from(&self.code_sections))
     }
 
     /// Best-effort ASCII string peek starting at `addr`. Returns up to
     /// `max_len` printable characters, terminated by a NUL or the
     /// first non-printable byte. `None` if `addr` doesn't fall in any
     /// known section, or the first byte isn't a printable ASCII.
-    pub fn peek_string(&self, addr: u64, max_len: usize) -> Option<String> {
+    ///
+    /// The returned [`PeekedString`] carries a `truncated` flag set
+    /// to `true` when we hit `max_len` chars without finding a
+    /// terminator (NUL or non-printable). Callers render an
+    /// ellipsis so the user can tell a truncated peek apart from a
+    /// genuine short string.
+    pub fn peek_string(&self, addr: u64, max_len: usize) -> Option<PeekedString> {
         // Walk every section that covers `addr` and return the first
         // that yields a valid printable run. Sections sometimes
         // overlap (especially when an artifact carries debug-info
@@ -166,22 +209,43 @@ impl DataPeek {
             }
             let mut out = String::new();
             let mut ok = true;
+            let mut hit_terminator = false;
             for &b in slice.iter().take(max_len) {
                 if b == 0 {
+                    hit_terminator = true;
                     break;
                 }
                 if !(0x20..=0x7e).contains(&b) {
+                    hit_terminator = true;
                     ok = false;
                     break;
                 }
                 out.push(b as char);
             }
             if ok && out.len() >= 2 {
-                return Some(out);
+                // Truncated = we walked the full max_len without a
+                // NUL or non-printable. Without this signal the
+                // caller can't tell `"the quick brown fox jumps"`
+                // (terminated at 25 chars) from
+                // `"de ad be ef ca fe ba be …"` (40 random bytes
+                // that happen to be printable).
+                let truncated = !hit_terminator && out.len() >= max_len;
+                return Some(PeekedString { text: out, truncated });
             }
         }
         None
     }
+}
+
+/// Result of a [`DataPeek::peek_string`] call. The `truncated`
+/// flag is `true` when the peek hit the caller's `max_len` cap
+/// without finding a NUL or non-printable byte — callers render
+/// `…` so users can distinguish a truncated peek from a complete
+/// short string.
+#[derive(Clone, Debug)]
+pub struct PeekedString {
+    pub text: String,
+    pub truncated: bool,
 }
 pub fn build_listing_rows(
     text: &TextSectionBytes,
@@ -387,11 +451,8 @@ pub fn build_listing_rows(
             }
         }
         let comment = if let Some(addr_for_string) = resolved_addr {
-            match data.peek_string(addr_for_string, 64) {
-                Some(s) => {
-                    let trimmed: String = s.chars().take(64).collect();
-                    SharedString::from(format!("; \"{trimmed}\""))
-                }
+            match data.peek_string(addr_for_string, STRING_PEEK_CAP) {
+                Some(s) => SharedString::from(format!("; {}", render_peek(&s))),
                 None => {
                     // Useful while debugging: tell us when we resolved
                     // an adrp/adr target but the bytes there weren't a
@@ -825,38 +886,41 @@ fn build_listing_rows_armv7(
         //   3. Plain non-pcrel — no comment.
         //
         // Step 1: handle a literal-pool / direct PC-relative target.
-        let mut comment_text: Option<String> = None;
+        let mut peeked: Option<PeekedString> = None;
         if let Some(pc_target) = insn.pcrel_target() {
-            if let Some(s) = data.peek_string(pc_target, 64) {
-                comment_text = Some(s);
+            if let Some(s) = data.peek_string(pc_target, STRING_PEEK_CAP) {
+                peeked = Some(s);
             } else if let Some(ptr) = data.peek_u32_le(pc_target) {
-                if let Some(s) = data.peek_string(ptr as u64, 64) {
-                    comment_text = Some(s);
+                if let Some(s) = data.peek_string(ptr as u64, STRING_PEEK_CAP) {
+                    peeked = Some(s);
                 }
             }
         }
-        // Step 2: update the shared movw/movt tracker and, on a
-        // completed pair, peek a string at the fused 32-bit
-        // constant. The tracker handles slot invalidation on any
-        // non-movt write to an ARM GPR internally.
-        if let Some(ft) = tracker.observe(insn) {
+        // Step 2: update the shared tracker and, on a completed
+        // fusion pair (movw+movt or ldr+add-pc), peek a string at
+        // the fused target. The tracker handles slot invalidation
+        // on any non-movt write to an ARM GPR internally and uses
+        // the pool-peek closure to capture the signed offset from
+        // `ldr Rt, [pc, #imm]`.
+        let pool_peek = |addr: u64| data.peek_u32_le(addr);
+        if let Some(ft) = tracker.observe_with_pool_peek(insn, pool_peek) {
             let fused = ft.target;
-            if comment_text.is_none() {
+            if peeked.is_none() {
                 // Try the fused address first (in case the
                 // constant points directly at a string), then
                 // dereference one level for the pointer-to-string
                 // variant.
-                if let Some(s) = data.peek_string(fused, 64) {
-                    comment_text = Some(s);
+                if let Some(s) = data.peek_string(fused, STRING_PEEK_CAP) {
+                    peeked = Some(s);
                 } else if let Some(ptr) = data.peek_u32_le(fused) {
-                    if let Some(s) = data.peek_string(ptr as u64, 64) {
-                        comment_text = Some(s);
+                    if let Some(s) = data.peek_string(ptr as u64, STRING_PEEK_CAP) {
+                        peeked = Some(s);
                     }
                 }
             }
         }
-        let comment = match comment_text {
-            Some(s) => SharedString::from(format!("; \"{s}\"")),
+        let comment = match peeked {
+            Some(p) => SharedString::from(format!("; {}", render_peek(&p))),
             None => SharedString::from(""),
         };
         // Bytes: ARMv7 instructions are 2 or 4 bytes. The listing

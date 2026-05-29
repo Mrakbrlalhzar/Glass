@@ -893,8 +893,21 @@ impl Shell {
                             });
                         }
                     }
+                    // Code sections — needed only by `peek_u32_le` for
+                    // ARMv7 Thumb literal-pool dereference (the pool
+                    // word sits inside `.text`, between functions, and
+                    // holds a 32-bit pointer into rodata). `peek_string`
+                    // stays data-only.
+                    let mut code_sections = Vec::new();
+                    for ((aid, _name), ts) in bundle.text_sections.iter() {
+                        if aid != &artifact {
+                            continue;
+                        }
+                        code_sections.push((ts.base, ts.bytes.clone()));
+                    }
                     let data_arc = Arc::new(DataPeek {
                         sections: data_sections,
+                        code_sections,
                         section_meta,
                     });
                     let n = text.instruction_count();
