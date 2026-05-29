@@ -47,6 +47,7 @@ mod listing_render;
 mod loader;
 mod manifest;
 mod palette;
+mod palette_actions;
 mod changes_dialog;
 mod checkbox;
 mod editor;
