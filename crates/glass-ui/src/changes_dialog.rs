@@ -41,7 +41,7 @@ pub fn render_changes_dialog(
                             // sensibly until the ARMv7 dialog decoder
                             // lands.
                             let old = if e.original_bytes.len() == 4 {
-                                crate::shell_actions::decode_insn_pretty(
+                                crate::editor::decode_insn_pretty(
                                     &edit_bytes_4(&e.original_bytes),
                                     e.vaddr,
                                 )

@@ -21,18 +21,27 @@ use armv8_encode::isa::armv7::operand::{DecodedOperand, Register, RegisterClass}
 use armv8_encode::isa::armv7::sweep::ThumbDecodedInstruction;
 
 pub fn format_arm(insn: &ArmDecodedInstruction) -> String {
-    let mnem = insn.mnemonic_name();
-    let ops = render_operands(&insn.operands);
-    if ops.is_empty() {
-        mnem.to_string()
-    } else {
-        format!("{mnem} {ops}")
-    }
+    format_arm_with_symbols(insn, |_| None)
 }
 
 pub fn format_thumb(insn: &ThumbDecodedInstruction) -> String {
+    format_thumb_with_symbols(insn, |_| None)
+}
+
+/// Symbol-aware variant of [`format_arm`]. When the closure returns
+/// `Some(name)` for a `BranchTarget` / `PcRelative` operand's
+/// absolute address, the rendered operand is the symbol name
+/// instead of the hex address. Otherwise the behaviour is identical
+/// to [`format_arm`].
+pub fn format_arm_with_symbols<F>(
+    insn: &ArmDecodedInstruction,
+    symbol_for_address: F,
+) -> String
+where
+    F: Fn(u64) -> Option<String>,
+{
     let mnem = insn.mnemonic_name();
-    let ops = render_operands(&insn.operands);
+    let ops = render_operands(&insn.operands, &symbol_for_address);
     if ops.is_empty() {
         mnem.to_string()
     } else {
@@ -40,16 +49,40 @@ pub fn format_thumb(insn: &ThumbDecodedInstruction) -> String {
     }
 }
 
-fn render_operands(ops: &[DecodedOperand]) -> String {
+/// Symbol-aware variant of [`format_thumb`]. See
+/// [`format_arm_with_symbols`].
+pub fn format_thumb_with_symbols<F>(
+    insn: &ThumbDecodedInstruction,
+    symbol_for_address: F,
+) -> String
+where
+    F: Fn(u64) -> Option<String>,
+{
+    let mnem = insn.mnemonic_name();
+    let ops = render_operands(&insn.operands, &symbol_for_address);
+    if ops.is_empty() {
+        mnem.to_string()
+    } else {
+        format!("{mnem} {ops}")
+    }
+}
+
+fn render_operands<F>(ops: &[DecodedOperand], symbol_for_address: &F) -> String
+where
+    F: Fn(u64) -> Option<String>,
+{
     let mut parts: Vec<String> = Vec::new();
     for op in ops {
-        let Some(rendered) = render_operand(op) else { continue };
+        let Some(rendered) = render_operand(op, symbol_for_address) else { continue };
         parts.push(rendered);
     }
     parts.join(", ")
 }
 
-fn render_operand(op: &DecodedOperand) -> Option<String> {
+fn render_operand<F>(op: &DecodedOperand, symbol_for_address: &F) -> Option<String>
+where
+    F: Fn(u64) -> Option<String>,
+{
     match op {
         DecodedOperand::Register(r) => Some(register_name(r)),
         DecodedOperand::Immediate(v) => {
@@ -62,7 +95,11 @@ fn render_operand(op: &DecodedOperand) -> Option<String> {
             }
         }
         DecodedOperand::BranchTarget(addr) | DecodedOperand::PcRelative(addr) => {
-            Some(format!("0x{addr:x}"))
+            if let Some(name) = symbol_for_address(*addr) {
+                Some(name)
+            } else {
+                Some(format!("0x{addr:x}"))
+            }
         }
         DecodedOperand::RegisterList(bits) => Some(format_register_list(*bits)),
         DecodedOperand::Condition(c) => Some(condition_name(*c).to_string()),

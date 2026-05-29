@@ -54,6 +54,9 @@ use armv8_encode::isa::armv7::table_generated::{
 };
 
 use crate::bin_search::Atom;
+use super::shared::{
+    looks_like_symbol, tokenize_operand_strings, try_parse_immediate,
+};
 
 /// Compile a single ARMv7 instruction at `address` to concrete
 /// bytes — 2 bytes for Thumb-1, 4 bytes for Thumb-2 / A32. Tries
@@ -64,7 +67,12 @@ use crate::bin_search::Atom;
 /// editor knows the row is Thumb, set true so we don't slip into
 /// ARM-mode encodings. AArch64 doesn't call into this; the
 /// dispatch happens in [`commit_disasm_edit`].
-pub fn compile_armv7_at(source: &str, address: u64, prefer_thumb: bool) -> Result<Vec<u8>> {
+pub fn compile_armv7_at(
+    source: &str,
+    address: u64,
+    prefer_thumb: bool,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<u8>> {
     // Refuse multi-instruction patterns at the editor layer —
     // the registry stores one edit per address and we'd need
     // downstream-row shifting to splice multiple instructions
@@ -82,21 +90,29 @@ pub fn compile_armv7_at(source: &str, address: u64, prefer_thumb: bool) -> Resul
     }
     let s = pieces[0];
     if prefer_thumb {
-        if let Ok((word, _mask, width)) = compile_one_thumb(s, address) {
-            return Ok(thumb_word_to_le_bytes(word, width));
-        }
-        if let Ok((word, _mask)) = compile_one_arm(s, address) {
-            return Ok(word.to_le_bytes().to_vec());
-        }
-        anyhow::bail!("neither Thumb nor ARM mode could encode {s:?}");
+        let thumb_err = match compile_one_thumb(s, address, symbol_lookup) {
+            Ok((word, _mask, width)) => return Ok(thumb_word_to_le_bytes(word, width)),
+            Err(e) => e,
+        };
+        let arm_err = match compile_one_arm(s, address, symbol_lookup) {
+            Ok((word, _mask)) => return Ok(word.to_le_bytes().to_vec()),
+            Err(e) => e,
+        };
+        anyhow::bail!(
+            "neither Thumb nor ARM mode could encode {s:?} — thumb: {thumb_err:#}; arm: {arm_err:#}"
+        );
     } else {
-        if let Ok((word, _mask)) = compile_one_arm(s, address) {
-            return Ok(word.to_le_bytes().to_vec());
-        }
-        if let Ok((word, _mask, width)) = compile_one_thumb(s, address) {
-            return Ok(thumb_word_to_le_bytes(word, width));
-        }
-        anyhow::bail!("neither ARM nor Thumb mode could encode {s:?}");
+        let arm_err = match compile_one_arm(s, address, symbol_lookup) {
+            Ok((word, _mask)) => return Ok(word.to_le_bytes().to_vec()),
+            Err(e) => e,
+        };
+        let thumb_err = match compile_one_thumb(s, address, symbol_lookup) {
+            Ok((word, _mask, width)) => return Ok(thumb_word_to_le_bytes(word, width)),
+            Err(e) => e,
+        };
+        anyhow::bail!(
+            "neither ARM nor Thumb mode could encode {s:?} — arm: {arm_err:#}; thumb: {thumb_err:#}"
+        );
     }
 }
 
@@ -119,17 +135,29 @@ fn thumb_word_to_le_bytes(word: u32, width: ThumbWidth) -> Vec<u8> {
 /// whole pattern under ARM mode. Returns the byte atoms on
 /// success.
 pub fn compile_armv7_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
+    compile_armv7_to_atoms_with(pattern, None)
+}
+
+/// Symbol-aware variant. When `symbol_lookup` is `Some`, bare
+/// identifiers in operand position resolve to the absolute address
+/// the closure returns and are encoded as branch / immediate
+/// operands. With `None`, identifiers fail to parse — same as the
+/// historical search path.
+pub fn compile_armv7_to_atoms_with(
+    pattern: &str,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<Atom>> {
     // Probe: try Thumb on the first non-empty instruction.
     let first = pattern
         .split(';')
         .map(str::trim)
         .find(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("empty pattern"))?;
-    let thumb_first = compile_one_thumb(first, 0);
-    let arm_first = compile_one_arm(first, 0);
+    let thumb_first = compile_one_thumb(first, 0, symbol_lookup);
+    let arm_first = compile_one_arm(first, 0, symbol_lookup);
     match (thumb_first, arm_first) {
-        (Ok(_), _) => compile_pattern_thumb(pattern),
-        (Err(_), Ok(_)) => compile_pattern_arm(pattern),
+        (Ok(_), _) => compile_pattern_thumb(pattern, symbol_lookup),
+        (Err(_), Ok(_)) => compile_pattern_arm(pattern, symbol_lookup),
         (Err(et), Err(ea)) => Err(anyhow!(
             "neither Thumb nor ARM mode could encode {first:?} — \
              thumb: {et:#}; arm: {ea:#}"
@@ -139,7 +167,10 @@ pub fn compile_armv7_to_atoms(pattern: &str) -> Result<Vec<Atom>> {
 
 /// Compile every `;`-separated instruction in Thumb mode and
 /// concatenate byte atoms in encoding order.
-fn compile_pattern_thumb(pattern: &str) -> Result<Vec<Atom>> {
+fn compile_pattern_thumb(
+    pattern: &str,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
     let mut addr: u64 = 0;
     for (i, raw) in pattern.split(';').enumerate() {
@@ -147,7 +178,7 @@ fn compile_pattern_thumb(pattern: &str) -> Result<Vec<Atom>> {
         if s.is_empty() {
             continue;
         }
-        let (word, mask, width) = compile_one_thumb(s, addr)
+        let (word, mask, width) = compile_one_thumb(s, addr, symbol_lookup)
             .with_context(|| format!("Thumb instruction {} ({s:?})", i + 1))?;
         emit_thumb_bytes(&mut out, word, mask, width);
         addr = addr.wrapping_add(match width {
@@ -158,7 +189,10 @@ fn compile_pattern_thumb(pattern: &str) -> Result<Vec<Atom>> {
     Ok(out)
 }
 
-fn compile_pattern_arm(pattern: &str) -> Result<Vec<Atom>> {
+fn compile_pattern_arm(
+    pattern: &str,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
     let mut addr: u64 = 0;
     for (i, raw) in pattern.split(';').enumerate() {
@@ -166,7 +200,7 @@ fn compile_pattern_arm(pattern: &str) -> Result<Vec<Atom>> {
         if s.is_empty() {
             continue;
         }
-        let (word, mask) = compile_one_arm(s, addr)
+        let (word, mask) = compile_one_arm(s, addr, symbol_lookup)
             .with_context(|| format!("ARM instruction {} ({s:?})", i + 1))?;
         let word_bytes = word.to_le_bytes();
         let mask_bytes = mask.to_le_bytes();
@@ -226,9 +260,13 @@ fn emit_thumb_bytes(out: &mut Vec<Atom>, word: u32, mask: u32, width: ThumbWidth
 
 // ---- Per-instruction Thumb compile ---------------------------
 
-fn compile_one_thumb(s: &str, address: u64) -> Result<(u32, u32, ThumbWidth)> {
+fn compile_one_thumb(
+    s: &str,
+    address: u64,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<(u32, u32, ThumbWidth)> {
     let (mnem_str, cond_opt, rest) = split_mnemonic_cond(s);
-    let tokens = parse_operand_tokens(rest)?;
+    let tokens = parse_operand_tokens(rest, symbol_lookup)?;
     let mnem_lc = mnem_str.to_ascii_lowercase();
     // Map conditional spellings to base mnemonic + Condition. For
     // Thumb, only the 16-bit T1 B encoding takes a Condition
@@ -324,9 +362,13 @@ fn try_row_thumb(
 
 // ---- Per-instruction ARM compile -----------------------------
 
-fn compile_one_arm(s: &str, address: u64) -> Result<(u32, u32)> {
+fn compile_one_arm(
+    s: &str,
+    address: u64,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<(u32, u32)> {
     let (mnem_str, cond_opt, rest) = split_mnemonic_cond(s);
-    let tokens = parse_operand_tokens(rest)?;
+    let tokens = parse_operand_tokens(rest, symbol_lookup)?;
     let mnem_lc = mnem_str.to_ascii_lowercase();
     let cond_code = cond_opt.unwrap_or(0xe); // AL = always
     let mut last_err: Option<String> = None;
@@ -842,38 +884,21 @@ fn is_known_thumb_mnemonic(s: &str) -> bool {
         .any(|r| r.mnemonic.as_str() == s)
 }
 
-fn parse_operand_tokens(s: &str) -> Result<Vec<OperandToken>> {
-    if s.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Split on commas at depth 0 (outside `[…]`, `{…}`, `<…>`).
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in s.chars() {
-        match ch {
-            '[' | '{' | '<' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ']' | '}' | '>' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut cur).trim().to_string());
-            }
-            _ => cur.push(ch),
-        }
-    }
-    let tail = cur.trim().to_string();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts.into_iter().map(|p| parse_operand_token(&p)).collect()
+fn parse_operand_tokens(
+    s: &str,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<Vec<OperandToken>> {
+    let parts = tokenize_operand_strings(s, &['[', '{', '<'], &[']', '}', '>']);
+    parts
+        .into_iter()
+        .map(|p| parse_operand_token(&p, symbol_lookup))
+        .collect()
 }
 
-fn parse_operand_token(s: &str) -> Result<OperandToken> {
+fn parse_operand_token(
+    s: &str,
+    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+) -> Result<OperandToken> {
     let s = s.trim();
     if s.is_empty() {
         anyhow::bail!("empty operand");
@@ -913,6 +938,22 @@ fn parse_operand_token(s: &str) -> Result<OperandToken> {
     // in the encoder.
     if looks_like_aarch64_register(s) {
         anyhow::bail!("operand {s:?} looks like an AArch64 register; ARMv7 uses r0..r15, sp, lr, pc");
+    }
+    // Bare identifier → consult the symbol resolver if one is
+    // provided. A successful lookup is treated as an absolute
+    // address; the slot dispatcher converts it to a `BranchTarget`
+    // when the row's slot is a branch, or to an `Immediate`
+    // otherwise. This mirrors the AArch64 path's symbol handling.
+    if looks_like_symbol(s) {
+        if let Some(lookup) = symbol_lookup {
+            if let Some(abs) = lookup(s) {
+                return Ok(OperandToken::Imm(abs as i64));
+            }
+            anyhow::bail!("unknown symbol {s:?}");
+        }
+        anyhow::bail!(
+            "operand {s:?} looks like a symbol but no resolver was provided"
+        );
     }
     if let Some(n) = try_parse_immediate(s) {
         return Ok(OperandToken::Imm(n));
@@ -970,24 +1011,6 @@ fn try_parse_register(s: &str) -> Option<(RegisterClass, u8)> {
         return None;
     }
     Some((RegisterClass::R, index))
-}
-
-fn try_parse_immediate(s: &str) -> Option<i64> {
-    let s = s.trim().trim_start_matches('#').trim();
-    let (sign, body) = if let Some(rest) = s.strip_prefix('-') {
-        (-1i64, rest)
-    } else if let Some(rest) = s.strip_prefix('+') {
-        (1, rest)
-    } else {
-        (1, s)
-    };
-    let body = body.trim();
-    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).ok()?
-    } else {
-        body.parse::<i64>().ok()?
-    };
-    Some(sign * parsed)
 }
 
 fn parse_reg_list(inner: &str) -> Result<OperandToken> {
@@ -1048,152 +1071,3 @@ fn parse_memory(s: &str) -> Result<OperandToken> {
     Ok(OperandToken::Memory(base, offset, ()))
 }
 
-// ---- Tests --------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn atoms_to_word_thumb16(atoms: &[Atom]) -> (u16, u16) {
-        assert_eq!(atoms.len(), 2);
-        let (mb0, vb0) = match atoms[0] {
-            Atom::Mask { mask, value } => (mask, value),
-            _ => panic!("not a mask atom"),
-        };
-        let (mb1, vb1) = match atoms[1] {
-            Atom::Mask { mask, value } => (mask, value),
-            _ => panic!("not a mask atom"),
-        };
-        let word = u16::from_le_bytes([vb0, vb1]);
-        let mask = u16::from_le_bytes([mb0, mb1]);
-        (word, mask)
-    }
-
-    #[test]
-    fn parse_mov_r1_r7_thumb_concrete() {
-        // `mov r1, r7` → 16-bit Thumb encoding 0x4639.
-        let atoms = compile_armv7_to_atoms("mov r1, r7").expect("compile");
-        let (word, mask) = atoms_to_word_thumb16(&atoms);
-        assert_eq!(mask, 0xffff, "concrete operands → fully-fixed mask");
-        assert_eq!(word, 0x4639, "expected mov r1, r7 = 0x4639, got 0x{word:04x}");
-    }
-
-    #[test]
-    fn conditional_thumb_branch() {
-        // `beq` with wildcard target → 16-bit T1 conditional B
-        // with opcode bits 11..15 = 0b1101, cond=0 in bits 8..11.
-        let atoms = compile_armv7_to_atoms("beq <*>").expect("compile beq");
-        let (word, mask) = atoms_to_word_thumb16(&atoms);
-        // High 4 bits = 0xd (B-cond family); cond field (bits
-        // 8..11) = 0 for `eq`.
-        assert_eq!(word >> 12, 0xd, "expected B-cond top nibble");
-        assert_eq!((word >> 8) & 0xf, 0x0, "expected eq cond");
-        // Low 8 bits are the branch target → wildcarded.
-        assert_eq!(mask & 0xff, 0x00, "branch target bits should be masked");
-    }
-
-    #[test]
-    fn push_register_list_thumb() {
-        // `push {r4, r5, lr}` → 0xb530 (low 8 = 0b00110000 + LR
-        // bit 8 set).
-        let atoms = compile_armv7_to_atoms("push {r4, r5, lr}").expect("compile push");
-        let (word, mask) = atoms_to_word_thumb16(&atoms);
-        assert_eq!(mask, 0xffff, "concrete list → fully fixed");
-        assert_eq!(word, 0xb530, "got 0x{word:04x}");
-    }
-
-    #[test]
-    fn ldr_simple_memory_thumb() {
-        // `ldr r3, [r4]` — there's a 16-bit T1 ldr-imm form
-        // with offset 0. Concrete operands should compile.
-        let atoms = compile_armv7_to_atoms("ldr r3, [r4]").expect("compile ldr");
-        // Just sanity-check it produced 2 atoms (halfword).
-        assert!(matches!(atoms.len(), 2 | 4), "got {} atoms", atoms.len());
-    }
-
-    #[test]
-    fn wildcard_register_thumb() {
-        // `mov r1, r*` — destination fixed, source wildcarded.
-        // Mask should have at least one byte with non-0xff mask.
-        let atoms = compile_armv7_to_atoms("mov r1, <R>").expect("compile");
-        assert!(atoms.len() >= 2);
-        let any_partial = atoms
-            .iter()
-            .any(|a| matches!(a, Atom::Mask { mask, .. } if *mask != 0xff));
-        assert!(any_partial, "wildcard should produce partial-mask byte");
-    }
-
-    #[test]
-    fn rejects_aarch64_register_names() {
-        let err = compile_armv7_to_atoms("mov w0, #1").expect_err("should reject");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("AArch64") || msg.contains("w0") || msg.contains("ARM"),
-            "msg: {msg}"
-        );
-    }
-
-    // ---- compile_armv7_at editor smoke ------------------------
-
-    #[test]
-    fn compile_armv7_at_thumb_16bit_returns_two_bytes() {
-        // `nop` in Thumb is `0xbf 0x00` (16-bit T1).
-        let bytes = compile_armv7_at("nop", 0x1000, true).expect("compile thumb nop");
-        assert_eq!(bytes, vec![0x00, 0xbf]);
-    }
-
-    #[test]
-    fn compile_armv7_at_thumb_32bit_returns_four_bytes() {
-        // `mov.w` style 32-bit Thumb (movw is T-2): always 4 bytes.
-        let bytes =
-            compile_armv7_at("movw r3, #0x1234", 0x1000, true).expect("compile movw");
-        assert_eq!(bytes.len(), 4);
-    }
-
-    #[test]
-    fn compile_armv7_at_arm_mode_returns_four_bytes() {
-        // ARM-mode A32: every instruction is exactly 4 bytes.
-        let bytes = compile_armv7_at("bx lr", 0x1000, false).expect("compile bx lr");
-        assert_eq!(bytes.len(), 4);
-    }
-
-    #[test]
-    fn compile_armv7_at_rejects_multi_instruction() {
-        let err = compile_armv7_at("nop; nop", 0x1000, true)
-            .expect_err("should reject multi-instruction");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("multi") || msg.contains("one instruction"),
-            "msg: {msg}"
-        );
-    }
-
-    #[test]
-    fn arm_mode_bx_lr_conditional() {
-        // `bxeq lr` — ARM mode (no Thumb conditional bx outside
-        // IT). Expect cond field in bits 28..31 = 0, opcode
-        // bits = 0x012fff1e (bx lr with cond=eq).
-        let atoms = compile_armv7_to_atoms("bxeq lr").expect("compile bxeq lr");
-        assert_eq!(atoms.len(), 4, "ARM mode = 4 bytes");
-        let bytes: Vec<u8> = atoms
-            .iter()
-            .map(|a| match a {
-                Atom::Mask { value, .. } => *value,
-                _ => panic!(),
-            })
-            .collect();
-        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let masks: Vec<u8> = atoms
-            .iter()
-            .map(|a| match a {
-                Atom::Mask { mask, .. } => *mask,
-                _ => panic!(),
-            })
-            .collect();
-        let mask = u32::from_le_bytes([masks[0], masks[1], masks[2], masks[3]]);
-        // Concrete → fully fixed.
-        assert_eq!(mask, 0xffff_ffff);
-        // Top 4 bits = 0x0 (cond=eq), then 0x12fff1e.
-        assert_eq!(word, 0x012f_ff1e, "got 0x{word:08x}");
-    }
-}

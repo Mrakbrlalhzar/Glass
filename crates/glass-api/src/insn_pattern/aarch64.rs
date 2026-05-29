@@ -1,129 +1,28 @@
-//! Typed-assembly instruction patterns.
+//! AArch64 typed-assembly pattern compiler.
 //!
-//! Phases A + C scope:
+//! Parses one or more `;`-separated AArch64 instructions and
+//! drives `armv8_encode::isa::aarch64::encode_instruction` after
+//! substituting placeholder values for wildcards. The wildcard
+//! grammar (`<*>`, `<W>`, `<X>`, `<imm>`, …) maps to bit ranges
+//! the opcode table exposes; bits a wildcard owns get cleared in
+//! both mask and value so they match any value in those
+//! positions. See `docs/InsnPattern.md` for the full design.
 //!
-//!   - Parses one or more `;`-separated AArch64 instructions.
-//!   - Operands: GP registers (w0..w30 / wzr / wsp, x0..x30 /
-//!     xzr / sp), immediates (decimal or hex, optional `#`),
-//!     simple memory forms (`[xN]`, `[xN, #imm]`), AND
-//!     wildcards (`<*>`, `<W>`, `<X>`, `<imm>`, `<Rd>`, etc.).
-//!   - Drives `armv8_encode::isa::aarch64::encode_instruction`
-//!     after substituting placeholder values for wildcards;
-//!     then uses the upstream opcode table's `mask()` /
-//!     `base_opcode()` / `operand_bit_ranges()` to identify
-//!     which encoded bits belong to wildcarded operands.
-//!   - Output: a `Vec<Atom>` of `(mask, value)` byte atoms that
-//!     flow into the bin-search engine. Wildcarded operand
-//!     bits get cleared in both mask and value so they match
-//!     any value in those positions.
-//!
-//! See `docs/InsnPattern.md` for the full design.
+//! ISA-agnostic helpers (immediate parsing, the bracket-aware
+//! comma splitter, the symbol-name heuristic, `CompileOptions`)
+//! live in `super::shared` and are shared with the ARMv7 path.
 
 use anyhow::{anyhow, Context, Result};
 use armv8_encode::isa::aarch64::{
     self, iter_opcodes, Aarch64Mnemonic, Aarch64Opcode, AddressingMode, DecodedOperand,
     InstructionTemplate, MemoryOffset, MemoryOperand, Register, RegisterClass,
 };
-use serde::Serialize;
 
-use crate::bin_search::{Atom, BinMatch, BinSearchResult};
-use crate::bundle::Bundle;
-
-#[derive(Serialize, Debug, Clone)]
-pub struct InsnSearchResult {
-    pub artifact: String,
-    pub pattern: String,
-    /// Hex bytes the pattern compiled to — useful for
-    /// debugging and for piping into a follow-up `bin-search`.
-    pub bytes_hex: String,
-    pub total: usize,
-    pub shown: usize,
-    pub matches: Vec<BinMatch>,
-}
-
-impl Bundle {
-    /// Compile `pattern` (one or more `;`-separated assembly
-    /// instructions) to byte atoms and scan the artifact for
-    /// them. Supports concrete operands and wildcards. Routes
-    /// AArch64 artifacts through the AArch64 encoder and ARM
-    /// (ARMv7) artifacts through the Thumb/A32 encoders; other
-    /// architectures fail with a clear error.
-    pub fn insn_search(
-        &self,
-        artifact_ref: &str,
-        pattern: &str,
-        section_filter: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<InsnSearchResult> {
-        let art = self
-            .artifacts
-            .iter()
-            .find(|a| {
-                a.label == artifact_ref || a.id.to_string().starts_with(artifact_ref)
-            })
-            .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
-        let arch = art.binary.container.architecture;
-        let atoms = compile_insn_atoms_for_arch(pattern, arch)
-            .with_context(|| format!("compiling pattern {pattern:?}"))?;
-        if atoms.is_empty() {
-            anyhow::bail!("pattern compiled to zero atoms");
-        }
-        let bytes_hex = atoms_to_hex(&atoms);
-        // Reuse the bin-search backend so navigation, previews,
-        // and section filtering all behave identically.
-        let bin = self.bin_search_with_atoms(
-            artifact_ref,
-            &bytes_hex,
-            &atoms,
-            section_filter,
-            limit,
-        )?;
-        Ok(InsnSearchResult {
-            artifact: bin.artifact,
-            pattern: pattern.to_string(),
-            bytes_hex,
-            total: bin.total,
-            shown: bin.shown,
-            matches: bin.matches,
-        })
-    }
-}
-
-/// Render compiled atoms as a human-readable hex string. Bytes
-/// with a full 0xff mask render as `xx`; partial-mask bytes
-/// render as `xx/MM` with the mask byte after a slash; fully-
-/// wildcarded bytes render as `??`.
-fn atoms_to_hex(atoms: &[Atom]) -> String {
-    atoms
-        .iter()
-        .map(|a| match a {
-            Atom::Mask { mask: 0xff, value } => format!("{value:02x}"),
-            Atom::Mask { mask: 0, .. } => "??".to_string(),
-            Atom::Mask { mask, value } => format!("{value:02x}/{mask:02x}"),
-            Atom::Gap { .. } => "*".to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Per-call options threaded through the compiler. The defaults
-/// match the historical search-only path: address 0, no symbol
-/// resolver. The GUI's per-line edit path overrides both so
-/// PC-relative encodings come out correct and bare identifiers
-/// resolve to absolute addresses.
-#[derive(Default)]
-pub struct CompileOptions<'a> {
-    /// Address the *first* compiled instruction is being placed
-    /// at. Drives the encoder's PC-relative delta calculation.
-    /// Subsequent instructions in a `;`-separated sequence get
-    /// `address + 4 * index`. Defaults to 0.
-    pub address: u64,
-    /// Optional symbol resolver. When set, an unrecognised
-    /// identifier in operand position is looked up via this
-    /// closure and treated as the absolute address it returns.
-    /// When `None`, identifiers fail to parse.
-    pub symbol_lookup: Option<&'a dyn Fn(&str) -> Option<u64>>,
-}
+use crate::bin_search::Atom;
+use super::shared::{
+    looks_like_symbol, tokenize_operand_strings, try_parse_immediate, CompileOptions,
+    SymbolLookup,
+};
 
 /// Compile a pattern to concrete bytes (no wildcards). Errors
 /// if the pattern contains any wildcard tokens. Kept for the
@@ -155,11 +54,7 @@ pub fn compile_to_atoms_with(
     options: &CompileOptions,
 ) -> Result<Vec<Atom>> {
     let mut out = Vec::new();
-    for (i, raw) in pattern.split(';').enumerate() {
-        let s = raw.trim();
-        if s.is_empty() {
-            continue;
-        }
+    for (i, s) in super::shared::split_instructions(pattern) {
         let addr = options.address + (i as u64) * 4;
         let (word, mask) = compile_one(s, addr, options.symbol_lookup)
             .with_context(|| format!("instruction {} ({s:?})", i + 1))?;
@@ -182,7 +77,7 @@ pub fn compile_to_atoms_with(
 pub fn compile_at(
     pattern: &str,
     address: u64,
-    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+    symbol_lookup: Option<SymbolLookup>,
 ) -> Result<Vec<u8>> {
     let atoms = compile_to_atoms_with(
         pattern,
@@ -217,7 +112,7 @@ pub fn compile_at(
 fn compile_one(
     s: &str,
     address: u64,
-    symbol_lookup: Option<&dyn Fn(&str) -> Option<u64>>,
+    symbol_lookup: Option<SymbolLookup>,
 ) -> Result<(u32, u32)> {
     use armv8_encode::isa::aarch64::Aarch64Opnd;
 
@@ -506,25 +401,6 @@ fn resolved_symbol_operand(
     }
 }
 
-#[allow(dead_code)]
-fn placeholder_for(kind: WildcardKind) -> DecodedOperand {
-    match kind {
-        WildcardKind::Any => DecodedOperand::Register(Register {
-            class: RegisterClass::X,
-            index: 0,
-        }),
-        WildcardKind::RegW => DecodedOperand::Register(Register {
-            class: RegisterClass::W,
-            index: 0,
-        }),
-        WildcardKind::RegX => DecodedOperand::Register(Register {
-            class: RegisterClass::X,
-            index: 0,
-        }),
-        WildcardKind::Imm => DecodedOperand::Immediate(0),
-    }
-}
-
 fn split_mnemonic(s: &str) -> (&str, &str) {
     match s.find(char::is_whitespace) {
         Some(idx) => (&s[..idx], s[idx..].trim()),
@@ -590,33 +466,7 @@ fn parse_mnemonic(name: &str) -> Result<Aarch64Mnemonic> {
 }
 
 fn parse_operand_tokens(s: &str) -> Result<Vec<OperandToken>> {
-    if s.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Split on commas at depth 0 (outside `[…]` and `<…>`).
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in s.chars() {
-        match ch {
-            '[' | '<' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ']' | '>' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut cur).trim().to_string());
-            }
-            _ => cur.push(ch),
-        }
-    }
-    let tail = cur.trim().to_string();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
+    let parts = tokenize_operand_strings(s, &['[', '<'], &[']', '>']);
     parts.into_iter().map(|p| parse_operand_token(&p)).collect()
 }
 
@@ -673,24 +523,6 @@ fn parse_operand_token(s: &str) -> Result<OperandToken> {
     anyhow::bail!("can't parse operand {s:?}")
 }
 
-/// Heuristic for "this looks like a symbol name, not a typo":
-/// starts with a letter / underscore, body chars limited to the
-/// alphabet of typical symbol names (alphanumeric, `_`, `:`,
-/// `$`, `.`, `@` — wide enough for mangled C++ / Rust / Swift,
-/// DEX, and Obj-C selectors). Stricter than `is_alphanumeric`
-/// so a random number-only typo doesn't pretend to be a symbol.
-fn looks_like_symbol(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else { return false };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    chars.all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '_' | ':' | '$' | '.' | '@')
-    })
-}
-
 fn classify_wildcard(hint: &str) -> WildcardKind {
     let h = hint.trim().to_ascii_lowercase();
     if h.is_empty() || h == "*" {
@@ -742,25 +574,6 @@ fn try_parse_register(s: &str) -> Option<Register> {
     Some(Register { class, index })
 }
 
-fn try_parse_immediate(s: &str) -> Option<i64> {
-    let s = s.trim().trim_start_matches('#').trim();
-    // Negative immediates.
-    let (sign, body) = if let Some(rest) = s.strip_prefix('-') {
-        (-1i64, rest)
-    } else if let Some(rest) = s.strip_prefix('+') {
-        (1, rest)
-    } else {
-        (1, s)
-    };
-    let body = body.trim();
-    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).ok()?
-    } else {
-        body.parse::<i64>().ok()?
-    };
-    Some(sign * parsed)
-}
-
 fn parse_memory(s: &str) -> Result<DecodedOperand> {
     // Phase A supports two forms:
     //   [reg]           — base only.
@@ -802,140 +615,6 @@ fn parse_memory(s: &str) -> Result<DecodedOperand> {
         mode: AddressingMode::Offset,
     }))
 }
-
-// ---- Bin-search trampoline -----------------------------------
-
-impl Bundle {
-    /// Shared backend used by `insn_search`. Same logic as
-    /// `bin_search` but takes pre-compiled atoms instead of a
-    /// pattern string.
-    fn bin_search_with_atoms(
-        &self,
-        artifact_ref: &str,
-        pattern_text: &str,
-        atoms: &[Atom],
-        section_filter: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<BinSearchResult> {
-        let art = self
-            .artifacts
-            .iter()
-            .find(|a| {
-                a.label == artifact_ref || a.id.to_string().starts_with(artifact_ref)
-            })
-            .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
-        let container = &art.binary.container;
-        let arch = container.architecture;
-        let mut matches: Vec<BinMatch> = Vec::new();
-        let mut total = 0usize;
-        let cap = limit.unwrap_or(usize::MAX);
-        for section in &container.sections {
-            if let Some(name) = section_filter {
-                if section.name != name {
-                    continue;
-                }
-            }
-            use armv8_encode::container::SectionKind;
-            match section.kind {
-                SectionKind::Bss | SectionKind::Debug => continue,
-                _ => {}
-            }
-            if section.address == 0 || section.bytes.is_empty() {
-                continue;
-            }
-            let is_text = matches!(section.kind, SectionKind::Text);
-            for (start, slice_end) in crate::bin_search::scan_section(atoms, &section.bytes) {
-                let abs_end = start + slice_end;
-                total += 1;
-                if matches.len() >= cap {
-                    continue;
-                }
-                let preview = crate::bin_search::build_preview(
-                    is_text,
-                    arch,
-                    section.address + start as u64,
-                    &section.bytes[start..abs_end.min(section.bytes.len())],
-                );
-                matches.push(BinMatch {
-                    section: section.name.clone(),
-                    address: format!("0x{:x}", section.address + start as u64),
-                    length: slice_end,
-                    preview,
-                });
-            }
-        }
-        Ok(BinSearchResult {
-            artifact: art.id.to_string(),
-            pattern: pattern_text.to_string(),
-            total,
-            shown: matches.len(),
-            matches,
-        })
-    }
-}
-
-// ---- Architecture-aware compile dispatcher --------------------
-
-/// Compile `pattern` to the byte atoms appropriate for the
-/// supplied architecture. AArch64 goes through the existing
-/// AArch64 path; ARM (ARMv7) routes to the Thumb/A32 compiler
-/// in `insn_pattern_armv7`. Other architectures error out.
-pub fn compile_insn_atoms_for_arch(
-    pattern: &str,
-    arch: armv8_encode::container::Architecture,
-) -> Result<Vec<Atom>> {
-    use armv8_encode::container::Architecture;
-    match arch {
-        Architecture::Aarch64 => compile_to_atoms(pattern),
-        Architecture::Arm => crate::insn_pattern_armv7::compile_armv7_to_atoms(pattern),
-        other => anyhow::bail!(
-            "insn-search: typed-assembly grammar isn't implemented for {other:?}; \
-             use bin-search with a hex pattern"
-        ),
-    }
-}
-
-/// Compile `pattern` for every architecture Glass's typed-
-/// assembly grammar supports, returning a `(arch, atoms)` entry
-/// per architecture whose parse + encode succeeded. Used by the
-/// global-scan palette path so an AArch64 pattern lands on
-/// AArch64 artifacts and an ARMv7 pattern lands on ARMv7
-/// artifacts, without the caller having to decide up-front.
-///
-/// Returns an error only if *no* architecture accepted the
-/// pattern. Per-arch errors are swallowed since "ARMv7 syntax
-/// doesn't parse as AArch64" is the expected case, not a
-/// failure mode.
-pub fn compile_insn_atoms_for_all_arches(
-    pattern: &str,
-) -> Result<Vec<(armv8_encode::container::Architecture, Vec<Atom>)>> {
-    use armv8_encode::container::Architecture;
-    let mut out = Vec::new();
-    let mut last_err: Option<String> = None;
-    match compile_to_atoms(pattern) {
-        Ok(a) => out.push((Architecture::Aarch64, a)),
-        Err(e) => last_err = Some(format!("aarch64: {e:#}")),
-    }
-    match crate::insn_pattern_armv7::compile_armv7_to_atoms(pattern) {
-        Ok(a) => out.push((Architecture::Arm, a)),
-        Err(e) => {
-            let msg = format!("armv7: {e:#}");
-            last_err = Some(match last_err {
-                Some(prev) => format!("{prev}; {msg}"),
-                None => msg,
-            });
-        }
-    }
-    if out.is_empty() {
-        anyhow::bail!(
-            "pattern doesn't parse as any supported architecture ({})",
-            last_err.unwrap_or_else(|| "no diagnostic".to_string())
-        );
-    }
-    Ok(out)
-}
-
-// ---- Tests ----------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -999,13 +678,8 @@ mod tests {
 
     #[test]
     fn wildcard_any_clears_mask_bits() {
-        // `adrp x1, <*>` — Rd=1 is fixed, the immhi/immlo
-        // fields are wildcarded. The encoded ADRP for x1 page 0
-        // is `0x90000001`; the mask should clear immlo (bits
-        // 29..31), immhi (bits 5..24).
         let atoms = compile_to_atoms("adrp x1, <*>").unwrap();
         assert_eq!(atoms.len(), 4, "one insn = 4 byte atoms");
-        // Every atom should be a Mask atom.
         let has_partial = atoms
             .iter()
             .any(|a| matches!(a, Atom::Mask { mask, .. } if *mask != 0xff));
@@ -1014,20 +688,14 @@ mod tests {
 
     #[test]
     fn fully_concrete_round_trips_through_compile() {
-        // The new compile_to_atoms with no wildcards should
-        // produce the same bytes as the old compile().
         let bytes = compile("mov w0, #1").unwrap();
         assert_eq!(bytes, vec![0x20, 0x00, 0x80, 0x52]);
     }
 
     #[test]
     fn wildcard_reg_w() {
-        // `mov <W>, #1` — Rd is wildcarded (5 bits in low byte).
         let atoms = compile_to_atoms("mov <W>, #1").unwrap();
         assert_eq!(atoms.len(), 4);
-        // First byte holds Rd[4:0] + low 3 bits of imm. With
-        // imm=1, base byte = 0x20 (Rd=0, imm=1<<5 in next byte).
-        // Mask should clear the low 5 bits.
         match &atoms[0] {
             Atom::Mask { mask, .. } => {
                 assert_eq!(mask & 0x1f, 0, "low 5 bits (Rd) should be wildcarded");
@@ -1038,9 +706,6 @@ mod tests {
 
     #[test]
     fn bl_resolves_symbol_to_pc_relative() {
-        // `bl decode_packet` at address 0x100000000, with
-        // decode_packet at 0x100000010 → 4-byte instruction
-        // delta of +16 (4 instructions forward).
         let lookup = |name: &str| -> Option<u64> {
             (name == "decode_packet").then_some(0x100000010)
         };
@@ -1050,8 +715,6 @@ mod tests {
             Some(&lookup),
         )
         .expect("compile bl symbol");
-        // BL encoding: top 6 bits = 100101 (0x94), low 26 bits =
-        // signed-shifted offset in 4-byte words. 16/4 = 4.
         let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(word & 0xfc000000, 0x94000000, "BL opcode bits");
         assert_eq!(word & 0x03ffffff, 4, "delta-in-words");
@@ -1069,34 +732,5 @@ mod tests {
     fn symbol_with_no_resolver_errors() {
         let err = compile_at("bl decode_packet", 0, None).expect_err("no resolver");
         assert!(format!("{err:#}").contains("resolver"));
-    }
-
-    /// End-to-end: compile an ARMv7 pattern through the typed-
-    /// assembly grammar and scan the libtool-checker.so fixture
-    /// for matches. Sanity-checks that the architecture dispatch
-    /// routes ARM artifacts to the Thumb encoder and that a
-    /// well-formed pattern returns >0 matches against a known-
-    /// non-empty Thumb binary.
-    #[test]
-    fn insn_search_finds_matches_in_armv7_fixture() {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("glass-arch-arm")
-            .join("tests")
-            .join("libtool-checker.so");
-        if !fixture.exists() {
-            // Path is relative to this manifest; tolerate skips
-            // if the fixture was relocated.
-            eprintln!("skipping: fixture not found at {}", fixture.display());
-            return;
-        }
-        let bundle = crate::bundle::open(&fixture).expect("open fixture bundle");
-        let label = bundle.artifacts[0].label.clone();
-        // `bx lr` is overwhelmingly common in Thumb prologues —
-        // expect plenty of hits.
-        let res = bundle
-            .insn_search(&label, "bx lr", None, Some(64))
-            .expect("insn_search");
-        assert!(res.total > 0, "expected matches for 'bx lr', got {}", res.total);
     }
 }

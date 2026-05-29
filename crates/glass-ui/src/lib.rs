@@ -49,6 +49,7 @@ mod manifest;
 mod palette;
 mod changes_dialog;
 mod checkbox;
+mod editor;
 mod edits;
 mod string_edit_popover;
 mod scrollbar;
