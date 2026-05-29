@@ -72,6 +72,7 @@ mod modifier_picker;
 mod navigation;
 mod op_edit;
 mod op_editor;
+mod smali_annotation_editor;
 mod smali_row_scope;
 mod shell_actions;
 mod shell_render;
