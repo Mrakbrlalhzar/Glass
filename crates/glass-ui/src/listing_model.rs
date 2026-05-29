@@ -183,91 +183,6 @@ impl DataPeek {
         None
     }
 }
-/// X-register indices in the decoded operands, in order they appear.
-/// SP shares an index space with the GP registers via RegisterClass,
-/// but ADRP/ADD targets are always GP X-registers in practice.
-fn x_regs_of(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Vec<u8> {
-    use armv8_encode::isa::aarch64::{DecodedOperand, RegisterClass};
-    let mut out = Vec::with_capacity(insn.operands.len());
-    for op in &insn.operands {
-        if let DecodedOperand::Register(r) = op {
-            if matches!(r.class, RegisterClass::X | RegisterClass::XOrSp) {
-                out.push(r.index);
-            }
-        }
-    }
-    out
-}
-
-/// Pull an immediate value out of an instruction's operands. Supports
-/// plain Immediate, UnsignedImmediate and ShiftedImmediate. None if
-/// there's no immediate operand.
-fn first_imm_of(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Option<i64> {
-    use armv8_encode::isa::aarch64::DecodedOperand;
-    for op in &insn.operands {
-        match op {
-            DecodedOperand::Immediate(v) => return Some(*v),
-            DecodedOperand::UnsignedImmediate(v) => return Some(*v as i64),
-            DecodedOperand::ShiftedImmediate(s) => {
-                return Some(s.value.wrapping_shl(s.shift as u32))
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// If `insn` is `adrp Xd, target`, return `(d_index, target)`.
-fn extract_adrp(
-    insn: &armv8_encode::isa::aarch64::DecodedInstruction,
-) -> Option<(u8, u64)> {
-    use armv8_encode::isa::aarch64::{Aarch64Mnemonic, DecodedOperand};
-    if insn.mnemonic != Aarch64Mnemonic::Adrp {
-        return None;
-    }
-    let regs = x_regs_of(insn);
-    let page = insn.operands.iter().find_map(|op| match op {
-        DecodedOperand::PageTarget(a) => Some(*a),
-        _ => None,
-    });
-    Some((*regs.first()?, page?))
-}
-
-/// If `insn` is an `add Xd, Xs, #imm` whose `Xs` has a known page base,
-/// return `(d_index, s_index, final_addr)`. Returns `None` for any add
-/// shape that isn't a simple `Xd <- Xs + immediate`.
-fn extract_add_with_imm(
-    insn: &armv8_encode::isa::aarch64::DecodedInstruction,
-    page_bases: &[Option<u64>; 32],
-) -> Option<(u8, u8, u64)> {
-    use armv8_encode::isa::aarch64::Aarch64Mnemonic;
-    if insn.mnemonic != Aarch64Mnemonic::Add {
-        return None;
-    }
-    let regs = x_regs_of(insn);
-    if regs.len() < 2 {
-        return None;
-    }
-    let d = regs[0];
-    let s = regs[1];
-    let base = page_bases.get(s as usize).copied().flatten()?;
-    let imm = first_imm_of(insn)?;
-    if imm < 0 {
-        return None;
-    }
-    Some((d, s, base.wrapping_add(imm as u64)))
-}
-
-/// Index of the X-register written by `insn`, if any. Used to
-/// invalidate stale page bases when the destination gets clobbered by
-/// a later instruction. Conservative — we treat the first X-register
-/// operand as the destination, which is correct for almost every
-/// ARM64 instruction we care about (data-proc, ldr, mov, …).
-fn dest_x_reg(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Option<u8> {
-    x_regs_of(insn).into_iter().next()
-}
-
-
 pub fn build_listing_rows(
     text: &TextSectionBytes,
     symbols: &glass_arch_arm::SymbolMap,
@@ -303,13 +218,14 @@ pub fn build_listing_rows(
     // separators). Avoids most reallocations on large sections.
     let mut rows = Vec::with_capacity(n + n / 8);
 
-    // ADRP+ADD pair tracking. For each X-register we remember the
-    // most recent ADRP page address loaded into it; any later ADD that
-    // sources from that register resolves to `page + imm`. We
-    // invalidate a slot whenever an instruction writes to its
-    // register (the conservative rule — a write loses the page base
-    // for further resolution).
-    let mut x_page_bases: [Option<u64>; 32] = [None; 32];
+    // ADRP+ADD pair tracking via the shared facade tracker. For
+    // each X-register the tracker remembers the most recent ADRP
+    // page address loaded into it; any later ADD that sources from
+    // that register resolves to `page + imm`. The tracker
+    // invalidates a slot whenever an instruction writes to its
+    // register (the conservative rule — a write loses the page
+    // base for further resolution).
+    let mut tracker = glass_arch_arm::PageBaseTracker::new();
 
     for i in 0..n {
         if i % 1024 == 0 {
@@ -441,27 +357,33 @@ pub fn build_listing_rows(
         };
 
         // Pair / direct-address comment. Cases (first match wins):
-        //   1. ADD Xd, Xs, #imm  where x_page_bases[Xs] is some(page)
-        //      → resolved = page + imm; peek string.
+        //   1. ADD Xd, Xs, #imm  where the tracker has a page base
+        //      for Xs → resolved = page + imm; peek string.
         //   2. ADR Xd, label     → resolved = label; peek string.
-        let mut resolved_addr: Option<u64> = None;
-        // Source reg of a matched ADD — needed to find the ADRP
-        // row for the cross-section retro-label below.
-        let mut resolved_via_source: Option<u8> = None;
-        if let Some(insn) = decoded.as_ref() {
-            if let Some((_d, s, target)) = extract_add_with_imm(insn, &x_page_bases) {
-                resolved_addr = Some(target);
-                resolved_via_source = Some(s);
-            } else if matches!(
-                insn.mnemonic,
-                armv8_encode::isa::aarch64::Aarch64Mnemonic::Adr
-            ) {
-                resolved_addr = insn.operands.iter().find_map(|op| match op {
-                    armv8_encode::isa::aarch64::DecodedOperand::BranchTarget(a) => {
-                        Some(*a)
-                    }
-                    _ => None,
-                });
+        //
+        // `observe` mutates tracker state for this instruction (sets
+        // an ADRP slot or invalidates a written one); for AArch64
+        // the legacy listing applied the same state changes AFTER
+        // pushing the row, but the only consumer was the next
+        // iteration so the order is observationally identical.
+        let wrapped = decoded.as_ref().cloned().map(glass_arch_arm::DecodedInsn::Aarch64);
+        let fusion = wrapped.as_ref().and_then(|w| tracker.observe(w));
+        let mut resolved_addr: Option<u64> = fusion.map(|f| f.target);
+        let mut resolved_via_source: Option<u8> = fusion.map(|f| f.source_register);
+        if resolved_addr.is_none() {
+            if let Some(insn) = decoded.as_ref() {
+                if matches!(
+                    insn.mnemonic,
+                    armv8_encode::isa::aarch64::Aarch64Mnemonic::Adr
+                ) {
+                    resolved_addr = insn.operands.iter().find_map(|op| match op {
+                        armv8_encode::isa::aarch64::DecodedOperand::BranchTarget(a) => {
+                            Some(*a)
+                        }
+                        _ => None,
+                    });
+                    resolved_via_source = None;
+                }
             }
         }
         let comment = if let Some(addr_for_string) = resolved_addr {
@@ -511,10 +433,10 @@ pub fn build_listing_rows(
         // destination at a glance; the negative offset makes the
         // arithmetic explicit (ADRP + ADD = dest, so ADRP =
         // dest - ADD_imm).
-        if let (Some(target), Some(src), Some(insn)) =
-            (resolved_addr, resolved_via_source, decoded.as_ref())
+        if let (Some(target), Some(src), Some(insn_w)) =
+            (resolved_addr, resolved_via_source, wrapped.as_ref())
         {
-            let add_imm = first_imm_of(insn).unwrap_or(0);
+            let add_imm = insn_w.first_imm().unwrap_or(0);
             if add_imm > 0 {
                 if let Some(row_idx) =
                     x_page_origin_row.get(src as usize).copied().flatten()
@@ -551,21 +473,40 @@ pub fn build_listing_rows(
             }
         }
 
-        // Update per-register page-base state.
+        // Update the per-register *origin-row* bookkeeping that
+        // sits alongside the shared `PageBaseTracker`. The tracker
+        // itself was already advanced by `observe` above; we only
+        // need to remember which row produced each ADRP page so
+        // the cross-section retro-label can rewrite it later.
         //
-        //   - ADRP Xd, page  → x_page_bases[d] = page.
-        //   - Otherwise, if the instruction writes Xd, invalidate
-        //     x_page_bases[d] (a write loses the page base).
+        //   - ADRP Xd, page  → record this row's index for Xd.
+        //   - A completing ADD does NOT touch origin-row state
+        //     (matches the legacy `extract_add_with_imm` arm).
+        //   - Any other write to Xd clears the origin slot.
         if let Some(insn) = decoded.as_ref() {
-            if let Some((d, page)) = extract_adrp(insn) {
-                if (d as usize) < x_page_bases.len() {
-                    x_page_bases[d as usize] = Some(page);
-                    x_page_origin_row[d as usize] = Some(rows.len() - 1);
+            use armv8_encode::isa::aarch64::{Aarch64Mnemonic, DecodedOperand, RegisterClass};
+            let first_x = insn.operands.iter().find_map(|op| match op {
+                DecodedOperand::Register(r)
+                    if matches!(r.class, RegisterClass::X | RegisterClass::XOrSp) =>
+                {
+                    Some(r.index)
                 }
-            } else if let Some(d) = dest_x_reg(insn) {
-                if (d as usize) < x_page_bases.len() {
-                    x_page_bases[d as usize] = None;
-                    x_page_origin_row[d as usize] = None;
+                _ => None,
+            });
+            if insn.mnemonic == Aarch64Mnemonic::Adrp {
+                if let Some(d) = first_x {
+                    if (d as usize) < x_page_origin_row.len() {
+                        x_page_origin_row[d as usize] = Some(rows.len() - 1);
+                    }
+                }
+            } else if fusion.is_none() {
+                // Non-completing instruction: invalidate origin row
+                // for the destination register. Mirrors the legacy
+                // `dest_x_reg` invalidation branch.
+                if let Some(d) = first_x {
+                    if (d as usize) < x_page_origin_row.len() {
+                        x_page_origin_row[d as usize] = None;
+                    }
                 }
             }
         }
@@ -770,7 +711,6 @@ fn build_listing_rows_armv7(
     progress: Option<&Arc<Mutex<Progress>>>,
 ) -> Vec<ListingRow> {
     use armv8_encode::mc::InstructionInfo;
-    use glass_arch_arm::RegKind;
     let Some(precomputed) = text.precomputed.as_ref() else {
         return Vec::new();
     };
@@ -790,7 +730,7 @@ fn build_listing_rows_armv7(
     // is the modern PIC compiler's replacement for the literal-pool
     // pattern. Each slot holds the pending low-16 value for that
     // register; any non-movt write clears it.
-    let mut r_movw_lo: [Option<u16>; 16] = [None; 16];
+    let mut tracker = glass_arch_arm::PageBaseTracker::new();
     for (i, insn) in precomputed.iter().enumerate() {
         if i % 1024 == 0 {
             if let Some(p) = progress {
@@ -895,39 +835,24 @@ fn build_listing_rows_armv7(
                 }
             }
         }
-        // Step 2: update the movw/movt tracker and, on a completed
-        // pair, peek a string at the fused 32-bit constant.
-        if let Some((rd, lo)) = insn.armv7_movw() {
-            // movw resets the slot to its new low half. (A later
-            // non-movt write to the same register would invalidate it
-            // via the dest-register check below.)
-            if (rd as usize) < r_movw_lo.len() {
-                r_movw_lo[rd as usize] = Some(lo);
-            }
-        } else if let Some((rd, hi)) = insn.armv7_movt() {
-            if (rd as usize) < r_movw_lo.len() {
-                if let Some(lo) = r_movw_lo[rd as usize].take() {
-                    let fused = (u32::from(hi) << 16) | u32::from(lo);
-                    if comment_text.is_none() {
-                        // Try the fused address first (in case the
-                        // constant points directly at a string),
-                        // then dereference one level for the
-                        // pointer-to-string variant.
-                        if let Some(s) = data.peek_string(fused as u64, 64) {
-                            comment_text = Some(s);
-                        } else if let Some(ptr) = data.peek_u32_le(fused as u64) {
-                            if let Some(s) = data.peek_string(ptr as u64, 64) {
-                                comment_text = Some(s);
-                            }
-                        }
+        // Step 2: update the shared movw/movt tracker and, on a
+        // completed pair, peek a string at the fused 32-bit
+        // constant. The tracker handles slot invalidation on any
+        // non-movt write to an ARM GPR internally.
+        if let Some(ft) = tracker.observe(insn) {
+            let fused = ft.target;
+            if comment_text.is_none() {
+                // Try the fused address first (in case the
+                // constant points directly at a string), then
+                // dereference one level for the pointer-to-string
+                // variant.
+                if let Some(s) = data.peek_string(fused, 64) {
+                    comment_text = Some(s);
+                } else if let Some(ptr) = data.peek_u32_le(fused) {
+                    if let Some(s) = data.peek_string(ptr as u64, 64) {
+                        comment_text = Some(s);
                     }
                 }
-            }
-        } else if let Some(dest) = insn.dest_register() {
-            // Any other write to an Arm GPR invalidates that slot —
-            // we lose the pending low half and won't try to fuse.
-            if dest.kind == RegKind::ArmGpr && (dest.index as usize) < r_movw_lo.len() {
-                r_movw_lo[dest.index as usize] = None;
             }
         }
         let comment = match comment_text {

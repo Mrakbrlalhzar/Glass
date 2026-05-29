@@ -161,6 +161,7 @@ pub fn build_native_xrefs(
     progress: &Arc<parking_lot::Mutex<XrefProgress>>,
 ) -> NativeXrefs {
     use armv8_encode::isa::aarch64;
+    use glass_arch_arm::{DecodedInsn, PageBaseTracker};
     let mut out: NativeXrefs = HashMap::new();
     let mut processed_total = 0usize;
     for ((aid, _name), section) in text_sections {
@@ -168,8 +169,8 @@ pub fn build_native_xrefs(
         let bytes: &[u8] = section.bytes.as_ref();
         let n = bytes.len() / 4;
         let per_artifact = out.entry(aid.clone()).or_default();
-        // Page-base state per X-register, mirroring build_listing_rows.
-        let mut x_page_bases: [Option<u64>; 32] = [None; 32];
+        // Shared fusion tracker — same idioms as `build_listing_rows`.
+        let mut tracker = PageBaseTracker::new();
         for i in 0..n {
             let addr = base + (i as u64) * 4;
             let word = u32::from_le_bytes([
@@ -191,21 +192,10 @@ pub fn build_native_xrefs(
             {
                 per_artifact.entry(target).or_default().push(addr);
             }
-            // Track ADRP / ADD pairs.
-            if let Some((d, page)) = extract_adrp(&insn) {
-                if (d as usize) < x_page_bases.len() {
-                    x_page_bases[d as usize] = Some(page);
-                }
-            } else if let Some((d, _s, target)) =
-                extract_add_with_imm(&insn, &x_page_bases)
-            {
-                per_artifact.entry(target).or_default().push(addr);
-                let _ = d;
-            } else if let Some(d) = dest_x_reg(&insn) {
-                // Any other write to Xd invalidates its page base.
-                if (d as usize) < x_page_bases.len() {
-                    x_page_bases[d as usize] = None;
-                }
+            // ADRP+ADD fusion via the shared tracker.
+            let wrapped = DecodedInsn::Aarch64(insn);
+            if let Some(ft) = tracker.observe(&wrapped) {
+                per_artifact.entry(ft.target).or_default().push(addr);
             }
             // Progress at 1024-insn cadence to keep lock contention low.
             if i % 1024 == 0 {
@@ -225,79 +215,6 @@ pub fn build_native_xrefs(
         }
     }
     out
-}
-
-// Tiny helpers duplicated from `listing_model.rs` so the builder
-// doesn't reach across module boundaries for private fns. Same
-// shape, kept private here.
-
-fn x_regs_of(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Vec<u8> {
-    use armv8_encode::isa::aarch64::{DecodedOperand, RegisterClass};
-    let mut out = Vec::with_capacity(insn.operands.len());
-    for op in &insn.operands {
-        if let DecodedOperand::Register(r) = op {
-            if matches!(r.class, RegisterClass::X | RegisterClass::XOrSp) {
-                out.push(r.index);
-            }
-        }
-    }
-    out
-}
-
-fn first_imm_of(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Option<i64> {
-    use armv8_encode::isa::aarch64::DecodedOperand;
-    for op in &insn.operands {
-        match op {
-            DecodedOperand::Immediate(v) => return Some(*v),
-            DecodedOperand::UnsignedImmediate(v) => return Some(*v as i64),
-            DecodedOperand::ShiftedImmediate(s) => {
-                return Some(s.value.wrapping_shl(s.shift as u32))
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn extract_adrp(
-    insn: &armv8_encode::isa::aarch64::DecodedInstruction,
-) -> Option<(u8, u64)> {
-    use armv8_encode::isa::aarch64::{Aarch64Mnemonic, DecodedOperand};
-    if insn.mnemonic != Aarch64Mnemonic::Adrp {
-        return None;
-    }
-    let regs = x_regs_of(insn);
-    let page = insn.operands.iter().find_map(|op| match op {
-        DecodedOperand::PageTarget(a) => Some(*a),
-        _ => None,
-    });
-    Some((*regs.first()?, page?))
-}
-
-fn extract_add_with_imm(
-    insn: &armv8_encode::isa::aarch64::DecodedInstruction,
-    page_bases: &[Option<u64>; 32],
-) -> Option<(u8, u8, u64)> {
-    use armv8_encode::isa::aarch64::Aarch64Mnemonic;
-    if insn.mnemonic != Aarch64Mnemonic::Add {
-        return None;
-    }
-    let regs = x_regs_of(insn);
-    if regs.len() < 2 {
-        return None;
-    }
-    let d = regs[0];
-    let s = regs[1];
-    let base = page_bases.get(s as usize).copied().flatten()?;
-    let imm = first_imm_of(insn)?;
-    if imm < 0 {
-        return None;
-    }
-    Some((d, s, base.wrapping_add(imm as u64)))
-}
-
-fn dest_x_reg(insn: &armv8_encode::isa::aarch64::DecodedInstruction) -> Option<u8> {
-    x_regs_of(insn).into_iter().next()
 }
 
 // ---- DEX field refs builder -----------------------------------------------

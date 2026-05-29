@@ -385,6 +385,162 @@ fn armv7_movw_movt_operands(insn: &DecodedInsn) -> Option<(u8, u16)> {
     Some((dest.index, (imm as u32 & 0xFFFF) as u16))
 }
 
+/// Result of a successful fusion-pair completion. Carries enough
+/// info for both consumers:
+///   * `target` — the listing comment renderer ("; \"foo\"") and
+///     the xref index both record this.
+///   * `source_register` — the listing's per-row retro-label
+///     (the ADRP row gets relabelled with the destination section
+///     when the pair resolves to a different section). Equals the
+///     destination register for ARMv7 movw+movt (since the pair
+///     consumes its own previous write).
+#[derive(Debug, Clone, Copy)]
+pub struct FusionTarget {
+    pub target: u64,
+    pub source_register: u8,
+}
+
+/// Stateful tracker for cross-instruction fusion idioms used to
+/// resolve "what address does this pair of instructions actually
+/// reference?". Walk decoded instructions in source order via
+/// `observe(insn) -> Option<FusionTarget>`.
+///
+/// Supported idioms:
+///   * AArch64 `ADRP Xd, page ; ADD Xd, Xs, #imm`. Returns
+///     target = page + imm.
+///   * ARMv7 (Thumb-2 / A32) `movw Rd, #lo16 ; movt Rd, #hi16`.
+///     Returns target = (hi16 << 16) | lo16.
+///
+/// Any non-completing write to a tracked register invalidates
+/// that slot — same conservative rule both call sites used before.
+///
+/// AArch64 state slots are unused for ARMv7 inputs and vice
+/// versa. Either ISA can produce mixed observations without
+/// confusing the other's state.
+#[derive(Debug, Default, Clone)]
+pub struct PageBaseTracker {
+    aarch64_pages: [Option<u64>; 32],
+    armv7_movw_lo: [Option<u16>; 16],
+}
+
+impl PageBaseTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Consume one instruction in source order. Returns the
+    /// fused absolute address when this instruction completes a
+    /// known pair; updates internal state otherwise.
+    pub fn observe(&mut self, insn: &DecodedInsn) -> Option<FusionTarget> {
+        match insn {
+            DecodedInsn::Aarch64(a64) => self.observe_aarch64(a64),
+            DecodedInsn::Arm(_) | DecodedInsn::Thumb(_) => self.observe_armv7(insn),
+        }
+    }
+
+    fn observe_aarch64(&mut self, insn: &Aarch64Insn) -> Option<FusionTarget> {
+        use armv8_encode::isa::aarch64::{Aarch64Mnemonic, DecodedOperand, RegisterClass};
+        // Collect X-register operand indices in order.
+        let mut x_regs: Vec<u8> = Vec::with_capacity(insn.operands.len());
+        for op in &insn.operands {
+            if let DecodedOperand::Register(r) = op {
+                if matches!(r.class, RegisterClass::X | RegisterClass::XOrSp) {
+                    x_regs.push(r.index);
+                }
+            }
+        }
+        // 1. ADRP — update page slot, no completion.
+        if insn.mnemonic == Aarch64Mnemonic::Adrp {
+            let page = insn.operands.iter().find_map(|op| match op {
+                DecodedOperand::PageTarget(a) => Some(*a),
+                _ => None,
+            });
+            if let (Some(&d), Some(page)) = (x_regs.first(), page) {
+                if (d as usize) < self.aarch64_pages.len() {
+                    self.aarch64_pages[d as usize] = Some(page);
+                }
+            }
+            return None;
+        }
+        // 2. ADD Xd, Xs, #imm — potential completion.
+        if insn.mnemonic == Aarch64Mnemonic::Add && x_regs.len() >= 2 {
+            let d = x_regs[0];
+            let s = x_regs[1];
+            if let Some(base) = self.aarch64_pages.get(s as usize).copied().flatten() {
+                // Pull the first immediate.
+                let imm = insn.operands.iter().find_map(|op| match op {
+                    DecodedOperand::Immediate(v) => Some(*v),
+                    DecodedOperand::UnsignedImmediate(v) => Some(*v as i64),
+                    DecodedOperand::ShiftedImmediate(s) => {
+                        Some(s.value.wrapping_shl(s.shift as u32))
+                    }
+                    _ => None,
+                });
+                if let Some(imm) = imm {
+                    if imm >= 0 {
+                        // Completion. Per legacy semantics, the
+                        // destination register is NOT invalidated
+                        // here — callers used to fall through to a
+                        // `dest_x_reg` invalidate only in the
+                        // non-ADRP, non-completing-ADD branch.
+                        // However in practice the listing always
+                        // overwrote `x_page_bases[d]` to None when
+                        // d != s via the dest_x_reg path. To match
+                        // the legacy behaviour, leave it as-is and
+                        // let the next non-completing write clear
+                        // it.
+                        let _ = d;
+                        return Some(FusionTarget {
+                            target: base.wrapping_add(imm as u64),
+                            source_register: s,
+                        });
+                    }
+                }
+            }
+        }
+        // 3. Any other write to an X register invalidates that slot.
+        if let Some(&d) = x_regs.first() {
+            if (d as usize) < self.aarch64_pages.len() {
+                self.aarch64_pages[d as usize] = None;
+            }
+        }
+        None
+    }
+
+    fn observe_armv7(&mut self, insn: &DecodedInsn) -> Option<FusionTarget> {
+        // movw Rd, #lo16 — store the low half.
+        if let Some((rd, lo)) = insn.armv7_movw() {
+            if (rd as usize) < self.armv7_movw_lo.len() {
+                self.armv7_movw_lo[rd as usize] = Some(lo);
+            }
+            return None;
+        }
+        // movt Rd, #hi16 — complete the pair if a low half was
+        // pending for this register.
+        if let Some((rd, hi)) = insn.armv7_movt() {
+            if (rd as usize) < self.armv7_movw_lo.len() {
+                if let Some(lo) = self.armv7_movw_lo[rd as usize].take() {
+                    let fused = (u32::from(hi) << 16) | u32::from(lo);
+                    return Some(FusionTarget {
+                        target: fused as u64,
+                        source_register: rd,
+                    });
+                }
+            }
+            return None;
+        }
+        // Any other write to an ARM GPR invalidates the slot.
+        if let Some(dest) = insn.dest_register() {
+            if dest.kind == RegKind::ArmGpr
+                && (dest.index as usize) < self.armv7_movw_lo.len()
+            {
+                self.armv7_movw_lo[dest.index as usize] = None;
+            }
+        }
+        None
+    }
+}
+
 impl From<Aarch64Insn> for DecodedInsn {
     fn from(i: Aarch64Insn) -> Self { DecodedInsn::Aarch64(i) }
 }

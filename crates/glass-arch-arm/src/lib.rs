@@ -27,7 +27,7 @@ pub use cfg::{
     InstructionEntry,
 };
 pub use disasm::{disassemble_function_at, precompute_section_insns};
-pub use facade::{DecodedInsn, RegKind, RegRef};
+pub use facade::{DecodedInsn, FusionTarget, PageBaseTracker, RegKind, RegRef};
 pub use format::{Chunk, ChunkKind};
 pub use macho_fat::thin_slice_macho;
 pub use symbol_map::{
