@@ -786,14 +786,18 @@ impl Shell {
             // Hex: cheap to build (one row per 16 bytes), do it inline
             // on first activation.
             TabKind::Hex { artifact, section } => {
-                let key = (artifact.clone(), section.clone());
-                let Some(data) = bundle.data_sections.get(&key) else {
+                // `hex_view_section` looks up the data section first
+                // and falls through to `text_sections` if the user
+                // asked for `.text` (the "Open hex view here" context
+                // menu does this). We hold an owned `DataSectionBytes`
+                // either way; the Arc inside is the only real cost.
+                let Some(data) = bundle.hex_view_section(artifact, section) else {
                     return;
                 };
                 if tab.hex_rows.is_none() {
                     let empty = glass_arch_arm::SymbolMap::default();
                     let symbols = bundle.symbol_maps.get(artifact).unwrap_or(&empty);
-                    let rows = build_hex_rows(data, symbols);
+                    let rows = build_hex_rows(&data, symbols);
                     tab.scroll = ListState::new(rows.len(), ListAlignment::Top, px(2000.));
                     tab.hex_rows = Some(Arc::new(rows));
                 }

@@ -26,12 +26,36 @@ impl Shell {
         address: u64,
         cx: &mut Context<Self>,
     ) {
-        let initial = match self
-            .bundle()
-            .and_then(|b| b.bytes_at(&artifact, address))
-        {
-            Some(bytes) => decode_insn_pretty(&bytes, address),
-            None => return,
+        let Some(bundle) = self.bundle() else { return };
+        // Architecture-aware initial text. AArch64 always decodes
+        // a fixed-width 4-byte word; ARMv7 has a precomputed
+        // `DecodedInsn` per real instruction start address whose
+        // `format_text()` is the canonical assembly — using it
+        // also makes the editor robust to Thumb's variable width
+        // (the 4-byte `bytes_at` path was decoding ARMv7 bytes as
+        // AArch64 and producing either random instructions or
+        // `.word 0x…` fallback).
+        let initial = if bundle.is_armv7_text(&artifact, address) {
+            match bundle.precomputed_insn_at(&artifact, address) {
+                Some(insn) => insn.format_text(),
+                None => {
+                    // No precomputed instruction at this exact
+                    // address — the user clicked into the middle
+                    // of a Thumb-2 32-bit insn or onto a literal-
+                    // pool byte. Refuse: editing the wrong byte
+                    // position would corrupt the surrounding row.
+                    tracing::warn!(
+                        ?address,
+                        "disasm-edit refused: no ARMv7 instruction starts at this address"
+                    );
+                    return;
+                }
+            }
+        } else {
+            match bundle.bytes_at(&artifact, address) {
+                Some(bytes) => decode_insn_pretty(&bytes, address),
+                None => return,
+            }
         };
         self.begin_disasm_edit(artifact, address, initial, cx);
     }
@@ -171,11 +195,11 @@ impl Shell {
     /// cursor. Cheap — symbol scans are linear over the
     /// artifact's symbol map (typically a few thousand entries).
     pub(crate) fn refresh_disasm_edit_suggestions(&mut self) {
-        // Pull input + artifact before grabbing the mutable
-        // borrow so we can still read `self.bundle()` while
+        // Pull input + artifact + address before grabbing the
+        // mutable borrow so we can still read `self.bundle()` while
         // building the suggestion list.
-        let (text, artifact) = match self.disasm_edit.as_ref() {
-            Some(e) => (e.input.text().to_string(), e.artifact.clone()),
+        let (text, artifact, address) = match self.disasm_edit.as_ref() {
+            Some(e) => (e.input.text().to_string(), e.artifact.clone(), e.address),
             None => return,
         };
         let cursor = self
@@ -187,7 +211,28 @@ impl Shell {
         let mut out: Vec<crate::EditSuggestion> = Vec::new();
         match ctx.kind {
             glass_api::CursorKind::Mnemonic => {
-                let variants = glass_api::match_insn_variants(&ctx.partial, 12);
+                // The row's ISA decides which variants to surface.
+                // Without this filter, editing an ARMv7 row would
+                // list AArch64 `mov w, w` / `mov x, x` candidates
+                // intermixed with the relevant `mov r, r` ones —
+                // the user has to type a discriminating token like
+                // `r1` before the noise goes away. Filtering up
+                // front shows only relevant variants from the
+                // first keystroke.
+                let armv7 = self
+                    .bundle()
+                    .map(|b| b.is_armv7_text(&artifact, address))
+                    .unwrap_or(false);
+                let allowed: &[glass_api::VariantIsa] = if armv7 {
+                    &[
+                        glass_api::VariantIsa::ArmThumb,
+                        glass_api::VariantIsa::ArmA32,
+                    ]
+                } else {
+                    &[glass_api::VariantIsa::Aarch64]
+                };
+                let variants =
+                    glass_api::match_insn_variants_for_isa(&ctx.partial, 12, allowed);
                 for cand in variants {
                     out.push(crate::EditSuggestion {
                         label: cand.variant.template.clone().into(),

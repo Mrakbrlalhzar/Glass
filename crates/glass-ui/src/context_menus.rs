@@ -107,6 +107,20 @@ impl Shell {
                 });
             }
         }
+        // 1b) Open the same address as a hex view. Useful when the
+        // typed-assembly editor can't express what the user wants
+        // (custom byte sequences, padding NOPs, encodings the
+        // grammar doesn't cover yet). The hex tab dedupes by
+        // section, so a section's hex view + listing view can
+        // coexist as two tabs.
+        if let Some(section) = bundle.text_section_for_addr(&artifact, addr) {
+            items.push(ContextMenuItem::OpenHexHere {
+                artifact: artifact.clone(),
+                section: section.to_string(),
+                addr,
+                label: SharedString::from(format!("0x{addr:x}")),
+            });
+        }
         // 2) Annotation items. Always address-keyed: the user
         //    right-clicked a specific row, so that row is the
         //    intent. Function-level tagging is still possible —
@@ -795,6 +809,16 @@ impl Shell {
             }
             ContextMenuItem::RevertDisasmEdit { artifact, vaddr, .. } => {
                 self.revert_disasm_edit(artifact, vaddr, cx);
+            }
+            ContextMenuItem::OpenHexHere { artifact, section, addr, .. } => {
+                // Open in a fresh tab rather than reusing an
+                // existing Hex tab on the same section — the
+                // user explicitly asked to see this address,
+                // and the existing tab might be scrolled
+                // elsewhere. (open_hex_in_new_tab dedupes by
+                // section so we'd lose the scroll target on
+                // reuse anyway.)
+                self.open_hex_in_new_tab(artifact, section, addr, cx);
             }
             ContextMenuItem::RevertSmaliClassEdit { artifact, class_jni, .. } => {
                 self.revert_smali_class_edit(artifact, class_jni, cx);

@@ -4,9 +4,10 @@
 A fast, native, **mobile-app first** interactive disassembler. Spiritual successor to IDA Pro for the Android / iOS reverse engineering workflow, built around:
 
 - `smali` for APK / DEX / smali handling
-- `armv8-encode` for AArch64 (native `.so`, iOS Mach-O)
+- `armv8-encode` for AArch64 and ARMv7 (A32 / Thumb) — native `.so`, iOS Mach-O
 - `gpui` (Zed) for GPU-accelerated native UI
 - `redb` for content-addressed persistence
+- An in-built MCP server so any MCP-aware host (Claude Desktop, Cursor, Zed) can drive Glass directly
 - `rquickjs` for scriptable plugins (planned)
 
 License: GPL-3.0-only (inherited from `smali`).
@@ -18,15 +19,16 @@ We’ve all used IDA Pro — it’s the industry standard for reversing and has 
 ## Features
 * Buttery smooth 120fps GPU accelerated rendering
 * Lightning fast analysis: 1-2 seconds for most larger binaries compared with minutes on IDA Pro
+* AArch64 **and** ARMv7 (ARM mode + Thumb) disassembly — covers iOS arm64 / arm64e and both common Android ABIs.
 * Fully linked and annotated disassemblies with control flow lines, data literals in comments, clickable links to other functions. All coloured for easy visibility.
 * Control flow graphs showing basic blocks and clickable links to other functions
 * Full project search for symbols or string literals across DEX, code and data sections
 * Native binary layout overview with section data
 * Xref search of callers, references to data
-* Binary search of sequences of bytes with masking and gaps across code and data
-* Search for asm instructions or patterns of instructions across all sections 
-* Annotate any line (code or data) with a colour and/or comment so you can easily find it again later. 
-* In place editing of instructions and data (double-click on item), rebuild the app for export.
+* Binary and instruction search across **every** native artifact in the bundle (so both `arm64-v8a` and `armeabi-v7a` copies of a library are searched in one query). Byte-pattern grammar with masking + gaps; typed-assembly grammar for AArch64 and ARMv7, with an ISA-aware autocomplete dropdown.
+* Annotate any line (code or data) with a colour and/or comment so you can easily find it again later.
+* In-place editing of instructions and data (double-click an item). Smali class editor + AArch64 / ARMv7 instruction editor; right-click any listing row to open a byte-level hex view at the same address as an escape hatch.
+* MCP server exposes every analysis verb as a tool for any MCP-aware host — Claude Desktop, Cursor, Zed.
 * Themes for Glass and also selectable background colours for each workspace.
 
 
@@ -151,7 +153,9 @@ Full grammar + worked examples: [`docs/BinSearch.md`](docs/BinSearch.md).
 
 ### Instruction search
 
-Write the assembly, Glass compiles it to bytes. A `;`-separated AArch64 sequence is encoded via [armv8-encode](https://github.com/azw413/armv8-encode), and any wildcards are translated to operand-bit masks before the byte engine takes over. Inside Binary mode in the GUI, ⌘B toggles between **Bytes** and **Asm** grammars; an autocomplete dropdown shows variants that still match what you've typed.
+Write the assembly, Glass compiles it to bytes. A `;`-separated sequence is encoded via [armv8-encode](https://github.com/azw413/armv8-encode) — **AArch64** (`mov w0, #1`, `adrp x1, *`) and **ARMv7** in both modes (Thumb `mov r1, r7` / `bxeq lr` / `push {r4-r7, lr}` and A32). Any wildcards are translated to operand-bit masks before the byte engine takes over. The scan is global — every native artifact in the bundle gets the right ISA's atoms (Android apps with both `arm64-v8a` and `armeabi-v7a` libraries are searched in a single query).
+
+Inside Binary mode in the GUI, ⌘B toggles between **Bytes** and **Asm** grammars; an ISA-aware autocomplete dropdown shows variants that still match what you've typed — `r1` filters out AArch64 candidates, `w0` filters out ARMv7 ones.
 
 Wildcards:
 
@@ -159,15 +163,22 @@ Wildcards:
 |---|---|
 | `*` | any operand (kind inferred from the chosen opcode) |
 | `#*` | any immediate (hints the opcode picker) |
-| `x`, `w` | any X- or W-class register |
-| `<*>`, `<X>`, `<W>`, `<imm>` | bracketed equivalents, useful nested in other syntax (`[x, #*]`) |
+| `x`, `w` | any AArch64 X- or W-class register |
+| `r` | any ARMv7 GPR (`r0..r15`, `sp`, `lr`, `pc`) |
+| `<*>`, `<X>`, `<W>`, `<R>`, `<imm>` | bracketed equivalents, useful nested in other syntax (`[x, #*]`, `[r, #*]`) |
 
 ```sh
-# every `mov w0, #N` (any N)
+# AArch64 — every `mov w0, #N` (any N)
 glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'mov w0, #*'
 
-# any ADRP into x1 followed immediately by ADD into the same reg
+# AArch64 — any ADRP into x1 followed immediately by ADD into the same reg
 glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'adrp x1, * ; add x1, x1, #*'
+
+# ARMv7 (Thumb) — `mov r1, r*` followed by a return
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'mov r1, r* ; bx lr'
+
+# ARMv7 (any cond) — conditional bx in literal-pool callers
+glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'bxeq lr'
 
 # every `ret x30` — concrete, no wildcards
 glass insn-search ./libfoo.so --artifact libfoo.so --pattern 'ret'
@@ -180,7 +191,7 @@ Full design + phasing: [`docs/InsnPattern.md`](docs/InsnPattern.md). CLI/MCP ref
 
 ## Current Status
 
-Glass is usable today for reversing both Android (APK / DEX / native `.so`) and iOS (IPA / Mach-O) apps targeting AArch64. 32-bit ARM is on the roadmap.
+Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (IPA / Mach-O) apps targeting AArch64 **and** 32-bit ARMv7 (`armeabi-v7a` libraries, A32 + Thumb).
 
 ### What works
 
@@ -200,7 +211,14 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 - Class tree across all DEX files in the APK.
 - Smali listing per class with syntax-aware tokenization (directives, types, method names, string literals, etc.).
 - Method cross-references resolve to the right class + line.
-- Native `.so` files under `lib/<abi>/` loaded per ABI; AArch64 gets disassembly, other ABIs route to the hex view.
+- Native `.so` files under `lib/<abi>/` loaded per ABI; AArch64 (`arm64-v8a`) and ARMv7 (`armeabi-v7a`) both get full disassembly views. Other ABIs (x86 / x86_64) route to the hex view until a decoder lands.
+
+**Editing**
+- Smali class editor (double-click a class header / field / method to open inline editors).
+- AArch64 in-place instruction editing: type new assembly, Glass encodes it back to bytes; staged changes show as a green tint in the listing until you Export to a new APK / IPA.
+- ARMv7 in-place editing: handles same-width swaps, 4-byte → 2-byte shrinks (auto-pads with a Thumb-1 NOP), and 2-byte → 4-byte grows that consume a following NOP. Refuses unsafe grows that would shift downstream code.
+- ISA-aware autocomplete in the inline editor — typing `r1` shows ARMv7 variants only; `w0` shows AArch64 only.
+- Right-click any listing row → **Open hex view here** to drop into a byte-level hex editor at the same address when the typed-assembly editor can't express what you need.
 
 **AArch64 native (ELF + thin Mach-O)**
 - Linear-sweep disassembly with virtualized rendering — large libraries open in seconds, not minutes.
@@ -208,25 +226,37 @@ Glass is usable today for reversing both Android (APK / DEX / native `.so`) and 
 - Branch operands rendered as clickable symbol references; `adrp` + `add`/`ldr` pairs resolved to data targets, including string literals shown inline as comments.
 - Per-section views (code sections get disassembly; data sections get a hex view).
 
+**ARMv7 native (ELF)**
+- Recursive-descent disassembly from symbol entry points so literal pools, jump tables and inline data don't get mis-decoded as instructions. Per-symbol mode (ARM vs Thumb) honoured via the low-bit marker.
+- Variable-width Thumb rendering: 16-bit Thumb-1 rows show 2 bytes (no phantom `00 00` padding), 32-bit Thumb-2 and A32 show 4.
+- Symbol map: ELF symtab, DWARF, `.eh_frame`, and synthesized `<name>@plt` entries (12-byte stubs).
+- `movw + movt` fusion: `movw R, #lo16 ; movt R, #hi16` is detected across instruction pairs and the resolved 32-bit constant gets a `; "..."` rodata-string comment on the `movt` row.
+- Thumb `ldr Rt, [pc, #imm]` literal-pool loads dereference one level into rodata for the same kind of inline string comment AArch64's ADRP+ADD path produces.
+- Control-flow arrow gutter on conditional and unconditional branches (same lane assignment as AArch64).
+
 **UI**
 - Tabbed right pane with overflow-safe dropdown, close buttons, click-to-activate.
 - Horizontal + vertical scrollbars on listing, hex, and manifest views.
-- Cmd-F symbol palette with fuzzy filter.
-- Right-click cross-references in every view: **References to address** / **Callers of function** in the listing, hex and CFG; **Callers of method** / **References to field** in smali. Results show in the palette with a scope chip; Esc clears the scope back to bundle-wide search. Indices build on a background thread after load — a progress chip shows while in flight.
-- Cmd-O open, Cmd-N new window. macOS app menu with **File → Open Recent** (last 10 bundles).
+- Cmd-F symbol palette with fuzzy filter. Multi-token queries are AND-matched in order (`change me` finds `changeMessage` and `change_me_count` but not `dispatchMenuVisibilityChanged`).
+- Binary / instruction palette (⌘2 to switch into it) scans every native artifact globally — Android apps with `arm64-v8a` + `armeabi-v7a` get unified results with the artifact + section labelled per match.
+- Right-click cross-references in every view: **References to address** / **Callers of function** / **Open hex view here** in the listing, hex and CFG; **Callers of method** / **References to field** in smali. Results show in the palette with a scope chip; Esc clears the scope back to bundle-wide search. Indices build on a background thread after load — a progress chip shows while in flight.
+- Themes (View → Theme) with selectable per-window background tints.
+- Cmd-O open, Cmd-N new window, Cmd-W close window, Cmd-⇧W close file (return window to launched-empty state). macOS app menu with **File → Open Recent** (last 10 bundles, deduplicated by path).
 - Window bounds + open tabs + tree expansion state persisted per-bundle in `redb`; relaunching reopens where you left off.
 
 ### What's missing
 
-- armv7 / x86 disassembly (non-AArch64 code sections currently route to the hex view).
+- x86 / x86_64 disassembly (those code sections currently route to the hex view).
+- ARMv7 in-place edits that need to *grow without an adjacent NOP* — refused with a clear error today; would need section-level relayout + branch-target rebinding to support.
+- ARMv7 cross-reference engine — `xref` / callers-of-function indices work for AArch64; ARMv7 silently returns empty results until that's wired through the `DecodedInsn` facade.
 - iOS entitlements and `embedded.mobileprovision` parsing.
 - Swift metadata pass — Swift Mach-O symbol stubs are sparse without it.
 - ObjC `__objc_classlist` extraction.
-- GUI editor for renames / comments / colours (writes already work via `glass set-rename` / `set-comment` / `set-colour` and over MCP — the listing just doesn't render them yet).
 - Cross-references DEX ↔ native via JNI signatures.
 - QuickJS scripting host.
 - Drag-to-scroll on scrollbars (currently visual-only — use trackpad / wheel).
 - Resource ID decoding in the manifest (would need `resources.arsc` parsing).
+- ARMv7 typed-assembly editor: works for the common forms; shifted operands (`r0, lsl #2`) and pre/post-index memory (`[rN, #imm]!`, `[rN], #imm`) parse but only concretely — no wildcards inside brackets.
 
 ## Building
 
@@ -303,20 +333,24 @@ Two ways to grab a prebuilt zip without building locally:
 
 ## Workspace
 
-| Crate              | Purpose                                                       |
-|--------------------|---------------------------------------------------------------|
-| `glass-core`       | Shared types (`CodeKind`, IDs)                                |
-| `glass-arch-arm64` | AArch64 disassembly, symbol map, PLT synthesis, demangling    |
-| `glass-arch-dex`   | DEX / smali facade over `smali`                               |
-| `glass-mobile`     | APK + IPA bundle loading, native-lib extraction, manifest     |
-| `glass-db`         | Content-addressed persistence (redb): bundles, tabs, settings |
-| `glass-ui`         | `gpui` front-end: tree, listing, hex, manifest, palette       |
-| `glass-cli`        | Headless inspector + GUI launcher                             |
-| `glass-script`     | QuickJS plugin runtime (placeholder)                          |
+| Crate            | Purpose                                                          |
+|------------------|------------------------------------------------------------------|
+| `glass-core`     | Shared types (`CodeKind`, IDs)                                   |
+| `glass-arch-arm` | AArch64 + ARMv7 disassembly, symbol map, PLT synthesis, demangling |
+| `glass-arch-dex` | DEX / smali facade over `smali`                                  |
+| `glass-mobile`   | APK + IPA bundle loading, native-lib extraction, manifest        |
+| `glass-db`       | Content-addressed persistence (redb): bundles, tabs, settings    |
+| `glass-device`   | Android (adb) + iOS (usbmux) device discovery                    |
+| `glass-api`      | Analysis verbs (search, xrefs, CFG, edits) shared by CLI + MCP + GUI |
+| `glass-ui`       | `gpui` front-end: tree, listing, hex, manifest, palette          |
+| `glass-cli`      | Headless inspector + GUI launcher                                |
+| `glass-mcp`      | MCP server exposing every CLI verb as a tool                     |
+| `glass-script`   | QuickJS plugin runtime (placeholder)                             |
 
 ## Roadmap
 
 - **iOS deeper** — Entitlements, `embedded.mobileprovision`, ObjC `__objc_classlist`, Swift metadata pass.
-- **armv7** — 32-bit ARM disassembly for older `.so` variants.
+- **x86 / x86_64** — Disassembly for emulator-builds of Android `.so` files.
+- **ARMv7 xref + CFG parity** — wire callers / refs / register-tracking through the unified `DecodedInsn` facade so the existing AArch64 cross-reference engine works for armeabi-v7a libraries too.
 - **Internal Scripting** — QuickJS plugin host with a stable API for analysis passes.
-- **Advanced** — Signed APK rebuilding.
+- **Advanced** — Signed APK rebuilding, downstream-shift on ARMv7 in-place edits (so 2→4-byte grows can splice past adjacent code instead of refusing).

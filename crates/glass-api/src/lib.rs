@@ -179,8 +179,12 @@ pub use insn_pattern::armv7::{
     compile_armv7_at, compile_armv7_to_atoms, compile_armv7_to_atoms_with,
 };
 pub use insn_cursor::{classify as classify_insn_cursor, CursorContext, CursorKind};
-pub use insn_matcher::{match_variants as match_insn_variants, MatchCandidate};
-pub use insn_variants::{variants as insn_variants, SlotSpec, Variant};
+pub use insn_matcher::{
+    match_variants as match_insn_variants,
+    match_variants_for_isa as match_insn_variants_for_isa,
+    MatchCandidate,
+};
+pub use insn_variants::{variants as insn_variants, SlotSpec, Variant, VariantIsa};
 pub use inspect::{
     ArtifactInfo, ArtifactKind, ArtifactSections, BinaryInfo, BundleInspection,
     SectionInfo,

@@ -660,6 +660,30 @@ impl LoadedBundle {
 
     /// Find which section of a native artifact contains `addr`. Only
     /// returns sections we can disassemble (`Text` kind today).
+    /// Resolve a `(artifact, section)` key into a `DataSectionBytes`
+    /// view usable by the hex renderer. Falls through `data_sections`
+    /// first (the common case — non-text sections live there); for
+    /// text sections we synthesise a fresh `DataSectionBytes` over
+    /// the text bytes so the user can hex-view (and hex-edit) code
+    /// without our having to duplicate the bytes. The `Arc<Vec<u8>>`
+    /// clone is cheap.
+    pub fn hex_view_section(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        section: &str,
+    ) -> Option<DataSectionBytes> {
+        let key = (artifact.clone(), section.to_string());
+        if let Some(d) = self.data_sections.get(&key) {
+            return Some(d.clone());
+        }
+        let t = self.text_sections.get(&key)?;
+        Some(DataSectionBytes {
+            base: t.base,
+            bytes: t.bytes.clone(),
+            kind: NativeSectionKind::Text,
+        })
+    }
+
     /// Read the 4 bytes at `addr` in a text section of `artifact`,
     /// honouring any staged edit at that address. Returns None if
     /// the address doesn't fall inside a known text section or is

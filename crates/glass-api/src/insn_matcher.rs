@@ -42,12 +42,43 @@ pub struct MatchCandidate {
 
 /// Score every variant against `input` and return the top
 /// `limit` candidates, sorted by score descending.
+///
+/// Considers every ISA's variants. Use [`match_variants_for_isa`]
+/// when the caller knows which ISA the user is editing (the
+/// disasm-edit overlay on a listing row) and wants to drop
+/// candidates from other ISAs up front — otherwise `mov` against
+/// an ARMv7 row offers an unhelpful row of `mov w, w` AArch64
+/// variants the user has to scroll past.
 pub fn match_variants(input: &str, limit: usize) -> Vec<MatchCandidate> {
+    match_variants_with_filter(input, limit, |_| true)
+}
+
+/// Filtered variant: only candidates whose `Variant::isa` matches
+/// any of the supplied ISAs survive. Empty slice = no candidates;
+/// caller should pass `match_variants` instead if they want the
+/// unfiltered list. Multiple ISAs are supported so an ARMv7 caller
+/// can keep both Thumb and A32 variants alive.
+pub fn match_variants_for_isa(
+    input: &str,
+    limit: usize,
+    allowed: &[crate::insn_variants::VariantIsa],
+) -> Vec<MatchCandidate> {
+    match_variants_with_filter(input, limit, |v| allowed.contains(&v.isa))
+}
+
+fn match_variants_with_filter(
+    input: &str,
+    limit: usize,
+    keep: impl Fn(&crate::insn_variants::Variant) -> bool,
+) -> Vec<MatchCandidate> {
     let (mnem, operand_str) = split_mnemonic_operands(input);
     let operand_tokens = tokenize_operands(operand_str);
     let mut out: Vec<MatchCandidate> = Vec::new();
 
     for v in variants() {
+        if !keep(v) {
+            continue;
+        }
         if let Some(score) = score_variant(v, mnem, &operand_tokens) {
             out.push(MatchCandidate {
                 variant: v.clone(),

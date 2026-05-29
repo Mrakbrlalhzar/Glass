@@ -116,6 +116,17 @@ pub enum ContextMenuItem {
         vaddr: u64,
         label: SharedString,
     },
+    /// "Open hex view here" — open (or focus) a hex tab for the
+    /// text section the right-clicked listing row lives in,
+    /// scrolled to `addr`. Lets the user edit the instruction at
+    /// the byte level when the typed-assembly editor can't
+    /// express what they want.
+    OpenHexHere {
+        artifact: glass_db::ArtifactId,
+        section: String,
+        addr: u64,
+        label: SharedString,
+    },
     /// "Revert class edit" — drops the staged smali edit for a
     /// class. Only shown when the active class has a staged edit.
     RevertSmaliClassEdit {
@@ -276,6 +287,9 @@ pub fn render_context_menu(
             }
             ContextMenuItem::RevertDisasmEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::OpenHexHere { label, .. } => {
+                ("Open hex view here".to_string(), label.clone())
             }
             ContextMenuItem::RevertSmaliClassEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))
