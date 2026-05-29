@@ -18,7 +18,7 @@ use gpui_platform::application;
 
 use crate::loader::load_bundle_blocking;
 use crate::{
-    About, CloseFile, CloseWindow, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
+    About, CloseFile, CloseWindow, Copy, NewWindow, OpenFile, OpenRecent0, OpenRecent1, OpenRecent2, OpenRecent3,
     OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7, OpenRecent8, OpenRecent9,
     PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress, Quit, Shell, ShellState,
     Theme0, Theme1, Theme2, Theme3, Theme4, Theme5, Theme6, Theme7,
@@ -91,6 +91,7 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
             KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-shift-w", CloseFile, None),
+            KeyBinding::new("cmd-c", Copy, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
 
@@ -113,6 +114,26 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         // bundle and return to the launched-empty state. Deferred via
         // cx.spawn for the same reason as About: the active window's
         // slot is currently taken while this action callback runs.
+        // Copy → tell the focused Shell window to write its
+        // "selected thing" to the clipboard. Skipped automatically
+        // when a TextInput has focus (the input's own cmd-c handler
+        // wins in gpui's action-dispatch ordering).
+        cx.on_action(|_: &Copy, cx: &mut App| {
+            cx.spawn(async move |cx| {
+                cx.update(|cx| {
+                    let Some(wh) = cx.active_window() else { return };
+                    let Some(typed) = wh.downcast::<Shell>() else { return };
+                    let _ = cx.update_window(typed.into(), |root, _w, cx| {
+                        if let Ok(entity) = root.downcast::<Shell>() {
+                            entity.update(cx, |shell, cx| {
+                                shell.copy_current_to_clipboard(cx);
+                            });
+                        }
+                    });
+                });
+            })
+            .detach();
+        });
         cx.on_action(|_: &CloseFile, cx: &mut App| {
             cx.spawn(async move |cx| {
                 cx.update(|cx| {

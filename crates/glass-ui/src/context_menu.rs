@@ -21,6 +21,15 @@ pub struct ContextMenuState {
 
 #[derive(Clone, Debug)]
 pub enum ContextMenuItem {
+    /// "Copy <label>" — write `text` to the system clipboard.
+    /// `label` is the human-readable target descriptor shown to
+    /// the right of the menu entry (the address, class name, link
+    /// target, etc.); `text` is what actually goes on the
+    /// clipboard.
+    CopyText {
+        text: String,
+        label: SharedString,
+    },
     /// Follow a link in-place — reuse the existing same-type tab
     /// (scroll a Listing tab to the address, reuse a Hex tab, etc.).
     /// Same effect as a plain left-click on the link.
@@ -249,6 +258,9 @@ pub fn render_context_menu(
 
     for (index, item) in menu.items.iter().enumerate() {
         let (label_text, hint) = match item {
+            ContextMenuItem::CopyText { label, .. } => {
+                (format!("Copy {label}"), SharedString::from(""))
+            }
             ContextMenuItem::Follow { label, .. } => {
                 ("Follow (left-click)".to_string(), label.clone())
             }

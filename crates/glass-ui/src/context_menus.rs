@@ -38,6 +38,15 @@ impl Shell {
             .get(&artifact)
             .and_then(|sm| sm.covering(addr));
         let mut items = Vec::new();
+        // Copy the formatted listing row, if we have rendered rows
+        // for the active tab and the row at `addr` exists. Lives
+        // at the top so it's the first item users see.
+        if let Some(copy_text) = self.copy_text_for_listing_addr(&artifact, addr) {
+            items.push(ContextMenuItem::CopyText {
+                text: copy_text,
+                label: SharedString::from(format!("0x{addr:x}")),
+            });
+        }
         // 1) Top items depend on what kind of thing the click
         //    landed on:
         //    - Function symbol → Show CFG + Callers of function
@@ -215,6 +224,10 @@ impl Shell {
             .bundle()
             .and_then(|b| b.artifact_ids.first().cloned());
         let mut items = vec![
+            ContextMenuItem::CopyText {
+                text: method_key.clone(),
+                label: label.clone(),
+            },
             ContextMenuItem::ShowDexCallGraph {
                 class_jni: class_jni.clone(),
                 method_decl: method_decl.clone(),
@@ -383,6 +396,10 @@ impl Shell {
             "Add comment…"
         };
         let mut items = vec![
+            ContextMenuItem::CopyText {
+                text: class_jni.clone(),
+                label: label.clone(),
+            },
             ContextMenuItem::EditComment {
                 artifact: artifact.clone(),
                 key: key.clone(),
@@ -461,6 +478,10 @@ impl Shell {
             }
         };
         let mut items = vec![
+            ContextMenuItem::CopyText {
+                text: label.to_string(),
+                label: label.clone(),
+            },
             ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
             ContextMenuItem::FollowInNewTab { target, label: label.clone() },
         ];
@@ -521,8 +542,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let label = SharedString::from(display.clone());
-        let mut items =
-            vec![ContextMenuItem::RefsToField { field_ref: field_ref.clone(), label }];
+        let mut items = vec![
+            ContextMenuItem::CopyText {
+                text: field_ref.clone(),
+                label: label.clone(),
+            },
+            ContextMenuItem::RefsToField { field_ref: field_ref.clone(), label },
+        ];
         // Field is edited if it appears in `edited_fields` for
         // the artifact that owns the active class. We need the
         // artifact id, the field's (name, sig), and a way to
@@ -573,6 +599,10 @@ impl Shell {
         // available.
         let method_decl =
             format!("{method_name}{method_signature_jni}");
+        items.push(ContextMenuItem::CopyText {
+            text: format!("{class_jni}->{method_decl}"),
+            label: label.clone(),
+        });
         items.push(ContextMenuItem::ShowDexCallGraph {
             class_jni: class_jni.clone(),
             method_decl: method_decl.clone(),
@@ -725,6 +755,10 @@ impl Shell {
         let label = SharedString::from(display);
         let target = FollowTarget::SmaliMethod { leaf, line };
         let mut items = vec![
+            ContextMenuItem::CopyText {
+                text: label.to_string(),
+                label: label.clone(),
+            },
             ContextMenuItem::Follow { target: target.clone(), label: label.clone() },
             ContextMenuItem::FollowInNewTab { target, label: label.clone() },
         ];
@@ -751,6 +785,9 @@ impl Shell {
         let Some(item) = menu.items.get(index).cloned() else { return };
         self.context_menu = None;
         match item {
+            ContextMenuItem::CopyText { text, .. } => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
             ContextMenuItem::Follow { target, .. } => {
                 self.activate_follow(target, false, cx);
             }

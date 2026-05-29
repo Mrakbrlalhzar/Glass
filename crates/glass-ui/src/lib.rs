@@ -32,6 +32,7 @@ mod cfg_render;
 mod colour_picker;
 mod context_menu;
 mod context_menus;
+mod copy;
 mod dex_callgraph;
 mod dex_cg_render;
 mod graph;
@@ -118,6 +119,7 @@ actions!(
         ToggleChangesDialog,
         OpenFile,
         CloseFile,
+        Copy,
         NewWindow,
         CloseWindow,
         Quit,
