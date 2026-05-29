@@ -1,0 +1,12 @@
+# Pin the Rust toolchain so local builds + CI use the same compiler.
+#
+# Why this exists: dispatch2 0.3.1 (a transitive dep via gpui_macos)
+# uses `bitflags!` in a way that hits rustc's default recursion-limit
+# of 128 in some newer stable releases. Pinning here avoids the CI /
+# local drift that surfaces as "recursion limit reached while
+# expanding `$crate::__bitflags_flag_name!`".
+#
+# Bump deliberately when a known-good newer stable is available.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
