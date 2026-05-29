@@ -248,7 +248,6 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 
 - x86 / x86_64 disassembly (those code sections currently route to the hex view).
 - ARMv7 in-place edits that need to *grow without an adjacent NOP* — refused with a clear error today; would need section-level relayout + branch-target rebinding to support.
-- ARMv7 cross-reference engine — `xref` / callers-of-function indices work for AArch64; ARMv7 silently returns empty results until that's wired through the `DecodedInsn` facade.
 - iOS entitlements and `embedded.mobileprovision` parsing.
 - Swift metadata pass — Swift Mach-O symbol stubs are sparse without it.
 - ObjC `__objc_classlist` extraction.

@@ -23,5 +23,7 @@ bird-app/app/build/
 *.apk*
 mapping.txt
 
+.claude/
+
 # Packaged Glass.app output from packaging/make-app.sh
 dist/

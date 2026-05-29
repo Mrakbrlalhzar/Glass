@@ -1217,7 +1217,7 @@ fn spawn_xref_builders(bundle: &crate::LoadedBundle, cx: &mut App) {
             current: 0,
             total: text_sections
                 .values()
-                .map(|t| t.bytes.len() / 4)
+                .map(|t| t.instruction_count())
                 .sum(),
         }));
         *slot.write() = XrefIndexState::Building(progress.clone());

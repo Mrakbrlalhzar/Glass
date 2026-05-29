@@ -161,16 +161,66 @@ pub fn build_native_xrefs(
     progress: &Arc<parking_lot::Mutex<XrefProgress>>,
 ) -> NativeXrefs {
     use armv8_encode::isa::aarch64;
+    use armv8_encode::mc::InstructionInfo;
     use glass_arch_arm::{DecodedInsn, PageBaseTracker};
     let mut out: NativeXrefs = HashMap::new();
     let mut processed_total = 0usize;
     for ((aid, _name), section) in text_sections {
         let base = section.base;
         let bytes: &[u8] = section.bytes.as_ref();
-        let n = bytes.len() / 4;
         let per_artifact = out.entry(aid.clone()).or_default();
         // Shared fusion tracker — same idioms as `build_listing_rows`.
         let mut tracker = PageBaseTracker::new();
+        // ARMv7 sections carry a precomputed `Vec<DecodedInsn>`
+        // because Thumb / ARM-mode mixed code has variable
+        // instruction widths and literal-pool dropouts that the
+        // fixed-4-byte AArch64 walk can't honour. Route those
+        // through a dedicated loop that re-uses the same tracker
+        // abstraction for movw+movt fusion.
+        if let Some(precomputed) = section.precomputed.as_ref() {
+            let n = precomputed.len();
+            for (i, insn) in precomputed.iter().enumerate() {
+                let addr = insn.address();
+                // Direct branch target → xref. Strip the Thumb
+                // mode-bit so the recorded address matches what
+                // the rest of the listing / symbol-map machinery
+                // uses (the listing's `symbols.at` already
+                // dual-checks `t` and `t | 1`, but the xref index
+                // is keyed by a single canonical address).
+                if let Some(t) = insn.branch_target() {
+                    per_artifact.entry(t & !1u64).or_default().push(addr);
+                }
+                // movw+movt fusion via the shared tracker. The
+                // fused 32-bit constant is typically a pointer
+                // into rodata; record it as an xref target so
+                // "references to this address" finds the call
+                // site that materialised the pointer.
+                if let Some(ft) = tracker.observe(insn) {
+                    per_artifact.entry(ft.target).or_default().push(addr);
+                }
+                // Thumb literal-pool loads (`ldr Rt, [pc, #imm]`)
+                // resolve to the pool word's address; record that
+                // as an xref so the user can navigate from the
+                // load site to the pool slot. The pool word's
+                // bytes are typically a pointer into rodata; we'd
+                // need a `DataPeek` to dereference it here for the
+                // ultimate target, which isn't currently threaded
+                // through this builder. TODO(armv7): also record
+                // `*pcrel_target` when data sections are available.
+                if let Some(t) = insn.pcrel_target() {
+                    per_artifact.entry(t).or_default().push(addr);
+                }
+                if i % 1024 == 0 {
+                    let mut p = progress.lock();
+                    p.current = processed_total + i;
+                }
+            }
+            processed_total += n;
+            let mut p = progress.lock();
+            p.current = processed_total;
+            continue;
+        }
+        let n = bytes.len() / 4;
         for i in 0..n {
             let addr = base + (i as u64) * 4;
             let word = u32::from_le_bytes([
@@ -351,3 +401,119 @@ pub fn build_dex_callers(
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use armv8_encode::container::{Container, SectionKind};
+    use parking_lot::Mutex;
+    use std::path::PathBuf;
+
+    fn libtool_checker_bytes() -> Vec<u8> {
+        // Vendored alongside glass-arch-arm's armv7_smoke.rs.
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(manifest)
+            .join("..")
+            .join("glass-arch-arm")
+            .join("tests")
+            .join("libtool-checker.so");
+        std::fs::read(&path).expect("read libtool-checker.so")
+    }
+
+    fn make_armv7_text_section(
+        bytes: &[u8],
+    ) -> std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        crate::TextSectionBytes,
+    > {
+        let container = Container::from_bytes(bytes).expect("parse container");
+        let entries: Vec<u64> = container
+            .symbols
+            .iter()
+            .filter(|s| !s.is_undefined)
+            .map(|s| s.address)
+            .collect();
+        let mut out = std::collections::HashMap::new();
+        for (idx, sec) in container.sections.iter().enumerate() {
+            if !matches!(sec.kind, SectionKind::Text) {
+                continue;
+            }
+            let precomputed =
+                glass_arch_arm::precompute_section_insns(&container, idx, &entries)
+                    .expect("precompute");
+            let aid = glass_db::ArtifactId::from_raw([0u8; 32]);
+            out.insert(
+                (aid, sec.name.clone()),
+                crate::TextSectionBytes {
+                    base: sec.address,
+                    bytes: Arc::new(sec.bytes.clone()),
+                    precomputed: Some(Arc::new(precomputed)),
+                },
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn build_native_xrefs_armv7_libtool_checker_nonempty() {
+        let bytes = libtool_checker_bytes();
+        let sections = make_armv7_text_section(&bytes);
+        assert!(!sections.is_empty(), "expected at least one text section");
+        let progress = Arc::new(Mutex::new(XrefProgress {
+            label: "test".into(),
+            current: 0,
+            total: 0,
+        }));
+        let xrefs = build_native_xrefs(&sections, &progress);
+        let aid = glass_db::ArtifactId::from_raw([0u8; 32]);
+        let per_artifact = xrefs.get(&aid).expect("artifact entry");
+        assert!(
+            !per_artifact.is_empty(),
+            "expected ARMv7 xref builder to record at least one target"
+        );
+        let in_section = |addr: u64| {
+            sections.values().any(|t| {
+                addr >= t.base && addr < t.base + (t.bytes.len() as u64)
+            })
+        };
+        for sites in per_artifact.values() {
+            for s in sites {
+                assert!(
+                    in_section(*s),
+                    "caller-site 0x{s:x} outside any text section"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_native_xrefs_armv7_branch_targets_have_mode_bit_stripped() {
+        let bytes = libtool_checker_bytes();
+        let sections = make_armv7_text_section(&bytes);
+        let progress = Arc::new(Mutex::new(XrefProgress {
+            label: "test".into(),
+            current: 0,
+            total: 0,
+        }));
+        let xrefs = build_native_xrefs(&sections, &progress);
+        let aid = glass_db::ArtifactId::from_raw([0u8; 32]);
+        let per_artifact = xrefs.get(&aid).expect("artifact entry");
+        let mut expected_targets: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
+        for section in sections.values() {
+            let Some(p) = section.precomputed.as_ref() else { continue };
+            for insn in p.iter() {
+                if let Some(t) = insn.branch_target() {
+                    expected_targets.insert(t & !1u64);
+                }
+            }
+        }
+        assert!(!expected_targets.is_empty(), "no branch targets in fixture");
+        for t in &expected_targets {
+            assert!(
+                per_artifact.contains_key(t),
+                "branch target 0x{t:x} (mode-bit stripped) missing from xref index"
+            );
+            assert_eq!(t & 1, 0);
+        }
+    }
+}
