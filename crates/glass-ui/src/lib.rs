@@ -22,6 +22,8 @@ use gpui::{
 };
 
 mod about;
+mod about_panes;
+mod annotation_editor;
 mod annotations;
 mod annotations_pane;
 mod app;
@@ -76,6 +78,7 @@ mod smali_edits;
 mod theme;
 mod two_pane;
 mod xref;
+mod xref_openers;
 
 pub use annotations::AnnotationIndex;
 pub use app::launch;
