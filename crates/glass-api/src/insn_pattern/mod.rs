@@ -31,6 +31,7 @@ use crate::bundle::Bundle;
 
 pub mod aarch64;
 pub mod armv7;
+mod armv7_format_codes;
 pub mod shared;
 
 #[cfg(test)]
