@@ -1,10 +1,12 @@
 # Glass — project notes
 
-## Module size
+## Good Software Engineering
 
-Any Rust module over **1500 lines** should be refactored and split into
-smaller modules. `glass-ui/src/lib.rs` has historically violated this
-and is being progressively modularised; new code should not regrow it.
+Any Rust module over **1500 lines** should be refactored and split into smaller modules. 
+
+Similar code should be factorised out and reused. We should not have multiple functions doing the same thing for different data e.g. instruction sets.
+
+Unit tests should cover most functions. Ideally we should start with a unit test and then prove the function satisfies it.
 
 ## Skill catalog parity
 

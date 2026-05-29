@@ -158,6 +158,10 @@ pub fn build_native_xrefs(
         (glass_db::ArtifactId, String),
         crate::TextSectionBytes,
     >,
+    data_sections: &std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        crate::DataSectionBytes,
+    >,
     progress: &Arc<parking_lot::Mutex<XrefProgress>>,
 ) -> NativeXrefs {
     use armv8_encode::isa::aarch64;
@@ -165,12 +169,56 @@ pub fn build_native_xrefs(
     use glass_arch_arm::{DecodedInsn, PageBaseTracker};
     let mut out: NativeXrefs = HashMap::new();
     let mut processed_total = 0usize;
+    // Per-artifact DataPeek cache so the ARMv7 literal-pool
+    // dereference can read 4-byte pointer words out of rodata
+    // without rebuilding the lookup per instruction. Keyed by
+    // ArtifactId; built lazily on first use for each artifact
+    // we encounter in text_sections.
+    let mut data_peek_cache: HashMap<
+        glass_db::ArtifactId,
+        crate::listing_model::DataPeek,
+    > = HashMap::new();
+    let build_peek = |aid: &glass_db::ArtifactId| -> crate::listing_model::DataPeek {
+        use crate::listing_model::{DataPeek, DataSectionMeta};
+        let mut sections = Vec::new();
+        let mut section_meta = Vec::new();
+        for ((other_aid, name), ds) in data_sections.iter() {
+            if other_aid != aid {
+                continue;
+            }
+            // Skip BSS / debug / zero-base sections — they can't
+            // hold useful pointer values. Mirrors the filter
+            // `build_listing_rows` uses when populating DataPeek.
+            if matches!(
+                ds.kind,
+                crate::NativeSectionKind::Bss | crate::NativeSectionKind::Debug
+            ) {
+                continue;
+            }
+            if ds.base == 0 {
+                continue;
+            }
+            sections.push((ds.base, ds.bytes.clone()));
+            section_meta.push(DataSectionMeta {
+                name: name.clone(),
+                base: ds.base,
+                size: ds.bytes.len() as u64,
+            });
+        }
+        DataPeek { sections, section_meta }
+    };
     for ((aid, _name), section) in text_sections {
         let base = section.base;
         let bytes: &[u8] = section.bytes.as_ref();
         let per_artifact = out.entry(aid.clone()).or_default();
         // Shared fusion tracker — same idioms as `build_listing_rows`.
         let mut tracker = PageBaseTracker::new();
+        // Lazily materialise the per-artifact data peek; ARMv7
+        // text sections use it for literal-pool pointer
+        // dereferencing.
+        let peek = data_peek_cache
+            .entry(aid.clone())
+            .or_insert_with(|| build_peek(aid));
         // ARMv7 sections carry a precomputed `Vec<DecodedInsn>`
         // because Thumb / ARM-mode mixed code has variable
         // instruction widths and literal-pool dropouts that the
@@ -202,13 +250,30 @@ pub fn build_native_xrefs(
                 // resolve to the pool word's address; record that
                 // as an xref so the user can navigate from the
                 // load site to the pool slot. The pool word's
-                // bytes are typically a pointer into rodata; we'd
-                // need a `DataPeek` to dereference it here for the
-                // ultimate target, which isn't currently threaded
-                // through this builder. TODO(armv7): also record
-                // `*pcrel_target` when data sections are available.
-                if let Some(t) = insn.pcrel_target() {
-                    per_artifact.entry(t).or_default().push(addr);
+                // bytes are typically a pointer into rodata —
+                // dereference one level so the xref also fires
+                // on the *real* destination ("References to
+                // 0x{string_addr}" finds the load site, not just
+                // the pool slot).
+                if let Some(pool_addr) = insn.pcrel_target() {
+                    per_artifact.entry(pool_addr).or_default().push(addr);
+                    if let Some(deref) = peek.peek_u32_le(pool_addr) {
+                        // 0 is the common "no relocation applied
+                        // yet" filler — skip so we don't pollute
+                        // the index with a giant null-target
+                        // entry. Also reject pointers that don't
+                        // land in any known section (likely
+                        // uninitialised heap addresses, GOT
+                        // resolver thunks, etc.).
+                        if deref != 0
+                            && peek.section_containing(deref as u64).is_some()
+                        {
+                            per_artifact
+                                .entry(deref as u64)
+                                .or_default()
+                                .push(addr);
+                        }
+                    }
                 }
                 if i % 1024 == 0 {
                     let mut p = progress.lock();
@@ -463,7 +528,11 @@ mod tests {
             current: 0,
             total: 0,
         }));
-        let xrefs = build_native_xrefs(&sections, &progress);
+        let data: std::collections::HashMap<
+            (glass_db::ArtifactId, String),
+            crate::DataSectionBytes,
+        > = std::collections::HashMap::new();
+        let xrefs = build_native_xrefs(&sections, &data, &progress);
         let aid = glass_db::ArtifactId::from_raw([0u8; 32]);
         let per_artifact = xrefs.get(&aid).expect("artifact entry");
         assert!(
@@ -494,7 +563,11 @@ mod tests {
             current: 0,
             total: 0,
         }));
-        let xrefs = build_native_xrefs(&sections, &progress);
+        let data: std::collections::HashMap<
+            (glass_db::ArtifactId, String),
+            crate::DataSectionBytes,
+        > = std::collections::HashMap::new();
+        let xrefs = build_native_xrefs(&sections, &data, &progress);
         let aid = glass_db::ArtifactId::from_raw([0u8; 32]);
         let per_artifact = xrefs.get(&aid).expect("artifact entry");
         let mut expected_targets: std::collections::HashSet<u64> =

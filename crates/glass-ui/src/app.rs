@@ -1212,6 +1212,7 @@ fn spawn_xref_builders(bundle: &crate::LoadedBundle, cx: &mut App) {
     {
         let slot = bundle.xrefs.native.clone();
         let text_sections = bundle.text_sections.clone();
+        let data_sections = bundle.data_sections.clone();
         let progress = Arc::new(Mutex::new(XrefProgress {
             label: "Native references".to_string(),
             current: 0,
@@ -1223,7 +1224,11 @@ fn spawn_xref_builders(bundle: &crate::LoadedBundle, cx: &mut App) {
         *slot.write() = XrefIndexState::Building(progress.clone());
         cx.background_executor()
             .spawn(async move {
-                let xrefs = crate::xref::build_native_xrefs(&text_sections, &progress);
+                let xrefs = crate::xref::build_native_xrefs(
+                    &text_sections,
+                    &data_sections,
+                    &progress,
+                );
                 *slot.write() = XrefIndexState::Ready(Arc::new(xrefs));
             })
             .detach();
