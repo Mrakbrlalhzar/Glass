@@ -164,9 +164,24 @@ fn build_function_cfg_armv7(
     _symbols: &SymbolMap,
     entry_addr: u64,
 ) -> Option<FunctionCfg> {
+    let insns = crate::disasm::disassemble_function_at(container, entry_addr)?;
+    build_function_cfg_armv7_from_insns(&insns, entry_addr)
+}
+
+/// Construct an ARMv7 CFG from a pre-computed `Vec<DecodedInsn>`
+/// covering the function. Used by the GUI, which already holds the
+/// recursive-descent result on `TextSectionBytes::precomputed` and
+/// doesn't carry a full `Container`. Pass the slice of instructions
+/// for the function in source order (e.g. obtained by trimming the
+/// section's precomputed vector to the symbol's extent); `entry_addr`
+/// is the function entry point (with or without the Thumb mode-bit
+/// — the function masks it off internally).
+pub fn build_function_cfg_armv7_from_insns(
+    insns: &[crate::DecodedInsn],
+    entry_addr: u64,
+) -> Option<FunctionCfg> {
     use armv8_encode::mc::{self, EdgeKind as McEdgeKind, EdgeTarget, InstructionInfo};
 
-    let insns = crate::disasm::disassemble_function_at(container, entry_addr)?;
     if insns.is_empty() {
         return None;
     }
@@ -174,7 +189,7 @@ fn build_function_cfg_armv7(
     let last = insns.last()?;
     let end_addr = last.address() + last.size();
 
-    let mc_cfg = mc::build_cfg(insns.as_slice());
+    let mc_cfg = mc::build_cfg(insns);
     // Map from upstream BlockId to Glass BlockId (same index).
     let mut blocks: Vec<BasicBlock> = Vec::with_capacity(mc_cfg.blocks.len());
     for b in &mc_cfg.blocks {

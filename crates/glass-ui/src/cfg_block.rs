@@ -31,21 +31,79 @@ pub fn build_cfg_from_text_sections(
     artifact: &glass_db::ArtifactId,
     entry_addr: u64,
 ) -> Option<glass_arch_arm::FunctionCfg> {
+    // The entry address from a Thumb symbol carries the low-bit
+    // mode marker (`addr | 1`). The section-extent check below
+    // works on the real address; the per-arch builders accept the
+    // marker form so they can pick ARM vs Thumb mode.
+    let real_entry = entry_addr & !1u64;
     for ((aid, _name), section) in text_sections {
         if aid != artifact {
             continue;
         }
         let end = section.base + section.bytes.len() as u64;
-        if entry_addr >= section.base && entry_addr < end {
-            return glass_arch_arm::build_function_cfg_from_bytes(
-                section.base,
-                &section.bytes,
+        if real_entry < section.base || real_entry >= end {
+            continue;
+        }
+        // ARMv7 marker: the section has a precomputed
+        // `Vec<DecodedInsn>` from the loader's recursive-descent
+        // pass. AArch64 leaves it `None` and goes through the
+        // fixed-4-byte decoder.
+        if let Some(precomputed) = section.precomputed.as_ref() {
+            return build_cfg_armv7_from_precomputed(
+                precomputed,
                 symbols,
                 entry_addr,
             );
         }
+        return glass_arch_arm::build_function_cfg_from_bytes(
+            section.base,
+            &section.bytes,
+            symbols,
+            entry_addr,
+        );
     }
     None
+}
+
+/// Slice the section's precomputed `Vec<DecodedInsn>` to the
+/// function's instruction range and feed the slice to the ARMv7
+/// CFG builder. The function's end is the next symbol after
+/// `entry_addr` (or the end of the precomputed vector). Symbol
+/// addresses carry the Thumb mode-bit so we compare against the
+/// real address.
+fn build_cfg_armv7_from_precomputed(
+    precomputed: &[glass_arch_arm::DecodedInsn],
+    symbols: &glass_arch_arm::SymbolMap,
+    entry_addr: u64,
+) -> Option<glass_arch_arm::FunctionCfg> {
+    use armv8_encode::mc::InstructionInfo;
+    let real_entry = entry_addr & !1u64;
+    // First instruction at or after the real entry.
+    let start = precomputed
+        .iter()
+        .position(|i| i.address() >= real_entry)?;
+    // Function end: the next symbol's address after `real_entry`,
+    // or the precomputed vector's end. Symbols stored with the
+    // Thumb mode-bit set need that bit cleared before comparing.
+    let end_addr = symbols
+        .iter()
+        .map(|s| s.address & !1u64)
+        .filter(|&a| a > real_entry)
+        .min();
+    let end = match end_addr {
+        Some(e) => precomputed
+            .iter()
+            .position(|i| i.address() >= e)
+            .unwrap_or(precomputed.len()),
+        None => precomputed.len(),
+    };
+    if end <= start {
+        return None;
+    }
+    glass_arch_arm::build_function_cfg_armv7_from_insns(
+        &precomputed[start..end],
+        entry_addr,
+    )
 }
 
 /// Background fill for a normal block. Exits (`ret` / outside-fn

@@ -22,8 +22,9 @@ pub mod format;
 pub mod macho_fat;
 pub mod symbol_map;
 pub use cfg::{
-    build_function_cfg, build_function_cfg_from_bytes, BasicBlock, BlockEdge, BlockEdgeKind,
-    BlockId, BlockLayout, CallSite, FunctionCfg, InstructionEntry,
+    build_function_cfg, build_function_cfg_armv7_from_insns, build_function_cfg_from_bytes,
+    BasicBlock, BlockEdge, BlockEdgeKind, BlockId, BlockLayout, CallSite, FunctionCfg,
+    InstructionEntry,
 };
 pub use disasm::{disassemble_function_at, precompute_section_insns};
 pub use facade::{DecodedInsn, RegKind, RegRef};
