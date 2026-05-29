@@ -69,6 +69,7 @@ mod external_editor;
 mod field_popover;
 mod method_popover;
 mod modifier_picker;
+mod navigation;
 mod op_editor;
 mod smali_row_scope;
 mod shell_actions;
