@@ -177,6 +177,13 @@ fn snapshot_apk_with_progress(
         (glass_db::ArtifactId, String),
         ::smali::types::SmaliClass,
     > = std::collections::HashMap::new();
+    // APKs ship no Mach-O artifacts; the ObjC class map stays
+    // empty here. The IPA and standalone-Mach-O loaders below
+    // populate the corresponding field with real data.
+    let objc_classes: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
+    > = std::collections::HashMap::new();
 
     // Manifest leaf at the very top — first thing a reverser usually
     // looks at. Only emit when we actually parsed a manifest.
@@ -388,6 +395,7 @@ fn snapshot_apk_with_progress(
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
+        objc_classes: Arc::new(objc_classes),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
@@ -419,6 +427,10 @@ fn snapshot_ipa_with_progress(
     let mut data_sections: std::collections::HashMap<
         (glass_db::ArtifactId, String),
         DataSectionBytes,
+    > = std::collections::HashMap::new();
+    let mut objc_classes: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
     > = std::collections::HashMap::new();
 
     let mut bodies: Vec<SharedString> = Vec::new();
@@ -521,6 +533,67 @@ fn snapshot_ipa_with_progress(
                 label: SharedString::from(sec.name.clone()),
                 leaf_id,
             });
+        }
+        // ObjC class tree: walk `__objc_classlist` + `__objc_catlist`
+        // and emit one leaf per class / category under an
+        // "Objective-C" subgroup of this artifact. Each leaf points
+        // at a precomputed `Vec<ObjCRow>` cached in `objc_classes`
+        // so the tab renderer doesn't re-parse on every paint.
+        if let Some(image) = container.macho_image.as_ref() {
+            if let Ok(meta) = armv8_encode::container::read_objc_metadata(image) {
+                let mut objc_children: Vec<Node> = Vec::new();
+                for class in &meta.classes {
+                    let id = LeafId(bodies.len());
+                    let rows = glass_arch_arm::objc_format::render_class(class);
+                    let body_text: String = rows
+                        .iter()
+                        .map(|r| r.text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bodies.push(SharedString::from(body_text));
+                    origins.push(SharedString::from(origin.clone()));
+                    labels.push(SharedString::from(class.name.clone()));
+                    kinds.push(LeafKind::ObjCClass {
+                        artifact: aid.clone(),
+                        class_name: class.name.clone(),
+                    });
+                    objc_classes
+                        .insert((aid.clone(), class.name.clone()), Arc::new(rows));
+                    objc_children.push(Node::Leaf {
+                        label: SharedString::from(class.name.clone()),
+                        leaf_id: id,
+                    });
+                }
+                for cat in &meta.categories {
+                    let id = LeafId(bodies.len());
+                    let rows = glass_arch_arm::objc_format::render_category(cat);
+                    let body_text: String = rows
+                        .iter()
+                        .map(|r| r.text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let base = cat.class_name.as_deref().unwrap_or("?");
+                    let label = format!("{base}({})", cat.name);
+                    bodies.push(SharedString::from(body_text));
+                    origins.push(SharedString::from(origin.clone()));
+                    labels.push(SharedString::from(label.clone()));
+                    kinds.push(LeafKind::ObjCClass {
+                        artifact: aid.clone(),
+                        class_name: label.clone(),
+                    });
+                    objc_classes.insert((aid.clone(), label.clone()), Arc::new(rows));
+                    objc_children.push(Node::Leaf {
+                        label: SharedString::from(label),
+                        leaf_id: id,
+                    });
+                }
+                if !objc_children.is_empty() {
+                    children.push(Node::Group {
+                        label: SharedString::from("Objective-C"),
+                        children: objc_children,
+                    });
+                }
+            }
         }
         let group_label = if listable {
             display_name
@@ -642,6 +715,7 @@ fn snapshot_ipa_with_progress(
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
+        objc_classes: Arc::new(objc_classes),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
@@ -894,6 +968,71 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         });
     }
 
+    // ObjC class leaves for standalone Mach-O artifacts (a single
+    // `.dylib` opened directly). Same shape as the IPA loader's
+    // pass; appended under an "Objective-C" group when any class is
+    // present.
+    let mut objc_classes: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
+    > = std::collections::HashMap::new();
+    if let Some(image) = bin.container.macho_image.as_ref() {
+        if let Ok(meta) = armv8_encode::container::read_objc_metadata(image) {
+            let mut objc_children: Vec<Node> = Vec::new();
+            for class in &meta.classes {
+                let id = LeafId(bodies.len());
+                let rows = glass_arch_arm::objc_format::render_class(class);
+                let body_text: String = rows
+                    .iter()
+                    .map(|r| r.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bodies.push(SharedString::from(body_text));
+                origins.push(SharedString::from("arm64"));
+                labels_v.push(SharedString::from(class.name.clone()));
+                kinds_v.push(LeafKind::ObjCClass {
+                    artifact: aid.clone(),
+                    class_name: class.name.clone(),
+                });
+                objc_classes
+                    .insert((aid.clone(), class.name.clone()), Arc::new(rows));
+                objc_children.push(Node::Leaf {
+                    label: SharedString::from(class.name.clone()),
+                    leaf_id: id,
+                });
+            }
+            for cat in &meta.categories {
+                let id = LeafId(bodies.len());
+                let rows = glass_arch_arm::objc_format::render_category(cat);
+                let body_text: String = rows
+                    .iter()
+                    .map(|r| r.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let base = cat.class_name.as_deref().unwrap_or("?");
+                let label = format!("{base}({})", cat.name);
+                bodies.push(SharedString::from(body_text));
+                origins.push(SharedString::from("arm64"));
+                labels_v.push(SharedString::from(label.clone()));
+                kinds_v.push(LeafKind::ObjCClass {
+                    artifact: aid.clone(),
+                    class_name: label.clone(),
+                });
+                objc_classes.insert((aid.clone(), label.clone()), Arc::new(rows));
+                objc_children.push(Node::Leaf {
+                    label: SharedString::from(label),
+                    leaf_id: id,
+                });
+            }
+            if !objc_children.is_empty() {
+                tree_roots.push(Node::Group {
+                    label: SharedString::from("Objective-C"),
+                    children: objc_children,
+                });
+            }
+        }
+    }
+
     let leaf_icons = crate::icons::leaf_icons_for(&kinds_v, |_jni| None);
     Ok(LoadedBundle {
         title: format!("Glass — {}", bin.path.display()),
@@ -920,6 +1059,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         annotations: Arc::new(std::collections::HashMap::new()),
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(std::collections::HashMap::new()),
+        objc_classes: Arc::new(objc_classes),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),

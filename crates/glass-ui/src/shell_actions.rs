@@ -374,6 +374,13 @@ impl Shell {
                                 scroll_line: top_row as u32,
                             };
                         }
+                        TabKind::ObjCClass { artifact, class_name } => {
+                            return glass_db::TabState::ObjCClass {
+                                artifact: artifact.clone(),
+                                class_name: class_name.clone(),
+                                scroll_line: top_row as u32,
+                            };
+                        }
                         _ => {}
                     }
                     t.kind.to_state()
@@ -474,6 +481,18 @@ impl Shell {
                     TabKind::SectionMap { artifact: artifact.clone() },
                     None,
                     None,
+                ),
+                glass_db::TabState::ObjCClass {
+                    artifact,
+                    class_name,
+                    scroll_line,
+                } => (
+                    TabKind::ObjCClass {
+                        artifact: artifact.clone(),
+                        class_name: class_name.clone(),
+                    },
+                    None,
+                    if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
                 ),
                 // Unknown view kinds (Symbols, Strings, Manifest) are
                 // silently dropped until their runtime lands.
@@ -650,6 +669,10 @@ impl Shell {
                     .unwrap_or(method_decl);
                 SharedString::from(format!("Call graph: {name}"))
             }
+            TabKind::ObjCClass { class_name, .. } => self
+                .tab_leaf(index)
+                .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
+                .unwrap_or_else(|| SharedString::from(class_name.clone())),
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1025,6 +1048,23 @@ impl Shell {
             // DexCallGraph: seeded on first paint with the root
             // method + its direct callees.
             TabKind::DexCallGraph { .. } => {}
+            // ObjC class: rows are precomputed at load time into
+            // `bundle.objc_classes`. Size the scroll state once on
+            // first activation; the renderer walks the cached rows
+            // directly. Reuse `lines` as a "did initial setup"
+            // marker (Manifest does the same).
+            TabKind::ObjCClass { artifact, class_name } => {
+                let key = (artifact.clone(), class_name.clone());
+                let len = bundle
+                    .objc_classes
+                    .get(&key)
+                    .map(|r| r.len())
+                    .unwrap_or(0);
+                if tab.lines.is_none() {
+                    tab.scroll = ListState::new(len, ListAlignment::Top, px(2000.));
+                    tab.lines = Some(Arc::new(Vec::new()));
+                }
+            }
         }
     }
 

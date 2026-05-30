@@ -130,6 +130,17 @@ pub enum TabState {
         /// Camera zoom (1.0 = native pixel scale).
         zoom: f32,
     },
+    /// An Objective-C class lifted from a Mach-O artifact's
+    /// `__objc_classlist`. `class_name` is the bare class name as
+    /// reported by `ObjCMetadata` (e.g. `"NSString"` or
+    /// `"MyViewController"`) — stable across reloads for a given
+    /// artifact.
+    ObjCClass {
+        artifact: ArtifactId,
+        class_name: String,
+        #[serde(default)]
+        scroll_line: u32,
+    },
     /// DEX method call graph rooted on a specific method. Uses the
     /// JNI signature so it survives DEX reshuffles.
     DexCallGraph {

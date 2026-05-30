@@ -75,6 +75,10 @@ impl Shell {
             // state today. TODO: when node-selection lands, plumb it
             // through here.
             TabKind::Cfg { .. } | TabKind::DexCallGraph { .. } => None,
+            // ObjC class view doesn't carry an editable per-row
+            // selection clipboard payload yet — same shape as the
+            // CFG cases above.
+            TabKind::ObjCClass { .. } => None,
         }
     }
 }

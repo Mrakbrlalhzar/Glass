@@ -147,6 +147,9 @@ pub fn render_two_pane(
             .map(|t| t.kind.clone());
 
         let body: gpui::AnyElement = match active_kind {
+            Some(TabKind::ObjCClass { .. }) => {
+                crate::objc_view::render_objc_tab(shell, bundle.clone(), cx, border, dim, accent)
+            }
             Some(TabKind::SectionMap { artifact }) => shell
                 .render_section_map(&bundle, &artifact, panel, border, fg, dim, cx)
                 .into_any_element(),

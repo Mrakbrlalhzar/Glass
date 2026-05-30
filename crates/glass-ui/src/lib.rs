@@ -72,6 +72,7 @@ mod method_popover;
 mod modifier_picker;
 mod navigation;
 mod op_edit;
+mod objc_view;
 mod op_editor;
 mod smali_annotation_editor;
 mod smali_row_scope;
@@ -284,6 +285,18 @@ pub struct LoadedBundle {
     /// also the source the export path falls back to for unedited
     /// classes when re-emitting a DEX. Cheap shared `Arc`.
     pub smali_classes: Arc<std::collections::HashMap<(glass_db::ArtifactId, String), ::smali::types::SmaliClass>>,
+    /// Pre-rendered Objective-C class viewer rows, keyed by
+    /// `(artifact, class_name)`. Built once at load by walking
+    /// `armv8_encode::container::read_objc_metadata` for every
+    /// Mach-O artifact; the ObjC tab renderer reads from this map
+    /// rather than re-parsing on every paint. Empty for bundles
+    /// with no Mach-O artifacts (Android APKs, ELF dylibs).
+    pub objc_classes: Arc<
+        std::collections::HashMap<
+            (glass_db::ArtifactId, String),
+            Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
+        >,
+    >,
     /// Staged class-level smali edits — keyed by the same
     /// `(artifact, class_jni)` pair as `smali_classes`. In-memory
     /// only; closing the bundle drops them.
@@ -593,6 +606,15 @@ pub enum LeafKind {
         class_jni: String,
         method_decl: String,
     },
+    /// Objective-C class lifted from a Mach-O artifact's
+    /// `__objc_classlist`. The `class_name` is the bare class
+    /// name as `ObjCMetadata` reports it (e.g. `"NSString"`).
+    /// Same role as `SmaliClass`'s `class_jni`: a stable
+    /// persistence key paired with the originating artifact.
+    ObjCClass {
+        artifact: glass_db::ArtifactId,
+        class_name: String,
+    },
 }
 
 impl LoadedBundle {
@@ -656,6 +678,16 @@ impl LoadedBundle {
                 LeafKind::Manifest => Some(LeafId(i)),
                 _ => None,
             }),
+            TS::ObjCClass { artifact, class_name, .. } => {
+                self.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                    LeafKind::ObjCClass { artifact: a, class_name: n }
+                        if a == artifact && n == class_name =>
+                    {
+                        Some(LeafId(i))
+                    }
+                    _ => None,
+                })
+            }
             _ => None,
         }
     }
@@ -1064,6 +1096,10 @@ pub(crate) enum TabKind {
         class_jni: String,
         method_decl: String,
     },
+    ObjCClass {
+        artifact: glass_db::ArtifactId,
+        class_name: String,
+    },
 }
 
 impl TabKind {
@@ -1107,6 +1143,11 @@ impl TabKind {
                 pan_y: 0.,
                 zoom: 1.,
             },
+            TabKind::ObjCClass { artifact, class_name } => glass_db::TabState::ObjCClass {
+                artifact: artifact.clone(),
+                class_name: class_name.clone(),
+                scroll_line: 0,
+            },
         }
     }
 
@@ -1137,6 +1178,10 @@ impl TabKind {
             } => TabKind::DexCallGraph {
                 class_jni: class_jni.clone(),
                 method_decl: method_decl.clone(),
+            },
+            LeafKind::ObjCClass { artifact, class_name } => TabKind::ObjCClass {
+                artifact: artifact.clone(),
+                class_name: class_name.clone(),
             },
         }
     }
