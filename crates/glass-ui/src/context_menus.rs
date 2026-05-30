@@ -505,6 +505,22 @@ impl Shell {
                         entry_addr: sym.address,
                         label: SharedString::from(sym.display_name.clone()),
                     });
+                    // If the covering symbol is an ObjC method IMP
+                    // (synthesised by the symbol_map pass-6), offer
+                    // a jump to the class viewer for that class.
+                    // The persistence-stable class_name key on the
+                    // leaf uses the raw (mangled) form, so look up
+                    // the leaf by `(artifact, raw_class_from_name)`
+                    // — derived from the symbol's `name` field.
+                    if let Some(raw_class) = parse_objc_class_from_symbol(&sym.name) {
+                        let pretty =
+                            glass_arch_arm::objc_format::pretty_class_name(raw_class);
+                        items.push(ContextMenuItem::OpenObjCClass {
+                            artifact: artifact.clone(),
+                            class_name: raw_class.to_string(),
+                            label: SharedString::from(pretty),
+                        });
+                    }
                 } else {
                     items.push(ContextMenuItem::XrefsToAddress {
                         artifact: artifact.clone(),
@@ -857,6 +873,27 @@ impl Shell {
                 // reuse anyway.)
                 self.open_hex_in_new_tab(artifact, section, addr, cx);
             }
+            ContextMenuItem::OpenObjCClass { artifact, class_name, .. } => {
+                // Locate the existing ObjC class leaf and open it.
+                // The loader populates these whenever a Mach-O
+                // artifact has parseable __objc_classlist
+                // metadata — if the leaf isn't there, the user
+                // is on a binary that didn't yield ObjC metadata
+                // and we silently no-op.
+                let leaf = self.bundle().and_then(|b| {
+                    b.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                        crate::LeafKind::ObjCClass { artifact: a, class_name: c }
+                            if a == &artifact && c == &class_name =>
+                        {
+                            Some(crate::LeafId(i))
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(leaf) = leaf {
+                    self.open_leaf(leaf, cx);
+                }
+            }
             ContextMenuItem::RevertSmaliClassEdit { artifact, class_jni, .. } => {
                 self.revert_smali_class_edit(artifact, class_jni, cx);
             }
@@ -955,4 +992,23 @@ impl Shell {
             }
         }
     }
+}
+
+/// Extract the class name from an ObjC method symbol name
+/// (`-[Class selector:]` / `+[Class selector:]`). For category
+/// methods (`-[Base(Cat) sel]`) the returned slice includes the
+/// parens — that's the form the loader uses as the persistence
+/// key for the category leaf, so the lookup matches.
+///
+/// Returns `None` for names that don't look like ObjC IMP
+/// symbols. The class name is returned as a slice of the input
+/// (raw / possibly mangled), since the caller decides whether
+/// to demangle for display.
+fn parse_objc_class_from_symbol(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("-[").or_else(|| name.strip_prefix("+["))?;
+    // Class part runs to the space before the selector. (Selectors
+    // can't contain spaces; categories' parens come before the
+    // space, so they're included in the class part.)
+    let space = rest.find(' ')?;
+    Some(&rest[..space])
 }

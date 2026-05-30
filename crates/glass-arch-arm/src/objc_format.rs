@@ -15,6 +15,24 @@
 use armv8_encode::container::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty};
 
 use crate::format::{Chunk, ChunkKind};
+use crate::symbol_map::demangle;
+
+/// Best-effort demangle for an ObjC class name. Plain ObjC
+/// classes (`NSString`, `UIViewController`, `MyAppDelegate`)
+/// pass through untouched; Swift classes registered with the
+/// ObjC runtime carry mangled names (`_TtC...` / `_$s...C`)
+/// that the upstream `symbolic-demangle` knows how to unwind.
+pub fn pretty_class_name(raw: &str) -> String {
+    if !raw.starts_with('_') {
+        return raw.to_string();
+    }
+    let p = demangle(raw);
+    if p.is_empty() || p == raw {
+        raw.to_string()
+    } else {
+        p
+    }
+}
 
 /// One row of the ObjC class viewer. Plain text rendering joins
 /// chunk text in order; the UI walks `chunks` directly so each
@@ -48,10 +66,14 @@ pub fn render_class(class: &ObjCClass) -> Vec<ObjCRow> {
     let mut rows = Vec::new();
 
     // `@interface Foo : Super <Protocols> { ... }` style header.
-    let mut header = vec![plain("@interface "), chunk(ChunkKind::Type, &class.name)];
+    // Demangle Swift mangled class names so users see `MyApp.MyClass`
+    // instead of `_$s5MyApp7MyClassC`.
+    let pretty = pretty_class_name(&class.name);
+    let mut header = vec![plain("@interface "), chunk(ChunkKind::Type, &pretty)];
     if let Some(sup) = class.superclass_name.as_deref() {
+        let sup_pretty = pretty_class_name(sup);
         header.push(plain(" : "));
-        header.push(chunk(ChunkKind::Type, sup));
+        header.push(chunk(ChunkKind::Type, &sup_pretty));
     }
     rows.push(ObjCRow::new(header));
     rows.push(ObjCRow::new(vec![
@@ -64,13 +86,13 @@ pub fn render_class(class: &ObjCClass) -> Vec<ObjCRow> {
     if !class.instance_methods.is_empty() {
         rows.push(section_heading("Instance methods"));
         for m in &class.instance_methods {
-            rows.push(render_method_row(&class.name, m, MethodKind::Instance));
+            rows.push(render_method_row(&pretty, m, MethodKind::Instance));
         }
     }
     if !class.class_methods.is_empty() {
         rows.push(section_heading("Class methods"));
         for m in &class.class_methods {
-            rows.push(render_method_row(&class.name, m, MethodKind::Class));
+            rows.push(render_method_row(&pretty, m, MethodKind::Class));
         }
     }
     if !class.ivars.is_empty() {
@@ -105,12 +127,13 @@ pub fn render_class(class: &ObjCClass) -> Vec<ObjCRow> {
 /// the category name in parentheses (`-[NSString(MyExt) lowercased]`).
 pub fn render_category(cat: &ObjCCategory) -> Vec<ObjCRow> {
     let mut rows = Vec::new();
-    let base = cat.class_name.as_deref().unwrap_or("?");
+    let base_raw = cat.class_name.as_deref().unwrap_or("?");
+    let base = pretty_class_name(base_raw);
     let display = format!("{base}({})", cat.name);
 
     let header = vec![
         plain("@interface "),
-        chunk(ChunkKind::Type, base),
+        chunk(ChunkKind::Type, &base),
         plain(" ("),
         chunk(ChunkKind::Type, &cat.name),
         plain(")"),

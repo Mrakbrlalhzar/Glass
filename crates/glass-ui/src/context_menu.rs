@@ -136,6 +136,16 @@ pub enum ContextMenuItem {
         addr: u64,
         label: SharedString,
     },
+    /// "Open class view" — switch from a listing site that
+    /// references an Objective-C method (covered by a synthetic
+    /// `-[Class selector:]` symbol) to the class viewer for
+    /// `class_name`. The natural reverse of "click the IMP
+    /// address in the class view to jump to the listing".
+    OpenObjCClass {
+        artifact: glass_db::ArtifactId,
+        class_name: String,
+        label: SharedString,
+    },
     /// "Revert class edit" — drops the staged smali edit for a
     /// class. Only shown when the active class has a staged edit.
     RevertSmaliClassEdit {
@@ -302,6 +312,9 @@ pub fn render_context_menu(
             }
             ContextMenuItem::OpenHexHere { label, .. } => {
                 ("Open hex view here".to_string(), label.clone())
+            }
+            ContextMenuItem::OpenObjCClass { label, .. } => {
+                ("Open class view".to_string(), label.clone())
             }
             ContextMenuItem::RevertSmaliClassEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))

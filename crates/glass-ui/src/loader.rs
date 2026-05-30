@@ -550,9 +550,18 @@ fn snapshot_ipa_with_progress(
                         .map(|r| r.text())
                         .collect::<Vec<_>>()
                         .join("\n");
+                    // Demangle the tree-label so Swift classes
+                    // registered with the ObjC runtime show as
+                    // `MyApp.MyClass` rather than `_$s5MyApp7MyClassC`.
+                    // The `class_name` field of `LeafKind::ObjCClass`
+                    // stays as the raw upstream name — it's the
+                    // stable persistence + bundle-lookup key, and
+                    // the `objc_classes` map below uses the same.
+                    let pretty =
+                        glass_arch_arm::objc_format::pretty_class_name(&class.name);
                     bodies.push(SharedString::from(body_text));
                     origins.push(SharedString::from(origin.clone()));
-                    labels.push(SharedString::from(class.name.clone()));
+                    labels.push(SharedString::from(pretty.clone()));
                     kinds.push(LeafKind::ObjCClass {
                         artifact: aid.clone(),
                         class_name: class.name.clone(),
@@ -560,7 +569,7 @@ fn snapshot_ipa_with_progress(
                     objc_classes
                         .insert((aid.clone(), class.name.clone()), Arc::new(rows));
                     objc_children.push(Node::Leaf {
-                        label: SharedString::from(class.name.clone()),
+                        label: SharedString::from(pretty),
                         leaf_id: id,
                     });
                 }
@@ -572,18 +581,25 @@ fn snapshot_ipa_with_progress(
                         .map(|r| r.text())
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let base = cat.class_name.as_deref().unwrap_or("?");
-                    let label = format!("{base}({})", cat.name);
+                    let base_raw = cat.class_name.as_deref().unwrap_or("?");
+                    // Raw label for the persistence / bundle-lookup
+                    // key; pretty label for the tree text.
+                    let raw_label = format!("{base_raw}({})", cat.name);
+                    let pretty_label = format!(
+                        "{}({})",
+                        glass_arch_arm::objc_format::pretty_class_name(base_raw),
+                        cat.name
+                    );
                     bodies.push(SharedString::from(body_text));
                     origins.push(SharedString::from(origin.clone()));
-                    labels.push(SharedString::from(label.clone()));
+                    labels.push(SharedString::from(pretty_label.clone()));
                     kinds.push(LeafKind::ObjCClass {
                         artifact: aid.clone(),
-                        class_name: label.clone(),
+                        class_name: raw_label.clone(),
                     });
-                    objc_classes.insert((aid.clone(), label.clone()), Arc::new(rows));
+                    objc_classes.insert((aid.clone(), raw_label), Arc::new(rows));
                     objc_children.push(Node::Leaf {
-                        label: SharedString::from(label),
+                        label: SharedString::from(pretty_label),
                         leaf_id: id,
                     });
                 }
@@ -987,9 +1003,11 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
                     .map(|r| r.text())
                     .collect::<Vec<_>>()
                     .join("\n");
+                let pretty =
+                    glass_arch_arm::objc_format::pretty_class_name(&class.name);
                 bodies.push(SharedString::from(body_text));
                 origins.push(SharedString::from("arm64"));
-                labels_v.push(SharedString::from(class.name.clone()));
+                labels_v.push(SharedString::from(pretty.clone()));
                 kinds_v.push(LeafKind::ObjCClass {
                     artifact: aid.clone(),
                     class_name: class.name.clone(),
@@ -997,7 +1015,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
                 objc_classes
                     .insert((aid.clone(), class.name.clone()), Arc::new(rows));
                 objc_children.push(Node::Leaf {
-                    label: SharedString::from(class.name.clone()),
+                    label: SharedString::from(pretty),
                     leaf_id: id,
                 });
             }
@@ -1009,18 +1027,23 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
                     .map(|r| r.text())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let base = cat.class_name.as_deref().unwrap_or("?");
-                let label = format!("{base}({})", cat.name);
+                let base_raw = cat.class_name.as_deref().unwrap_or("?");
+                let raw_label = format!("{base_raw}({})", cat.name);
+                let pretty_label = format!(
+                    "{}({})",
+                    glass_arch_arm::objc_format::pretty_class_name(base_raw),
+                    cat.name
+                );
                 bodies.push(SharedString::from(body_text));
                 origins.push(SharedString::from("arm64"));
-                labels_v.push(SharedString::from(label.clone()));
+                labels_v.push(SharedString::from(pretty_label.clone()));
                 kinds_v.push(LeafKind::ObjCClass {
                     artifact: aid.clone(),
-                    class_name: label.clone(),
+                    class_name: raw_label.clone(),
                 });
-                objc_classes.insert((aid.clone(), label.clone()), Arc::new(rows));
+                objc_classes.insert((aid.clone(), raw_label), Arc::new(rows));
                 objc_children.push(Node::Leaf {
-                    label: SharedString::from(label),
+                    label: SharedString::from(pretty_label),
                     leaf_id: id,
                 });
             }

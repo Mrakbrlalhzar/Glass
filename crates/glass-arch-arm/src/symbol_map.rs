@@ -242,12 +242,15 @@ impl SymbolMap {
         if let Some(image) = container.macho_image.as_ref() {
             if let Ok(meta) = armv8_encode::container::read_objc_metadata(image) {
                 for class in &meta.classes {
+                    let raw_class = &class.name;
+                    let pretty_class = demangle_objc_class(raw_class);
                     for m in &class.instance_methods {
                         if let Some(addr) = m.imp {
                             insert_objc_method(
                                 &mut by_address,
                                 addr,
-                                format!("-[{} {}]", class.name, m.name),
+                                format!("-[{raw_class} {}]", m.name),
+                                format!("-[{pretty_class} {}]", m.name),
                             );
                         }
                     }
@@ -256,7 +259,8 @@ impl SymbolMap {
                             insert_objc_method(
                                 &mut by_address,
                                 addr,
-                                format!("+[{} {}]", class.name, m.name),
+                                format!("+[{raw_class} {}]", m.name),
+                                format!("+[{pretty_class} {}]", m.name),
                             );
                         }
                     }
@@ -266,16 +270,18 @@ impl SymbolMap {
                 // image, named via the category's own name (e.g.
                 // `-[NSString(MyExt) lowercased]`).
                 for cat in &meta.categories {
-                    let class_name = cat
+                    let raw_class = cat
                         .class_name
                         .clone()
                         .unwrap_or_else(|| "?".to_string());
+                    let pretty_class = demangle_objc_class(&raw_class);
                     for m in &cat.instance_methods {
                         if let Some(addr) = m.imp {
                             insert_objc_method(
                                 &mut by_address,
                                 addr,
-                                format!("-[{}({}) {}]", class_name, cat.name, m.name),
+                                format!("-[{raw_class}({}) {}]", cat.name, m.name),
+                                format!("-[{pretty_class}({}) {}]", cat.name, m.name),
                             );
                         }
                     }
@@ -284,7 +290,8 @@ impl SymbolMap {
                             insert_objc_method(
                                 &mut by_address,
                                 addr,
-                                format!("+[{}({}) {}]", class_name, cat.name, m.name),
+                                format!("+[{raw_class}({}) {}]", cat.name, m.name),
+                                format!("+[{pretty_class}({}) {}]", cat.name, m.name),
                             );
                         }
                     }
@@ -363,10 +370,19 @@ impl SymbolMap {
 /// `-[` or `+[` — those are pre-existing ObjC entries we keep.
 /// The `sources` bitset still accumulates so callers can tell
 /// the entry came from ObjC + something else.
-fn insert_objc_method(map: &mut BTreeMap<u64, Symbol>, addr: u64, name: String) {
+///
+/// `raw` is the stable persistence key (mangled class names
+/// stay verbatim so annotation lookups survive demangler
+/// changes); `display` is the user-facing form.
+fn insert_objc_method(
+    map: &mut BTreeMap<u64, Symbol>,
+    addr: u64,
+    raw: String,
+    display: String,
+) {
     let new = Symbol {
-        name: name.clone(),
-        display_name: name,
+        name: raw,
+        display_name: display,
         address: addr,
         size: 0,
         kind: SymbolKind::Function,
@@ -391,6 +407,27 @@ fn insert_objc_method(map: &mut BTreeMap<u64, Symbol>, addr: u64, name: String) 
                 existing.display_name = new.display_name;
             }
         }
+    }
+}
+
+/// Best-effort demangle for an ObjC class name. Plain ObjC
+/// classes (`NSString`, `UIViewController`, `MyAppDelegate`)
+/// pass through untouched. Swift classes registered with the
+/// ObjC runtime have mangled names — the legacy form
+/// `_TtC<len><module><len><class>` and the modern Swift ABI
+/// form `_$s...<class>C`. `symbolic-demangle` knows both;
+/// we just feed the raw name through and fall back to the
+/// raw text if the demangler produces an empty / identical
+/// string.
+fn demangle_objc_class(raw: &str) -> String {
+    if !raw.starts_with('_') {
+        return raw.to_string();
+    }
+    let pretty = demangle(raw);
+    if pretty.is_empty() || pretty == raw {
+        raw.to_string()
+    } else {
+        pretty
     }
 }
 
