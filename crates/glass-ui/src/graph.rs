@@ -913,7 +913,7 @@ pub fn route_edges(scene: &GraphScene, rects: &[NodeRect]) -> Vec<RoutedEdge> {
         let lanes = h_lanes.entry(from_rank).or_default();
         let lane_idx = lanes.len();
         let lane_step = 5.;
-        let lane_y = gap_mid + ((lane_idx as f32 / 2.).ceil() as f32)
+        let lane_y = gap_mid + (lane_idx as f32 / 2.).ceil()
             * lane_step
             * if lane_idx % 2 == 0 { 1. } else { -1. };
         let half = ((gap_bottom - gap_top).abs() / 2. - 4.).max(0.);
