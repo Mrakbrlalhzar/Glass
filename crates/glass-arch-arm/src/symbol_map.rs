@@ -25,9 +25,15 @@ pub enum SymbolKind {
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
     pub struct SymbolSources: u8 {
-        const SYMTAB    = 0b001;
-        const DWARF     = 0b010;
-        const EH_FRAME  = 0b100;
+        const SYMTAB    = 0b0001;
+        const DWARF     = 0b0010;
+        const EH_FRAME  = 0b0100;
+        /// Synthesised from Objective-C `__objc_classlist` metadata
+        /// — method IMPs named `-[Class selector:]` (instance) or
+        /// `+[Class selector:]` (class). The Mach-O symtab usually
+        /// doesn't carry these as proper symbols on Swift / mixed
+        /// codebases, so the ObjC reader fills the gap.
+        const OBJC      = 0b1000;
     }
 }
 
@@ -223,6 +229,73 @@ impl SymbolMap {
             }
         }
 
+        // (6) Synthetic `-[Class selector:]` / `+[Class selector:]`
+        // entries from Mach-O Objective-C metadata. Swift and
+        // mixed iOS codebases rarely have IMP names in the
+        // symtab; the ObjC reader walks `__objc_classlist` to
+        // recover the canonical method names. Each method's `imp`
+        // (when present) becomes a function symbol at that
+        // address. We overwrite any prior entry whose name
+        // doesn't already look like an ObjC selector — the
+        // mangled-Swift name in the symtab is less useful than
+        // the dotted ObjC form.
+        if let Some(image) = container.macho_image.as_ref() {
+            if let Ok(meta) = armv8_encode::container::read_objc_metadata(image) {
+                for class in &meta.classes {
+                    for m in &class.instance_methods {
+                        if let Some(addr) = m.imp {
+                            insert_objc_method(
+                                &mut by_address,
+                                addr,
+                                format!("-[{} {}]", class.name, m.name),
+                            );
+                        }
+                    }
+                    for m in &class.class_methods {
+                        if let Some(addr) = m.imp {
+                            insert_objc_method(
+                                &mut by_address,
+                                addr,
+                                format!("+[{} {}]", class.name, m.name),
+                            );
+                        }
+                    }
+                }
+                // Categories add instance + class methods to an
+                // existing class. The IMPs sit in the category
+                // image, named via the category's own name (e.g.
+                // `-[NSString(MyExt) lowercased]`).
+                for cat in &meta.categories {
+                    let class_name = cat
+                        .class_name
+                        .clone()
+                        .unwrap_or_else(|| "?".to_string());
+                    for m in &cat.instance_methods {
+                        if let Some(addr) = m.imp {
+                            insert_objc_method(
+                                &mut by_address,
+                                addr,
+                                format!("-[{}({}) {}]", class_name, cat.name, m.name),
+                            );
+                        }
+                    }
+                    for m in &cat.class_methods {
+                        if let Some(addr) = m.imp {
+                            insert_objc_method(
+                                &mut by_address,
+                                addr,
+                                format!("+[{}({}) {}]", class_name, cat.name, m.name),
+                            );
+                        }
+                    }
+                }
+            }
+            // `Err` outcomes are non-fatal: most commonly
+            // `ChainedFixupsMissing` for legacy Mach-O that uses
+            // `LC_DYLD_INFO_ONLY` instead of the modern format. Log
+            // and continue — Glass still works without ObjC names.
+        }
+
         SymbolMap { by_address }
     }
 
@@ -279,6 +352,45 @@ impl SymbolMap {
             }
         }
         None
+    }
+}
+
+/// Insert an ObjC-derived method symbol at `addr`. The ObjC
+/// reader's name (`-[Class selector:]`) is strictly more
+/// informative than whatever the symtab might carry at this IMP
+/// address (typically a mangled Swift name or nothing), so we
+/// overwrite any entry whose name doesn't already start with
+/// `-[` or `+[` — those are pre-existing ObjC entries we keep.
+/// The `sources` bitset still accumulates so callers can tell
+/// the entry came from ObjC + something else.
+fn insert_objc_method(map: &mut BTreeMap<u64, Symbol>, addr: u64, name: String) {
+    let new = Symbol {
+        name: name.clone(),
+        display_name: name,
+        address: addr,
+        size: 0,
+        kind: SymbolKind::Function,
+        sources: SymbolSources::OBJC,
+    };
+    match map.get_mut(&addr) {
+        None => {
+            map.insert(addr, new);
+        }
+        Some(existing) => {
+            existing.sources |= SymbolSources::OBJC;
+            // Promote kind if we don't already think it's a function.
+            if !matches!(existing.kind, SymbolKind::Function) {
+                existing.kind = SymbolKind::Function;
+            }
+            // Overwrite the name only if the existing one isn't
+            // already in canonical ObjC form.
+            let is_objc_shaped = existing.name.starts_with("-[")
+                || existing.name.starts_with("+[");
+            if !is_objc_shaped {
+                existing.name = new.name;
+                existing.display_name = new.display_name;
+            }
+        }
     }
 }
 
