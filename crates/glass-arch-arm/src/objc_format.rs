@@ -51,20 +51,41 @@ pub fn pretty_class_name(raw: &str) -> String {
 
 /// Parse the legacy `_TtC<len><module><len><class>` form (and
 /// the C/P/V/O variants for class/protocol/struct/enum) into
-/// `module.identifier`. Returns `None` if `raw` isn't in this
-/// shape.
+/// `module.identifier`. Also handles single-letter module
+/// abbreviations: `_TtCs<...>` = `Swift.<...>`,
+/// `_TtCSo<...>` = `<...>` (ObjC-bridged class — no module
+/// prefix is meaningful for these). Returns `None` if `raw`
+/// isn't in any recognised shape.
 fn demangle_legacy_swift(raw: &str) -> Option<String> {
     // Strip the `_Tt[CPVO]` prefix.
     let rest = raw.strip_prefix("_TtC")
         .or_else(|| raw.strip_prefix("_TtP"))
         .or_else(|| raw.strip_prefix("_TtV"))
         .or_else(|| raw.strip_prefix("_TtO"))?;
+    // Optional module-abbreviation prefix. `s` = Swift stdlib;
+    // `So` = ObjC-bridged (no module prefix wanted). Anything
+    // else falls through to the length-prefix parser below.
+    let (module_override, mut cursor) = if let Some(after) = rest.strip_prefix("So") {
+        // `_TtCSo<len><class>` → `<class>` (e.g.
+        // `_TtCSo8NSObject` → `NSObject`). The leading "So" is
+        // a marker that the class is ObjC-bridged so we don't
+        // need to prefix with a module name.
+        (Some(""), after)
+    } else if let Some(after) = rest.strip_prefix('s') {
+        (Some("Swift"), after)
+    } else {
+        (None, rest)
+    };
     // Read length-prefixed identifiers until the input is
     // exhausted. The format is `<decimal-len><utf8-bytes>`,
     // concatenated. Last segment is the class / type name; any
     // earlier segments form the module path.
-    let mut segments: Vec<&str> = Vec::new();
-    let mut cursor = rest;
+    let mut segments: Vec<String> = Vec::new();
+    if let Some(m) = module_override {
+        if !m.is_empty() {
+            segments.push(m.to_string());
+        }
+    }
     while !cursor.is_empty() {
         // Read a run of ASCII digits.
         let digit_end = cursor
@@ -91,7 +112,7 @@ fn demangle_legacy_swift(raw: &str) -> Option<String> {
         // class names are plain ASCII. Take the byte slice and
         // verify it's valid UTF-8 by indexing back as a &str.
         let body = cursor.get(body_start..body_end)?;
-        segments.push(body);
+        segments.push(body.to_string());
         cursor = &cursor[body_end..];
     }
     if segments.is_empty() {
@@ -145,6 +166,25 @@ mod legacy_swift_demangle_tests {
         assert!(demangle_legacy_swift("_TtCblackjack").is_none());
         // Length longer than the remaining bytes.
         assert!(demangle_legacy_swift("_TtC99x").is_none());
+    }
+
+    #[test]
+    fn swift_stdlib_abbreviation() {
+        // `_TtCs<len><class>` — the `s` is the abbreviation for
+        // module name `Swift`. Used when a Swift class subclasses
+        // a stdlib type bridged through ObjC. `AnyHashable` is
+        // 11 characters.
+        let out = demangle_legacy_swift("_TtCs11AnyHashable");
+        assert_eq!(out.as_deref(), Some("Swift.AnyHashable"));
+    }
+
+    #[test]
+    fn objc_bridged_class() {
+        // `_TtCSo<len><class>` — `So` marks a class that's an
+        // ObjC bridge into Swift. There's no module prefix
+        // wanted; just the class name.
+        let out = demangle_legacy_swift("_TtCSo8NSObject");
+        assert_eq!(out.as_deref(), Some("NSObject"));
     }
 }
 

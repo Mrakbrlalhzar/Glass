@@ -21,21 +21,51 @@ use crate::symbol_map::demangle;
 /// type names (rare but possible for `@objc` Swift classes) pass
 /// through untouched; modern Swift ABI mangling (`$s...` /
 /// `_$s...`) is handled by `symbolic-demangle`.
+///
+/// Field-record type strings from `__swift5_typeref` may carry a
+/// leading **kind byte** (`0x01..=0x1F`) that indicates a relative
+/// symbolic reference. We can't follow the reference without
+/// extra context, so we strip the byte and try to demangle the
+/// remainder; if that fails, return an empty string so the
+/// renderer omits the type rather than show control characters
+/// the user reads as gibberish.
 pub fn pretty_swift_type_name(raw: &str) -> String {
     if raw.is_empty() {
         return raw.to_string();
+    }
+    // Swift type-reference strings sometimes begin with a 1-byte
+    // kind prefix in the 0x01..=0x1F range. Strip it before
+    // demangling.
+    let trimmed = {
+        let bytes = raw.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() && (1..=0x1F).contains(&bytes[start]) {
+            start += 1;
+        }
+        // The bytes that followed a control prefix are typically
+        // a 4-byte relative offset, not a mangled name. If
+        // everything after the prefix looks non-printable or
+        // empty, give up.
+        let tail = &bytes[start..];
+        if tail.is_empty() || tail.iter().any(|&b| b < 0x20 && b != b'\t') {
+            return String::new();
+        }
+        std::str::from_utf8(tail).unwrap_or("").to_string()
+    };
+    if trimmed.is_empty() {
+        return String::new();
     }
     // `symbolic-demangle` expects a leading `_` sigil for Swift —
     // `__swift5_types` mangled-name records often omit it (the
     // descriptor stores `$s...` directly). Try the demangler with
     // and without the prefix; the first non-empty / changed result
-    // wins. Falls back to the raw input.
-    let candidates = if raw.starts_with('_') {
-        vec![raw.to_string()]
-    } else if raw.starts_with('$') {
-        vec![format!("_{raw}"), raw.to_string()]
+    // wins.
+    let candidates = if trimmed.starts_with('_') {
+        vec![trimmed.clone()]
+    } else if trimmed.starts_with('$') {
+        vec![format!("_{trimmed}"), trimmed.clone()]
     } else {
-        vec![raw.to_string()]
+        vec![trimmed.clone()]
     };
     for c in candidates {
         let out = demangle(&c);
@@ -43,7 +73,15 @@ pub fn pretty_swift_type_name(raw: &str) -> String {
             return out;
         }
     }
-    raw.to_string()
+    // Demangler couldn't unwind it. If the remaining text is
+    // plain ASCII it's safe to show as-is (might be an `@objc`
+    // bridged name); otherwise return empty so the caller
+    // omits the type rather than render garbage.
+    if trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '.') {
+        trimmed
+    } else {
+        String::new()
+    }
 }
 
 /// One row of the Swift type viewer. Plain text rendering joins
@@ -250,5 +288,30 @@ mod tests {
         t.vtable.clear();
         let rows = render_type(&t);
         assert!(rows[0].text().starts_with("struct "));
+    }
+
+    #[test]
+    fn pretty_swift_strips_control_byte_prefix() {
+        // Field-record type strings sometimes start with a kind
+        // byte (0x01..=0x1F). When the rest demangles, prefer
+        // the demangled name.
+        let s = format!("\u{01}$s7SwiftUI4TextV");
+        // Either the demangler returns a non-empty pretty form
+        // or we return empty — but never the raw control byte.
+        let out = pretty_swift_type_name(&s);
+        assert!(
+            out.is_empty() || !out.contains('\u{01}'),
+            "expected control bytes to be stripped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn pretty_swift_returns_empty_on_pure_binary() {
+        // A 5-byte symbolic reference (kind + 4-byte offset)
+        // contains nothing demangleable. We'd rather render an
+        // empty type than expose raw bytes.
+        let bytes = b"\x01\x00\x01\x02\x03";
+        let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+        assert_eq!(pretty_swift_type_name(s), "");
     }
 }
