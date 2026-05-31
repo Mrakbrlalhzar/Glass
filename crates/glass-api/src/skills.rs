@@ -299,6 +299,41 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({ "type": "object" }),
                 example: "glass classes ./app.apk --package androidx.annotation.",
             },
+            // ---- ObjC + Swift type metadata --------------------------
+            Skill {
+                name: "types",
+                description: "List ObjC + Swift class-like entities (classes, categories, structs, enums) across an iOS bundle's Mach-O artifacts. Filters: `kind` (objc-class / objc-category / swift-class / swift-struct / swift-enum), `package` (prefix on the demangled name), `artifact`, `limit`. APKs / ELFs / images without ObjC or Swift metadata contribute nothing.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": path_arg(),
+                        "artifact": { "type": "string", "description": "Optional artifact filter — label or hex prefix." },
+                        "package": { "type": "string", "description": "Prefix filter on the demangled (pretty) name." },
+                        "kind": { "type": "string", "enum": ["objc-class","objc-category","swift-class","swift-struct","swift-enum"] },
+                        "limit": { "type": "integer", "minimum": 1, "description": "Cap on entries. Default 200." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass types ./blackjack.ipa --kind swift-class",
+            },
+            Skill {
+                name: "type",
+                description: "Detail view for one ObjC class / category or Swift type. Looks up by pretty (demangled) name first, falling back to the raw mangled form. Pass `raw: true` to skip all pretty-name conversion in the response. Returns superclass / fields / methods / ivars / properties / protocols depending on the kind.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path","artifact","name"],
+                    "properties": {
+                        "path": path_arg(),
+                        "artifact": artifact_arg(),
+                        "name": { "type": "string", "description": "Pretty form (e.g. 'blackjack.ContentView', 'NSString(MyExt)') or raw mangled form ('_$s9blackjack11ContentViewC')." },
+                        "raw": { "type": "boolean", "description": "When true, emit raw mangled names unchanged. Default false." }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass type ./blackjack.ipa --artifact blackjack --name blackjack.ContentView",
+            },
+
             Skill {
                 name: "smali",
                 description: "Full smali source for one class.",

@@ -103,6 +103,39 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             let package = opt_str(args, "package");
             json_of(&bundle.classes(package.as_deref()))?
         }
+        "types" => {
+            let bundle = open(args)?;
+            let artifact = opt_str(args, "artifact");
+            let package = opt_str(args, "package");
+            let kind = match opt_str(args, "kind") {
+                Some(s) => match glass_api::TypeKind::parse(&s) {
+                    Some(k) => Some(k),
+                    None => {
+                        return Err(DispatchError::Other(format!(
+                            "unknown kind {s:?}: expected objc-class, objc-category, swift-class, swift-struct, swift-enum"
+                        )))
+                    }
+                },
+                None => None,
+            };
+            let limit = opt_usize(args, "limit").or(Some(200));
+            json_of(&bundle.types(
+                artifact.as_deref(),
+                kind,
+                package.as_deref(),
+                limit,
+            )?)?
+        }
+        "type" => {
+            let bundle = open(args)?;
+            let artifact = require_str(args, "artifact")?;
+            let name = require_str(args, "name")?;
+            let raw = args
+                .get("raw")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            json_of(&bundle.type_detail(&artifact, &name, raw)?)?
+        }
         "smali" => {
             let bundle = open(args)?;
             let class = require_str(args, "class")?;

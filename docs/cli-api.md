@@ -161,6 +161,52 @@ All DEX classes. `--package` filters by JNI or Java prefix.
 glass classes ./app.apk --package androidx.annotation. --text
 ```
 
+### `types <path> [--artifact <ref>] [--package <prefix>] [--kind <kind>] [--limit <n>]`
+List ObjC + Swift class-like entities (classes, categories, structs,
+enums) across an iOS bundle's Mach-O artifacts. APKs / ELFs return
+empty. `--kind` is one of `objc-class`, `objc-category`,
+`swift-class`, `swift-struct`, `swift-enum`. `--package` is a prefix
+filter on the **demangled** name. Default `--limit 200`.
+
+```sh
+glass types ./blackjack.ipa --kind swift-class --text
+```
+
+JSON shape:
+```json
+{
+  "total": 42,
+  "shown": 42,
+  "entries": [
+    {
+      "kind": "swift-class",
+      "name": "blackjack.ContentView",
+      "raw_name": "_$s9blackjack11ContentViewC",
+      "artifact": "blackjack",
+      "vaddr": "0x100012abc",
+      "method_count": 5,
+      "field_count": 3,
+      "category_for": null
+    }
+  ]
+}
+```
+
+### `type <path> --artifact <ref> --name <name> [--raw]`
+Detail view for one ObjC class / category or Swift type. Looks up
+by pretty (demangled) name first, falling back to the raw mangled
+form. Pass `--raw` to skip pretty-name conversion. The response is
+a tagged enum keyed by `kind`:
+
+```json
+{ "kind": "objc-class", "name": "...", "instance_methods": [...] }
+{ "kind": "swift-class", "name": "...", "fields": [...], "vtable": [...] }
+```
+
+```sh
+glass type ./blackjack.ipa --artifact blackjack --name blackjack.ContentView --text
+```
+
 ### `smali <path> --class <ref>`
 Full smali source for one class.
 

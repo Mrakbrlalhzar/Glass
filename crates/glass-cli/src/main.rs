@@ -82,6 +82,21 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         Cmd::Classes { path, package } => {
             Some(verbs::classes(path.clone(), package.clone(), format))
         }
+        Cmd::Types { path, artifact, package, kind, limit } => Some(verbs::types(
+            path.clone(),
+            artifact.clone(),
+            package.clone(),
+            kind.clone(),
+            *limit,
+            format,
+        )),
+        Cmd::Type { path, artifact, name, raw } => Some(verbs::type_detail(
+            path.clone(),
+            artifact.clone(),
+            name.clone(),
+            *raw,
+            format,
+        )),
         Cmd::Smali { path, class } => {
             Some(verbs::smali(path.clone(), class.clone(), format))
         }
@@ -332,6 +347,40 @@ enum Cmd {
         path: PathBuf,
         #[arg(long)]
         package: Option<String>,
+    },
+    /// List ObjC + Swift class-like entities across the bundle's
+    /// Mach-O artifacts. APKs / ELFs return empty.
+    Types {
+        path: PathBuf,
+        /// Restrict to one artifact (label or hex-prefix of its id).
+        #[arg(long)]
+        artifact: Option<String>,
+        /// Prefix filter on the demangled (pretty) name.
+        #[arg(long)]
+        package: Option<String>,
+        /// Filter by kind: `objc-class`, `objc-category`,
+        /// `swift-class`, `swift-struct`, `swift-enum`.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Cap on entries. Default 200.
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
+    /// Detail view for one ObjC class / category or Swift type.
+    /// Looks up by pretty (demangled) name first, falling back to
+    /// the raw mangled form.
+    Type {
+        path: PathBuf,
+        /// Artifact label or hex-prefix of its id.
+        #[arg(long)]
+        artifact: String,
+        /// Class / type name — pretty form or raw mangled.
+        #[arg(long)]
+        name: String,
+        /// Emit raw mangled names unchanged (no demangle attempt
+        /// on field types / superclass).
+        #[arg(long)]
+        raw: bool,
     },
     /// Print the full smali body of a class.
     Smali {
@@ -752,6 +801,8 @@ fn main() -> Result<()> {
         | Cmd::CfgOf { .. }
         | Cmd::CallsFrom { .. }
         | Cmd::Classes { .. }
+        | Cmd::Types { .. }
+        | Cmd::Type { .. }
         | Cmd::Smali { .. }
         | Cmd::SmaliSet { .. }
         | Cmd::Methods { .. }

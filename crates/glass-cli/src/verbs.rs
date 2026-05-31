@@ -155,6 +155,49 @@ pub fn classes(
     output::emit(envelope, format, render_classes)
 }
 
+pub fn types(
+    path: PathBuf,
+    artifact: Option<String>,
+    package: Option<String>,
+    kind: Option<String>,
+    limit: usize,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let kind_filter = match kind.as_deref() {
+            Some(s) => match glass_api::TypeKind::parse(s) {
+                Some(k) => Some(k),
+                None => anyhow::bail!(
+                    "unknown --kind {s:?}: expected one of objc-class, objc-category, swift-class, swift-struct, swift-enum"
+                ),
+            },
+            None => None,
+        };
+        let bundle = glass_api::open(&path)?;
+        bundle.types(
+            artifact.as_deref(),
+            kind_filter,
+            package.as_deref(),
+            Some(limit),
+        )
+    })?;
+    output::emit(envelope, format, render_types)
+}
+
+pub fn type_detail(
+    path: PathBuf,
+    artifact: String,
+    name: String,
+    raw: bool,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| {
+        let bundle = glass_api::open(&path)?;
+        bundle.type_detail(&artifact, &name, raw)
+    })?;
+    output::emit(envelope, format, render_type_detail)
+}
+
 pub fn smali(path: PathBuf, class: String, format: Format) -> Result<()> {
     let envelope = output::measured(|| {
         let bundle = glass_api::open(&path)?;
@@ -826,6 +869,209 @@ fn render_annotation_clear(
         "{}  cleared  [{:<8}]  {}",
         data.artifact, data.key_kind, data.key,
     )
+}
+
+fn render_types(
+    data: &glass_api::TypesResult,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{} of {} types", data.shown, data.total)?;
+    if data.entries.is_empty() {
+        return Ok(());
+    }
+    let kind_w = data.entries.iter().map(|e| kind_label(e.kind).len()).max().unwrap_or(4);
+    let name_w = data.entries.iter().map(|e| e.name.len()).max().unwrap_or(4).min(60);
+    let art_w = data.entries.iter().map(|e| e.artifact.len()).max().unwrap_or(8).min(32);
+    let vaddr_w = data.entries.iter().map(|e| e.vaddr.len()).max().unwrap_or(10);
+    writeln!(
+        out,
+        "  {:<kw$}  {:<nw$}  {:<aw$}  {:<vw$}  METHODS/FIELDS",
+        "KIND",
+        "NAME",
+        "ARTIFACT",
+        "VADDR",
+        kw = kind_w,
+        nw = name_w,
+        aw = art_w,
+        vw = vaddr_w,
+    )?;
+    for e in &data.entries {
+        writeln!(
+            out,
+            "  {:<kw$}  {:<nw$}  {:<aw$}  {:<vw$}  {}/{}",
+            kind_label(e.kind),
+            e.name,
+            e.artifact,
+            e.vaddr,
+            e.method_count,
+            e.field_count,
+            kw = kind_w,
+            nw = name_w,
+            aw = art_w,
+            vw = vaddr_w,
+        )?;
+    }
+    Ok(())
+}
+
+fn kind_label(k: glass_api::TypeKind) -> &'static str {
+    match k {
+        glass_api::TypeKind::ObjcClass => "objc-class",
+        glass_api::TypeKind::ObjcCategory => "objc-category",
+        glass_api::TypeKind::SwiftClass => "swift-class",
+        glass_api::TypeKind::SwiftStruct => "swift-struct",
+        glass_api::TypeKind::SwiftEnum => "swift-enum",
+    }
+}
+
+fn render_type_detail(
+    data: &glass_api::TypeDetail,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    match data {
+        glass_api::TypeDetail::ObjcClass(c) => render_objc_class_detail(c, out),
+        glass_api::TypeDetail::ObjcCategory(c) => render_objc_category_detail(c, out),
+        glass_api::TypeDetail::SwiftClass(t) => render_swift_type_detail("class", t, out),
+        glass_api::TypeDetail::SwiftStruct(t) => render_swift_type_detail("struct", t, out),
+        glass_api::TypeDetail::SwiftEnum(t) => render_swift_type_detail("enum", t, out),
+    }
+}
+
+fn render_objc_class_detail(
+    c: &glass_api::ObjcClassDetail,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let sup = c.superclass.as_deref().unwrap_or("(none)");
+    writeln!(out, "@interface {} : {}", c.name, sup)?;
+    writeln!(
+        out,
+        "  // artifact {}  vaddr {}  flags 0x{:x}  size 0x{:x}",
+        c.artifact, c.vaddr, c.flags, c.instance_size,
+    )?;
+    if !c.instance_methods.is_empty() {
+        writeln!(out, "Instance methods:")?;
+        for m in &c.instance_methods {
+            write_objc_method(out, '-', &c.name, m)?;
+        }
+    }
+    if !c.class_methods.is_empty() {
+        writeln!(out, "Class methods:")?;
+        for m in &c.class_methods {
+            write_objc_method(out, '+', &c.name, m)?;
+        }
+    }
+    if !c.ivars.is_empty() {
+        writeln!(out, "Ivars:")?;
+        for i in &c.ivars {
+            writeln!(
+                out,
+                "  {}: {} (offset {}, size {})",
+                i.name, i.type_enc, i.offset, i.size,
+            )?;
+        }
+    }
+    if !c.properties.is_empty() {
+        writeln!(out, "Properties:")?;
+        for p in &c.properties {
+            writeln!(out, "  {} ({})", p.name, p.attributes)?;
+        }
+    }
+    if !c.adopted_protocols.is_empty() {
+        writeln!(out, "Adopted protocols:")?;
+        for p in &c.adopted_protocols {
+            writeln!(out, "  {p}")?;
+        }
+    }
+    writeln!(out, "@end")
+}
+
+fn render_objc_category_detail(
+    c: &glass_api::ObjcCategoryDetail,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "@interface {}  // category", c.name)?;
+    writeln!(
+        out,
+        "  // artifact {}  vaddr {}  category_for {}",
+        c.artifact, c.vaddr, c.category_for,
+    )?;
+    if !c.instance_methods.is_empty() {
+        writeln!(out, "Instance methods:")?;
+        for m in &c.instance_methods {
+            write_objc_method(out, '-', &c.name, m)?;
+        }
+    }
+    if !c.class_methods.is_empty() {
+        writeln!(out, "Class methods:")?;
+        for m in &c.class_methods {
+            write_objc_method(out, '+', &c.name, m)?;
+        }
+    }
+    if !c.instance_properties.is_empty() {
+        writeln!(out, "Instance properties:")?;
+        for p in &c.instance_properties {
+            writeln!(out, "  {} ({})", p.name, p.attributes)?;
+        }
+    }
+    if !c.class_properties.is_empty() {
+        writeln!(out, "Class properties:")?;
+        for p in &c.class_properties {
+            writeln!(out, "  {} ({})", p.name, p.attributes)?;
+        }
+    }
+    if !c.protocols.is_empty() {
+        writeln!(out, "Protocols:")?;
+        for p in &c.protocols {
+            writeln!(out, "  {p}")?;
+        }
+    }
+    writeln!(out, "@end")
+}
+
+fn write_objc_method(
+    out: &mut dyn Write,
+    sigil: char,
+    class_name: &str,
+    m: &glass_api::ObjcMethodEntry,
+) -> std::io::Result<()> {
+    let imp = m.imp_vaddr.as_deref().unwrap_or("(no imp)");
+    writeln!(out, "  {sigil}[{class_name} {}]  @ {imp}  types={}", m.name, m.types)
+}
+
+fn render_swift_type_detail(
+    kw: &str,
+    t: &glass_api::SwiftTypeDetail,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{kw} {}", t.name)?;
+    writeln!(
+        out,
+        "  // artifact {}  descriptor {}",
+        t.artifact, t.descriptor_vaddr,
+    )?;
+    if let Some(p) = &t.parent_vaddr {
+        writeln!(out, "  // parent {p}")?;
+    }
+    if let Some(acc) = &t.metadata_accessor_vaddr {
+        writeln!(out, "  // metadata accessor @ {acc}")?;
+    }
+    if !t.fields.is_empty() {
+        writeln!(out, "Fields:")?;
+        for f in &t.fields {
+            if f.type_pretty.is_empty() {
+                writeln!(out, "  {}  (raw type: {:?})", f.name, f.raw_type)?;
+            } else {
+                writeln!(out, "  {}: {}", f.name, f.type_pretty)?;
+            }
+        }
+    }
+    if !t.vtable.is_empty() {
+        writeln!(out, "V-table:")?;
+        for e in &t.vtable {
+            writeln!(out, "  vtable[{}] @ {}  flags 0x{:x}", e.index, e.impl_vaddr, e.flags)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn bin_search(

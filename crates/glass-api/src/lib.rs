@@ -37,6 +37,7 @@ mod search;
 mod skills;
 mod strings;
 mod symbols;
+mod types;
 mod xref;
 
 pub use annotations::{
@@ -191,6 +192,11 @@ pub use inspect::{
 };
 pub use symbols::{
     demangle, DemangleResult, SymbolInfo, SymbolKindName, SymbolListing, SymbolQuery,
+};
+pub use types::{
+    ObjcCategoryDetail, ObjcClassDetail, ObjcIvarEntry, ObjcMethodEntry,
+    ObjcPropertyEntry, SwiftFieldEntry, SwiftTypeDetail, SwiftVtableEntryDetail,
+    TypeDetail, TypeEntry, TypeKind, TypesResult,
 };
 pub use search::{SearchHit, SearchResult};
 pub use skills::{catalog as skill_catalog, Skill, SkillCatalog};
