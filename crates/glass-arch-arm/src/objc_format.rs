@@ -20,17 +20,131 @@ use crate::symbol_map::demangle;
 /// Best-effort demangle for an ObjC class name. Plain ObjC
 /// classes (`NSString`, `UIViewController`, `MyAppDelegate`)
 /// pass through untouched; Swift classes registered with the
-/// ObjC runtime carry mangled names (`_TtC...` / `_$s...C`)
-/// that the upstream `symbolic-demangle` knows how to unwind.
+/// ObjC runtime carry mangled names in one of two forms:
+///
+///   * Legacy: `_TtC<len><module><len><class>` (class),
+///     `_TtP...` (protocol), `_TtV...` (struct), `_TtO...` (enum).
+///     Used by older Swift versions and still emitted today for
+///     the `__objc_classlist` name slot when a Swift class
+///     subclasses `NSObject` / is marked `@objc`. `symbolic-demangle`
+///     doesn't recognise these so we parse them inline.
+///   * Modern Swift ABI: `_$s<module-runes><class>C` — handled
+///     by `symbolic-demangle` (the `swift` feature is on in our
+///     `Cargo.toml`).
 pub fn pretty_class_name(raw: &str) -> String {
     if !raw.starts_with('_') {
         return raw.to_string();
+    }
+    // Try the legacy `_TtC` family first — they're the form ObjC
+    // uses for Swift classes and `symbolic-demangle` doesn't
+    // unwind them.
+    if let Some(p) = demangle_legacy_swift(raw) {
+        return p;
     }
     let p = demangle(raw);
     if p.is_empty() || p == raw {
         raw.to_string()
     } else {
         p
+    }
+}
+
+/// Parse the legacy `_TtC<len><module><len><class>` form (and
+/// the C/P/V/O variants for class/protocol/struct/enum) into
+/// `module.identifier`. Returns `None` if `raw` isn't in this
+/// shape.
+fn demangle_legacy_swift(raw: &str) -> Option<String> {
+    // Strip the `_Tt[CPVO]` prefix.
+    let rest = raw.strip_prefix("_TtC")
+        .or_else(|| raw.strip_prefix("_TtP"))
+        .or_else(|| raw.strip_prefix("_TtV"))
+        .or_else(|| raw.strip_prefix("_TtO"))?;
+    // Read length-prefixed identifiers until the input is
+    // exhausted. The format is `<decimal-len><utf8-bytes>`,
+    // concatenated. Last segment is the class / type name; any
+    // earlier segments form the module path.
+    let mut segments: Vec<&str> = Vec::new();
+    let mut cursor = rest;
+    while !cursor.is_empty() {
+        // Read a run of ASCII digits.
+        let digit_end = cursor
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii_digit())
+            .map(|(i, _)| i)
+            .unwrap_or(cursor.len());
+        if digit_end == 0 {
+            // Non-digit at the head — this isn't a clean
+            // length-prefixed sequence. Bail.
+            return None;
+        }
+        let len: usize = cursor[..digit_end].parse().ok()?;
+        if len == 0 {
+            return None;
+        }
+        let body_start = digit_end;
+        let body_end = body_start.checked_add(len)?;
+        if body_end > cursor.len() {
+            // Length overruns the input.
+            return None;
+        }
+        // Identifier bytes — Swift uses UTF-8 here but most
+        // class names are plain ASCII. Take the byte slice and
+        // verify it's valid UTF-8 by indexing back as a &str.
+        let body = cursor.get(body_start..body_end)?;
+        segments.push(body);
+        cursor = &cursor[body_end..];
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    Some(segments.join("."))
+}
+
+#[cfg(test)]
+mod legacy_swift_demangle_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_class_two_segments() {
+        let out = demangle_legacy_swift("_TtC9blackjack21ScoreDisplayViewModel");
+        assert_eq!(out.as_deref(), Some("blackjack.ScoreDisplayViewModel"));
+    }
+
+    #[test]
+    fn legacy_struct() {
+        let out = demangle_legacy_swift("_TtV5MyApp8MyStruct");
+        assert_eq!(out.as_deref(), Some("MyApp.MyStruct"));
+    }
+
+    #[test]
+    fn legacy_protocol() {
+        let out = demangle_legacy_swift("_TtP5MyApp7MyProto");
+        assert_eq!(out.as_deref(), Some("MyApp.MyProto"));
+    }
+
+    #[test]
+    fn plain_objc_name_falls_through() {
+        // `NSString` doesn't start with `_TtC` so the helper
+        // returns None and the parent function falls back to the
+        // raw text.
+        assert!(demangle_legacy_swift("NSString").is_none());
+        assert_eq!(pretty_class_name("NSString"), "NSString");
+    }
+
+    #[test]
+    fn modern_swift_abi_falls_through_to_demangler() {
+        // `_$s...` is handled by `symbolic-demangle`, not the
+        // legacy parser. The legacy parser correctly returns
+        // None for it.
+        assert!(demangle_legacy_swift("_$s9blackjack11ContentViewV").is_none());
+    }
+
+    #[test]
+    fn malformed_length_bails() {
+        // No length prefix at all.
+        assert!(demangle_legacy_swift("_TtCblackjack").is_none());
+        // Length longer than the remaining bytes.
+        assert!(demangle_legacy_swift("_TtC99x").is_none());
     }
 }
 
