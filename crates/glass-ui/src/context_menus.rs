@@ -521,6 +521,20 @@ impl Shell {
                             label: SharedString::from(pretty),
                         });
                     }
+                    // Swift equivalent: if the covering symbol was
+                    // synthesised by the Swift pass — either a
+                    // metadata accessor or a vtable slot — extract
+                    // the mangled type name and offer a jump to
+                    // the type viewer.
+                    if let Some(raw_type) = parse_swift_type_from_symbol(&sym.name) {
+                        let pretty =
+                            glass_arch_arm::swift_format::pretty_swift_type_name(raw_type);
+                        items.push(ContextMenuItem::OpenSwiftType {
+                            artifact: artifact.clone(),
+                            mangled_name: raw_type.to_string(),
+                            label: SharedString::from(pretty),
+                        });
+                    }
                 } else {
                     items.push(ContextMenuItem::XrefsToAddress {
                         artifact: artifact.clone(),
@@ -873,6 +887,21 @@ impl Shell {
                 // reuse anyway.)
                 self.open_hex_in_new_tab(artifact, section, addr, cx);
             }
+            ContextMenuItem::OpenSwiftType { artifact, mangled_name, .. } => {
+                let leaf = self.bundle().and_then(|b| {
+                    b.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                        crate::LeafKind::SwiftType { artifact: a, mangled_name: n }
+                            if a == &artifact && n == &mangled_name =>
+                        {
+                            Some(crate::LeafId(i))
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(leaf) = leaf {
+                    self.open_leaf(leaf, cx);
+                }
+            }
             ContextMenuItem::OpenObjCClass { artifact, class_name, .. } => {
                 // Locate the existing ObjC class leaf and open it.
                 // The loader populates these whenever a Mach-O
@@ -1011,4 +1040,57 @@ fn parse_objc_class_from_symbol(name: &str) -> Option<&str> {
     // space, so they're included in the class part.)
     let space = rest.find(' ')?;
     Some(&rest[..space])
+}
+
+/// Extract the raw Swift mangled-name from a symbol synthesised by
+/// the Swift pass in `glass_arch_arm::symbol_map`. Recognises both
+/// shapes the synthesis emits:
+///
+///   * `type metadata accessor for <raw>` — produced for each
+///     type's metadata-accessor function.
+///   * `<raw>.vtable[<n>]` — produced for each vtable slot.
+///
+/// Returns the raw mangled-name slice (the same string used as the
+/// persistence key on `LeafKind::SwiftType`), or `None` for symbols
+/// that don't match either shape.
+fn parse_swift_type_from_symbol(name: &str) -> Option<&str> {
+    const META_PREFIX: &str = "type metadata accessor for ";
+    if let Some(rest) = name.strip_prefix(META_PREFIX) {
+        return Some(rest);
+    }
+    // `<raw>.vtable[<n>]` — `<raw>` may itself contain dots
+    // (`module.Type`), so split on the last `.vtable[` literal.
+    if let Some(idx) = name.rfind(".vtable[") {
+        if name.ends_with(']') {
+            return Some(&name[..idx]);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod swift_symbol_parse_tests {
+    use super::parse_swift_type_from_symbol;
+
+    #[test]
+    fn parse_metadata_accessor() {
+        assert_eq!(
+            parse_swift_type_from_symbol("type metadata accessor for blackjack.ContentView"),
+            Some("blackjack.ContentView"),
+        );
+    }
+
+    #[test]
+    fn parse_vtable_slot() {
+        assert_eq!(
+            parse_swift_type_from_symbol("blackjack.ContentView.vtable[3]"),
+            Some("blackjack.ContentView"),
+        );
+    }
+
+    #[test]
+    fn non_swift_symbol_returns_none() {
+        assert_eq!(parse_swift_type_from_symbol("-[NSString length]"), None);
+        assert_eq!(parse_swift_type_from_symbol("sub_1000"), None);
+    }
 }

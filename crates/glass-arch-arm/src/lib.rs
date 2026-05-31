@@ -21,6 +21,7 @@ pub mod facade;
 pub mod format;
 pub mod macho_fat;
 pub mod objc_format;
+pub mod swift_format;
 pub mod symbol_map;
 pub use cfg::{
     build_function_cfg, build_function_cfg_armv7_from_insns, build_function_cfg_from_bytes,

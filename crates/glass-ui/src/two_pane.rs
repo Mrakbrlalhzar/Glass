@@ -150,6 +150,9 @@ pub fn render_two_pane(
             Some(TabKind::ObjCClass { .. }) => {
                 crate::objc_view::render_objc_tab(shell, bundle.clone(), cx, border, dim, accent)
             }
+            Some(TabKind::SwiftType { .. }) => {
+                crate::swift_view::render_swift_tab(shell, bundle.clone(), cx, border, dim, accent)
+            }
             Some(TabKind::SectionMap { artifact }) => shell
                 .render_section_map(&bundle, &artifact, panel, border, fg, dim, cx)
                 .into_any_element(),

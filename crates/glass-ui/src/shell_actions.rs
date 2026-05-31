@@ -381,6 +381,13 @@ impl Shell {
                                 scroll_line: top_row as u32,
                             };
                         }
+                        TabKind::SwiftType { artifact, mangled_name } => {
+                            return glass_db::TabState::SwiftType {
+                                artifact: artifact.clone(),
+                                mangled_name: mangled_name.clone(),
+                                scroll_line: top_row as u32,
+                            };
+                        }
                         _ => {}
                     }
                     t.kind.to_state()
@@ -490,6 +497,18 @@ impl Shell {
                     TabKind::ObjCClass {
                         artifact: artifact.clone(),
                         class_name: class_name.clone(),
+                    },
+                    None,
+                    if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
+                ),
+                glass_db::TabState::SwiftType {
+                    artifact,
+                    mangled_name,
+                    scroll_line,
+                } => (
+                    TabKind::SwiftType {
+                        artifact: artifact.clone(),
+                        mangled_name: mangled_name.clone(),
                     },
                     None,
                     if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
@@ -673,6 +692,10 @@ impl Shell {
                 .tab_leaf(index)
                 .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                 .unwrap_or_else(|| SharedString::from(class_name.clone())),
+            TabKind::SwiftType { mangled_name, .. } => self
+                .tab_leaf(index)
+                .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
+                .unwrap_or_else(|| SharedString::from(mangled_name.clone())),
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1057,6 +1080,21 @@ impl Shell {
                 let key = (artifact.clone(), class_name.clone());
                 let len = bundle
                     .objc_classes
+                    .get(&key)
+                    .map(|r| r.len())
+                    .unwrap_or(0);
+                if tab.lines.is_none() {
+                    tab.scroll = ListState::new(len, ListAlignment::Top, px(2000.));
+                    tab.lines = Some(Arc::new(Vec::new()));
+                }
+            }
+            // Swift type: same shape as ObjC — rows precomputed at
+            // load time into `bundle.swift_types`; size scroll state
+            // once on first activation.
+            TabKind::SwiftType { artifact, mangled_name } => {
+                let key = (artifact.clone(), mangled_name.clone());
+                let len = bundle
+                    .swift_types
                     .get(&key)
                     .map(|r| r.len())
                     .unwrap_or(0);

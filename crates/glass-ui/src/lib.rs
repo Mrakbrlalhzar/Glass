@@ -79,6 +79,7 @@ mod smali_row_scope;
 mod shell_actions;
 mod shell_render;
 mod smali;
+mod swift_view;
 mod smali_edits;
 mod theme;
 mod two_pane;
@@ -295,6 +296,19 @@ pub struct LoadedBundle {
         std::collections::HashMap<
             (glass_db::ArtifactId, String),
             Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
+        >,
+    >,
+    /// Pre-rendered Swift type viewer rows, keyed by
+    /// `(artifact, mangled_name)`. Parallel to
+    /// [`Self::objc_classes`] for the Swift side; populated by
+    /// walking `armv8_encode::container::read_swift_metadata` at
+    /// load time. The key uses the upstream mangled name verbatim
+    /// so persistence + bundle-lookup stays stable across
+    /// demangler updates.
+    pub swift_types: Arc<
+        std::collections::HashMap<
+            (glass_db::ArtifactId, String),
+            Arc<Vec<glass_arch_arm::swift_format::SwiftRow>>,
         >,
     >,
     /// Staged class-level smali edits — keyed by the same
@@ -615,6 +629,14 @@ pub enum LeafKind {
         artifact: glass_db::ArtifactId,
         class_name: String,
     },
+    /// Swift nominal type lifted from a Mach-O artifact's
+    /// `__swift5_types`. `mangled_name` is the upstream raw name;
+    /// stable persistence + bundle-lookup key, paralleling
+    /// `ObjCClass.class_name`.
+    SwiftType {
+        artifact: glass_db::ArtifactId,
+        mangled_name: String,
+    },
 }
 
 impl LoadedBundle {
@@ -682,6 +704,16 @@ impl LoadedBundle {
                 self.kinds.iter().enumerate().find_map(|(i, k)| match k {
                     LeafKind::ObjCClass { artifact: a, class_name: n }
                         if a == artifact && n == class_name =>
+                    {
+                        Some(LeafId(i))
+                    }
+                    _ => None,
+                })
+            }
+            TS::SwiftType { artifact, mangled_name, .. } => {
+                self.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                    LeafKind::SwiftType { artifact: a, mangled_name: n }
+                        if a == artifact && n == mangled_name =>
                     {
                         Some(LeafId(i))
                     }
@@ -1100,6 +1132,10 @@ pub(crate) enum TabKind {
         artifact: glass_db::ArtifactId,
         class_name: String,
     },
+    SwiftType {
+        artifact: glass_db::ArtifactId,
+        mangled_name: String,
+    },
 }
 
 impl TabKind {
@@ -1148,6 +1184,11 @@ impl TabKind {
                 class_name: class_name.clone(),
                 scroll_line: 0,
             },
+            TabKind::SwiftType { artifact, mangled_name } => glass_db::TabState::SwiftType {
+                artifact: artifact.clone(),
+                mangled_name: mangled_name.clone(),
+                scroll_line: 0,
+            },
         }
     }
 
@@ -1182,6 +1223,10 @@ impl TabKind {
             LeafKind::ObjCClass { artifact, class_name } => TabKind::ObjCClass {
                 artifact: artifact.clone(),
                 class_name: class_name.clone(),
+            },
+            LeafKind::SwiftType { artifact, mangled_name } => TabKind::SwiftType {
+                artifact: artifact.clone(),
+                mangled_name: mangled_name.clone(),
             },
         }
     }

@@ -79,6 +79,10 @@ impl Shell {
             // selection clipboard payload yet — same shape as the
             // CFG cases above.
             TabKind::ObjCClass { .. } => None,
+            // Swift class view: same TODO as ObjC — needs a
+            // per-row copy formatter once the renderer learns
+            // a notion of selectable units.
+            TabKind::SwiftType { .. } => None,
         }
     }
 }

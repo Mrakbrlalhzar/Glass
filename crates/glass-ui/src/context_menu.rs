@@ -146,6 +146,16 @@ pub enum ContextMenuItem {
         class_name: String,
         label: SharedString,
     },
+    /// "Open type view" — Swift equivalent of [`Self::OpenObjCClass`].
+    /// Shown when the covering symbol at the right-click site is a
+    /// synthetic Swift entry — `type metadata accessor for <T>` or
+    /// `<T>.vtable[N]` — both of which carry the raw mangled type
+    /// name in the symbol-map's `name` field.
+    OpenSwiftType {
+        artifact: glass_db::ArtifactId,
+        mangled_name: String,
+        label: SharedString,
+    },
     /// "Revert class edit" — drops the staged smali edit for a
     /// class. Only shown when the active class has a staged edit.
     RevertSmaliClassEdit {
@@ -315,6 +325,9 @@ pub fn render_context_menu(
             }
             ContextMenuItem::OpenObjCClass { label, .. } => {
                 ("Open class view".to_string(), label.clone())
+            }
+            ContextMenuItem::OpenSwiftType { label, .. } => {
+                ("Open type view".to_string(), label.clone())
             }
             ContextMenuItem::RevertSmaliClassEdit { label, .. } => {
                 (label.to_string(), SharedString::from(""))

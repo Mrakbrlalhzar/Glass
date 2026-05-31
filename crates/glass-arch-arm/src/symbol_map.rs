@@ -34,6 +34,13 @@ bitflags::bitflags! {
         /// doesn't carry these as proper symbols on Swift / mixed
         /// codebases, so the ObjC reader fills the gap.
         const OBJC      = 0b1000;
+        /// Synthesised from Swift `__swift5_types` metadata — type
+        /// metadata accessors (`type metadata accessor for
+        /// <Type>`) and per-class virtual-table slot entries
+        /// (`<Type>.vtable[N]`). Parallel to `OBJC` for the Swift
+        /// side; same merge rule (overwrite if the existing name
+        /// isn't already in canonical ObjC/Swift form).
+        const SWIFT     = 0b1_0000;
     }
 }
 
@@ -303,6 +310,40 @@ impl SymbolMap {
             // and continue — Glass still works without ObjC names.
         }
 
+        // (7) Synthetic Swift symbols from `__swift5_types`. The
+        // upstream Swift metadata reader returns nominal type
+        // descriptors with their metadata-accessor function
+        // address and, for classes, the per-slot vtable IMP
+        // addresses. The symtab on stripped iOS binaries rarely
+        // names these; the reader fills the gap. Same merge rule
+        // as the ObjC pass: overwrite only when the existing
+        // name isn't already in canonical ObjC / Swift form.
+        if let Some(image) = container.macho_image.as_ref() {
+            if let Ok(meta) = armv8_encode::container::read_swift_metadata(image) {
+                for t in &meta.types {
+                    let display_type = demangle_swift(&t.mangled_name);
+                    if let Some(acc) = t.metadata_accessor_vaddr {
+                        insert_swift_symbol(
+                            &mut by_address,
+                            acc,
+                            format!("type metadata accessor for {}", t.mangled_name),
+                            format!("type metadata accessor for {display_type}"),
+                        );
+                    }
+                    for (i, e) in t.vtable.iter().enumerate() {
+                        insert_swift_symbol(
+                            &mut by_address,
+                            e.impl_vaddr,
+                            format!("{}.vtable[{i}]", t.mangled_name),
+                            format!("{display_type}.vtable[{i}]"),
+                        );
+                    }
+                }
+            }
+            // Same non-fatal treatment as the ObjC pass — most
+            // commonly `NoSwiftMetadata` for non-Swift images.
+        }
+
         SymbolMap { by_address }
     }
 
@@ -429,6 +470,71 @@ fn demangle_objc_class(raw: &str) -> String {
     } else {
         pretty
     }
+}
+
+/// Insert a Swift-derived synthetic symbol at `addr`. Parallels
+/// [`insert_objc_method`] for the Swift side: overwrite the
+/// existing entry's name only if it isn't already in canonical
+/// ObjC (`-[…]` / `+[…]`) or Swift (`type metadata accessor for `
+/// / `*.vtable[N]`) form. `sources` accumulates as usual.
+fn insert_swift_symbol(
+    map: &mut BTreeMap<u64, Symbol>,
+    addr: u64,
+    raw: String,
+    display: String,
+) {
+    let new = Symbol {
+        name: raw,
+        display_name: display,
+        address: addr,
+        size: 0,
+        kind: SymbolKind::Function,
+        sources: SymbolSources::SWIFT,
+    };
+    match map.get_mut(&addr) {
+        None => {
+            map.insert(addr, new);
+        }
+        Some(existing) => {
+            existing.sources |= SymbolSources::SWIFT;
+            if !matches!(existing.kind, SymbolKind::Function) {
+                existing.kind = SymbolKind::Function;
+            }
+            let already_canonical = existing.name.starts_with("-[")
+                || existing.name.starts_with("+[")
+                || existing.name.starts_with("type metadata accessor for ")
+                || existing.name.contains(".vtable[");
+            if !already_canonical {
+                existing.name = new.name;
+                existing.display_name = new.display_name;
+            }
+        }
+    }
+}
+
+/// Best-effort demangle for a Swift mangled type name. The
+/// mangled forms `__swift5_types` carries come in two shapes:
+/// modern Swift ABI (`$s...` — sometimes with a leading `_`) and
+/// legacy `_TtC.../_TtV...`. `symbolic-demangle` handles both
+/// when given the `_`-prefixed form; legacy forms also work
+/// without further help. Falls back to the raw text when the
+/// demangler produces an empty / identical string.
+fn demangle_swift(raw: &str) -> String {
+    if raw.is_empty() {
+        return raw.to_string();
+    }
+    // Try a `_`-prefixed `$s` form first if needed — that's what
+    // `symbolic-demangle` recognises.
+    let candidate = if raw.starts_with('$') {
+        format!("_{raw}")
+    } else {
+        raw.to_string()
+    };
+    let out = demangle(&candidate);
+    if !out.is_empty() && out != candidate {
+        return out;
+    }
+    raw.to_string()
 }
 
 fn insert_or_merge(map: &mut BTreeMap<u64, Symbol>, new: Symbol) {

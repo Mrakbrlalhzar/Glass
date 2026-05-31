@@ -63,6 +63,9 @@ pub fn icon_path_for_leaf(
         // No dedicated ObjC icon yet — reuse the smali leaf icon
         // since both represent "class viewer" leaves.
         L::ObjCClass { .. } => "icons/smali.svg",
+        // No dedicated Swift icon yet — reuse the smali leaf icon
+        // for consistency with the ObjC leaves.
+        L::SwiftType { .. } => "icons/smali.svg",
         // CFG / DexCallGraph / other tab-driven views aren't
         // navigator leaves today; fall back to the listing icon
         // so we never panic.

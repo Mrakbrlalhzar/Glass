@@ -184,6 +184,11 @@ fn snapshot_apk_with_progress(
         (glass_db::ArtifactId, String),
         Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
     > = std::collections::HashMap::new();
+    // Same story for Swift types — APKs have none.
+    let swift_types: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::swift_format::SwiftRow>>,
+    > = std::collections::HashMap::new();
 
     // Manifest leaf at the very top — first thing a reverser usually
     // looks at. Only emit when we actually parsed a manifest.
@@ -396,6 +401,7 @@ fn snapshot_apk_with_progress(
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
         objc_classes: Arc::new(objc_classes),
+        swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
@@ -431,6 +437,10 @@ fn snapshot_ipa_with_progress(
     let mut objc_classes: std::collections::HashMap<
         (glass_db::ArtifactId, String),
         Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
+    > = std::collections::HashMap::new();
+    let mut swift_types: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::swift_format::SwiftRow>>,
     > = std::collections::HashMap::new();
 
     let mut bodies: Vec<SharedString> = Vec::new();
@@ -610,6 +620,50 @@ fn snapshot_ipa_with_progress(
                     });
                 }
             }
+            // Swift type tree: parallel to the ObjC block above.
+            // Walks `__swift5_types` and emits one leaf per
+            // nominal type under a "Swift" subgroup. Each leaf
+            // points at a precomputed `Vec<SwiftRow>` cached in
+            // `swift_types` so the tab renderer doesn't reparse.
+            if let Ok(meta) = armv8_encode::container::read_swift_metadata(image) {
+                let mut swift_children: Vec<Node> = Vec::new();
+                for t in &meta.types {
+                    let id = LeafId(bodies.len());
+                    let rows = glass_arch_arm::swift_format::render_type(t);
+                    let body_text: String = rows
+                        .iter()
+                        .map(|r| r.text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    // Demangled display for the tree label, raw
+                    // mangled name as the persistence /
+                    // bundle-lookup key. Same convention as the
+                    // ObjC pass: `mangled_name` on `LeafKind::SwiftType`
+                    // and the key in `swift_types` both stay raw.
+                    let pretty = glass_arch_arm::swift_format::pretty_swift_type_name(
+                        &t.mangled_name,
+                    );
+                    bodies.push(SharedString::from(body_text));
+                    origins.push(SharedString::from(origin.clone()));
+                    labels.push(SharedString::from(pretty.clone()));
+                    kinds.push(LeafKind::SwiftType {
+                        artifact: aid.clone(),
+                        mangled_name: t.mangled_name.clone(),
+                    });
+                    swift_types
+                        .insert((aid.clone(), t.mangled_name.clone()), Arc::new(rows));
+                    swift_children.push(Node::Leaf {
+                        label: SharedString::from(pretty),
+                        leaf_id: id,
+                    });
+                }
+                if !swift_children.is_empty() {
+                    children.push(Node::Group {
+                        label: SharedString::from("Swift"),
+                        children: swift_children,
+                    });
+                }
+            }
         }
         let group_label = if listable {
             display_name
@@ -732,6 +786,7 @@ fn snapshot_ipa_with_progress(
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(smali_classes),
         objc_classes: Arc::new(objc_classes),
+        swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
@@ -992,6 +1047,10 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         (glass_db::ArtifactId, String),
         Arc<Vec<glass_arch_arm::objc_format::ObjCRow>>,
     > = std::collections::HashMap::new();
+    let mut swift_types: std::collections::HashMap<
+        (glass_db::ArtifactId, String),
+        Arc<Vec<glass_arch_arm::swift_format::SwiftRow>>,
+    > = std::collections::HashMap::new();
     if let Some(image) = bin.container.macho_image.as_ref() {
         if let Ok(meta) = armv8_encode::container::read_objc_metadata(image) {
             let mut objc_children: Vec<Node> = Vec::new();
@@ -1054,6 +1113,43 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
                 });
             }
         }
+        // Swift type tree — same shape as the IPA loader's Swift
+        // block. Walks `__swift5_types` and emits one leaf per
+        // nominal type.
+        if let Ok(meta) = armv8_encode::container::read_swift_metadata(image) {
+            let mut swift_children: Vec<Node> = Vec::new();
+            for t in &meta.types {
+                let id = LeafId(bodies.len());
+                let rows = glass_arch_arm::swift_format::render_type(t);
+                let body_text: String = rows
+                    .iter()
+                    .map(|r| r.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let pretty = glass_arch_arm::swift_format::pretty_swift_type_name(
+                    &t.mangled_name,
+                );
+                bodies.push(SharedString::from(body_text));
+                origins.push(SharedString::from("arm64"));
+                labels_v.push(SharedString::from(pretty.clone()));
+                kinds_v.push(LeafKind::SwiftType {
+                    artifact: aid.clone(),
+                    mangled_name: t.mangled_name.clone(),
+                });
+                swift_types
+                    .insert((aid.clone(), t.mangled_name.clone()), Arc::new(rows));
+                swift_children.push(Node::Leaf {
+                    label: SharedString::from(pretty),
+                    leaf_id: id,
+                });
+            }
+            if !swift_children.is_empty() {
+                tree_roots.push(Node::Group {
+                    label: SharedString::from("Swift"),
+                    children: swift_children,
+                });
+            }
+        }
     }
 
     let leaf_icons = crate::icons::leaf_icons_for(&kinds_v, |_jni| None);
@@ -1083,6 +1179,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         edits: crate::edits::EditRegistry::new(),
         smali_classes: Arc::new(std::collections::HashMap::new()),
         objc_classes: Arc::new(objc_classes),
+        swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),

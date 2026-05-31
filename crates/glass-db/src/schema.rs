@@ -141,6 +141,16 @@ pub enum TabState {
         #[serde(default)]
         scroll_line: u32,
     },
+    /// A Swift nominal type (class / struct / enum) lifted from a
+    /// Mach-O artifact's `__swift5_types`. `mangled_name` is the
+    /// raw upstream form, stable across reloads for a given
+    /// artifact.
+    SwiftType {
+        artifact: ArtifactId,
+        mangled_name: String,
+        #[serde(default)]
+        scroll_line: u32,
+    },
     /// DEX method call graph rooted on a specific method. Uses the
     /// JNI signature so it survives DEX reshuffles.
     DexCallGraph {
