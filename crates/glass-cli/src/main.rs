@@ -49,7 +49,8 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         | Cmd::FridaUnloadScript { .. }
         | Cmd::FridaPostMessage { .. }
         | Cmd::FridaPollEvents
-        | Cmd::FridaResume { .. } => Some(Err(anyhow::anyhow!(
+        | Cmd::FridaResume { .. }
+        | Cmd::StalkerCoverage { .. } => Some(Err(anyhow::anyhow!(
             "frida-* verbs are MCP-only — Frida sessions can't survive the CLI's \
              one-shot lifecycle. Run `glass mcp` and use them through an MCP client.",
         ))),
@@ -389,6 +390,15 @@ enum Cmd {
     FridaResume {
         #[arg(long)]
         pid: u32,
+    },
+    /// (MCP-only) One-shot Stalker basic-block coverage.
+    StalkerCoverage {
+        #[arg(long)]
+        tid: Option<u32>,
+        #[arg(long, value_delimiter = ',')]
+        modules: Vec<String>,
+        #[arg(long, default_value_t = 1000)]
+        duration_ms: u64,
     },
 
     /// List reachable devices (Android via adb, iOS via libimobiledevice).
@@ -1033,6 +1043,7 @@ fn main() -> Result<()> {
         | Cmd::FridaPollEvents
         | Cmd::FridaResume { .. }
         | Cmd::FridaSpawn { .. }
+        | Cmd::StalkerCoverage { .. }
         | Cmd::DeviceList
         | Cmd::DevicePidof { .. }
         | Cmd::DeviceLaunch { .. }

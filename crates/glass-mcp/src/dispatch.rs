@@ -794,6 +794,7 @@ pub(crate) fn call(
             session.resume(pid).map_err(DispatchError::Other)?;
             json!({ "resumed": pid })
         }
+        "stalker-coverage" => stalker_coverage(args, state)?,
 
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
@@ -858,6 +859,188 @@ fn require_hex_u64(args: &Value, key: &str) -> Result<u64> {
 
 fn json_of<T: serde::Serialize>(v: &T) -> Result<Value> {
     Ok(serde_json::to_value(v)?)
+}
+
+/// Run a one-shot Stalker coverage session.
+///
+/// Composes existing primitives: load a coverage script,
+/// wait for it to deliver, unload. The script does its own
+/// dedup so we ship one summary back, not millions of
+/// per-block events. When a bundle is open in state and the
+/// caller asks for `symbolise: true`, each coverage row gets
+/// a `symbol` field via `bundle.symbol_at(module, offset)`.
+fn stalker_coverage(
+    args: &Value,
+    state: &crate::state::StateHandle,
+) -> Result<Value> {
+    let modules: Vec<String> = args
+        .get("modules")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let duration_ms = args
+        .get("duration_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000);
+    let tid = args.get("tid").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let symbolise = args
+        .get("symbolise")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let session = clone_frida(state)?;
+    let source = glass_frida::render_coverage_script(tid, &modules, duration_ms);
+    let id = session.alloc_script_id();
+    session
+        .create_script(id, "stalker-coverage", source)
+        .map_err(DispatchError::Other)?;
+
+    // Wait for the script's `send`. Poll on a small interval
+    // so we react as soon as the table arrives — Stalker
+    // teardown after `unfollow` can be slow on large module
+    // sets, so giving ourselves up to ~10s past `duration_ms`
+    // for the result avoids spurious timeouts.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(duration_ms.saturating_add(10_000));
+    let mut rows: Option<Value> = None;
+    let mut followed_tids: Option<Value> = None;
+    let mut init_report: Option<Value> = None;
+    let mut script_errors: Vec<String> = Vec::new();
+    'wait: loop {
+        for ev in session.poll_events() {
+            match &ev {
+                glass_frida::SessionEvent::ScriptMessage {
+                    script_id,
+                    payload,
+                } if *script_id == id => {
+                    match payload.get("kind").and_then(|v| v.as_str()) {
+                        Some("stalker-coverage-init") => {
+                            init_report = Some(payload.clone());
+                        }
+                        Some("stalker-coverage") => {
+                            followed_tids =
+                                payload.get("followed_tids").cloned();
+                            rows = payload.get("rows").cloned();
+                            break 'wait;
+                        }
+                        _ => {}
+                    }
+                }
+                glass_frida::SessionEvent::ScriptError {
+                    script_id,
+                    description,
+                } if *script_id == id => {
+                    script_errors.push(description.clone());
+                }
+                _ => {}
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Best-effort unload — the script has already done its
+    // work, and frida-core's unload can hang briefly after
+    // Stalker teardown. Leaving it loaded is a minor leak
+    // we'd rather take than fail the verb on.
+    let _ = session.unload_script(id);
+
+    let rows = rows.ok_or_else(|| {
+        DispatchError::Other(format!(
+            "stalker coverage script produced no result within {}ms. \
+             init={init_report:?} errors={script_errors:?}",
+            duration_ms.saturating_add(10_000)
+        ))
+    })?;
+
+    let final_rows = if symbolise {
+        symbolise_coverage(&rows, state)
+    } else {
+        rows
+    };
+
+    Ok(json!({
+        "followed_tids": followed_tids,
+        "row_count": final_rows.as_array().map(|a| a.len()).unwrap_or(0),
+        "rows": final_rows,
+        "init": init_report,
+        "script_errors": script_errors,
+    }))
+}
+
+/// Walk the coverage rows and attach `{artifact, symbol?}`
+/// when the open bundle has the module. Module → artifact is
+/// by basename (`libfoo.so`) so APK paths like
+/// `arm64-v8a/libfoo.so` still match. Rows whose module isn't
+/// in the bundle (libc, app_process, etc.) pass through
+/// unchanged.
+fn symbolise_coverage(
+    rows: &Value,
+    state: &crate::state::StateHandle,
+) -> Value {
+    let arr = match rows.as_array() {
+        Some(a) => a,
+        None => return rows.clone(),
+    };
+    let bundle = match state.lock().bundle.as_ref() {
+        Some(b) => b.bundle.clone(),
+        None => return rows.clone(),
+    };
+    // Index artifacts by basename so a coverage row with
+    // module "libsqliteX.so" can locate the bundle's
+    // "arm64-v8a/libsqliteX.so" artifact.
+    let inspection = bundle.inspect();
+    let mut by_basename: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for a in &inspection.artifacts {
+        if let Some(base) = a.label.rsplit('/').next() {
+            by_basename.insert(base.to_string(), a.label.clone());
+        }
+    }
+
+    let mut out = Vec::with_capacity(arr.len());
+    for row in arr {
+        let mut enriched = row.clone();
+        let (Some(module), Some(offset_str)) = (
+            row.get("module").and_then(|v| v.as_str()),
+            row.get("offset").and_then(|v| v.as_str()),
+        ) else {
+            out.push(enriched);
+            continue;
+        };
+        let basename = module.rsplit('/').next().unwrap_or(module);
+        let Some(artifact_label) = by_basename.get(basename) else {
+            out.push(enriched);
+            continue;
+        };
+        let Ok(addr) = u64::from_str_radix(
+            offset_str.trim_start_matches("0x"),
+            16,
+        ) else {
+            out.push(enriched);
+            continue;
+        };
+        if let Some(sym) = bundle.symbol_at(artifact_label, addr) {
+            if let Some(obj) = enriched.as_object_mut() {
+                obj.insert("artifact".to_string(), json!(artifact_label));
+                obj.insert(
+                    "symbol".to_string(),
+                    json!({
+                        "name": sym.demangled,
+                        "address": sym.address,
+                    }),
+                );
+            }
+        }
+        out.push(enriched);
+    }
+    Value::Array(out)
 }
 
 /// Pull a clone of the attached Frida session out of state, or

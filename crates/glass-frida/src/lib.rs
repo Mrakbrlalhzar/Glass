@@ -16,6 +16,7 @@ pub mod patch;
 pub mod server;
 pub mod session;
 pub mod sign;
+pub mod stalker_js;
 pub mod trace_js;
 pub use server::{
     asset_name as frida_server_asset_name, asset_url as frida_server_asset_url,
@@ -32,6 +33,7 @@ pub use injection::{
 };
 pub use patch::{apply_plan, PatchError, GADGET_LIBRARY_NAME};
 pub use session::{AttachReport, ScriptId, Session, SessionEvent, SpawnReport};
+pub use stalker_js::render_coverage_script;
 pub use trace_js::{
     build_bridged_script, render_hook_script, render_trace_script, HookBody, JsRenderError,
 };
