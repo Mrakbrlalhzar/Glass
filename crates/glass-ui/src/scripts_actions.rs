@@ -127,17 +127,81 @@ impl Shell {
         cx.notify();
     }
 
-    /// Right-click on a script row. Phase 2f wires the actual
-    /// menu (Toggle / Rename / Delete); the stub captures the
-    /// hit-point so the layout can be developed first.
+    /// Right-click on a script row. Builds the Toggle / Delete
+    /// menu and opens it anchored at the click position. Rename
+    /// is intentionally absent for now — wiring it cleanly across
+    /// the .js file + the metadata row + any open editor tab is
+    /// a phase of its own.
     pub(crate) fn open_script_context_menu(
         &mut self,
         name: &str,
-        _ev: &MouseDownEvent,
+        ev: &MouseDownEvent,
         _w: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        tracing::info!("open_script_context_menu: TODO {name:?}");
+        let currently_enabled = self
+            .scripts_panel
+            .rows
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.enabled_for_bundle)
+            .unwrap_or(false);
+        let bundle_loaded = self
+            .bundle()
+            .and_then(|b| b.bundle_id.clone())
+            .is_some();
+        let label = gpui::SharedString::from(name.to_string());
+
+        let mut items = Vec::new();
+        // Toggle is only meaningful when a bundle is loaded —
+        // enabled state is per-bundle.
+        if bundle_loaded {
+            items.push(crate::context_menu::ContextMenuItem::ToggleScriptEnabled {
+                name: name.to_string(),
+                currently_enabled,
+                label: label.clone(),
+            });
+        }
+        items.push(crate::context_menu::ContextMenuItem::DeleteScript {
+            name: name.to_string(),
+            label,
+        });
+
+        self.context_menu = Some(crate::context_menu::ContextMenuState {
+            position: ev.position,
+            items,
+        });
+        cx.notify();
+    }
+
+    /// Delete a script, plus close any tab that's editing it so
+    /// the user doesn't end up looking at a zombie editor for a
+    /// gone file. Called from the context menu's Delete item.
+    pub(crate) fn delete_script_and_close_tab(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        // Close any open editor tabs for this script first. We
+        // can't easily ask the user "really?" today; that's a UX
+        // upgrade for later.
+        let kind = crate::TabKind::ScriptEditor { name: name.to_string() };
+        if let Some(idx) = self.tabs.iter().position(|t| t.kind == kind) {
+            self.tabs.remove(idx);
+            // Re-anchor active_tab after the removal.
+            if let Some(active) = self.active_tab {
+                if active == idx {
+                    self.active_tab = if self.tabs.is_empty() {
+                        None
+                    } else {
+                        Some(active.min(self.tabs.len().saturating_sub(1)))
+                    };
+                } else if active > idx {
+                    self.active_tab = Some(active - 1);
+                }
+            }
+        }
+        self.delete_script(name, cx);
     }
 
     /// Toggle a script's enabled-for-bundle flag and refresh.

@@ -1019,6 +1019,20 @@ impl Shell {
                     cx,
                 );
             }
+            ContextMenuItem::ToggleScriptEnabled {
+                name,
+                currently_enabled,
+                ..
+            } => {
+                self.set_script_enabled_for_bundle(
+                    &name,
+                    !currently_enabled,
+                    cx,
+                );
+            }
+            ContextMenuItem::DeleteScript { name, .. } => {
+                self.delete_script_and_close_tab(&name, cx);
+            }
         }
     }
 }

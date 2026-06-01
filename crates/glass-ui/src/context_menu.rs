@@ -216,6 +216,25 @@ pub enum ContextMenuItem {
         method_signature_jni: String,
         label: SharedString,
     },
+    /// "Enable for this bundle" / "Disable for this bundle" — flips
+    /// the script's per-bundle enabled flag. The label changes
+    /// based on `currently_enabled`; both states use the same
+    /// variant so the activator can react with one match arm.
+    ToggleScriptEnabled {
+        name: String,
+        /// State *before* the click. The activator flips the flag.
+        currently_enabled: bool,
+        label: SharedString,
+    },
+    /// "Delete script" — removes the `.js` file, metadata, and
+    /// every per-bundle enabled row that mentions it. Confirmed
+    /// only implicitly today (one click = gone). For an orphan
+    /// row (file missing) this is the only way back to a clean
+    /// state.
+    DeleteScript {
+        name: String,
+        label: SharedString,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -349,6 +368,21 @@ pub fn render_context_menu(
             }
             ContextMenuItem::StopHook { label, .. } => {
                 ("Stop hook".to_string(), label.clone())
+            }
+            ContextMenuItem::ToggleScriptEnabled {
+                currently_enabled,
+                label,
+                ..
+            } => {
+                let verb = if *currently_enabled {
+                    "Disable for this bundle"
+                } else {
+                    "Enable for this bundle"
+                };
+                (verb.to_string(), label.clone())
+            }
+            ContextMenuItem::DeleteScript { label, .. } => {
+                ("Delete script".to_string(), label.clone())
             }
         };
         let weak = weak.clone();
