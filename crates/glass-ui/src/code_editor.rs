@@ -1022,9 +1022,12 @@ pub fn render_code_editor(
                 if let Some(entity) = weak_md.upgrade() {
                     let pos = ev.position;
                     let extend = ev.modifiers.shift;
+                    let cmd = ev.modifiers.platform || ev.modifiers.control;
                     let click_count = ev.click_count;
                     cx.update_entity(&entity, |shell, cx| {
-                        shell.code_editor_mouse_down(pos, extend, click_count, cx);
+                        shell.code_editor_mouse_down(
+                            pos, extend, cmd, click_count, cx,
+                        );
                     });
                 }
             },

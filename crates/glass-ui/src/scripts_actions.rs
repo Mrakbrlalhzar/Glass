@@ -295,9 +295,18 @@ impl Shell {
         &mut self,
         pos: gpui::Point<gpui::Pixels>,
         extend: bool,
+        cmd: bool,
         click_count: usize,
         cx: &mut Context<Self>,
     ) {
+        // Cmd-click on a method-name token in the smali editor
+        // follows the link instead of placing the caret. Has to
+        // run before the editor mutation below since it
+        // navigates away (potentially opening a different tab).
+        if cmd && click_count == 1 && self.try_follow_smali_link_at(pos, cx) {
+            return;
+        }
+
         let Some(editor) = self.active_code_editor_mut() else { return };
         let Some(off) = editor.offset_for_window_point(pos) else { return };
         if click_count >= 2 {
@@ -308,6 +317,84 @@ impl Shell {
             editor.begin_click_drag(off, extend);
         }
         cx.notify();
+    }
+
+    /// If the active tab is a `SmaliEditor` and the click lands
+    /// on a `MethodName` token whose `Class;->name(sig)ret`
+    /// reference resolves in the bundle, navigate to that
+    /// method. Returns true when navigation fired so the caller
+    /// can short-circuit the normal caret-placement path.
+    fn try_follow_smali_link_at(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        // Only smali editors carry the right kind of tokens.
+        if !matches!(
+            self.tabs.get(active).map(|t| &t.kind),
+            Some(crate::TabKind::SmaliEditor { .. })
+        ) {
+            return false;
+        }
+        // Need the byte offset + the row text. Both come from
+        // the editor; bundle lookups happen after so we don't
+        // double-borrow.
+        let (row, col_in_row, line_text) = {
+            let Some(editor) = self
+                .tabs
+                .get(active)
+                .and_then(|t| t.code_editor.as_ref())
+            else {
+                return false;
+            };
+            let Some(off) = editor.offset_for_window_point(pos) else { return false };
+            let snap = editor.buffer.snapshot();
+            let pt = snap.offset_to_point(off);
+            let row = pt.row;
+            let line_start = snap.point_to_offset(rope::Point::new(row, 0));
+            let line_end = if row == snap.max_point().row {
+                snap.len()
+            } else {
+                snap.point_to_offset(rope::Point::new(row + 1, 0)) - 1
+            };
+            let mut text = String::with_capacity(line_end - line_start);
+            for chunk in snap.as_rope().chunks_in_range(line_start..line_end) {
+                text.push_str(chunk);
+            }
+            (row, (off - line_start) as usize, text)
+        };
+
+        // Walk tokens to find which one covers `col_in_row`.
+        let tokens = crate::smali::tokenize_smali_line(&line_text);
+        let mut at = 0usize;
+        let mut hit: Option<(String, String)> = None; // (display, target_text)
+        for tok in tokens {
+            let tok_len = tok.text.len();
+            let end = at + tok_len;
+            if col_in_row >= at
+                && col_in_row < end
+                && tok.kind == glass_arch_arm::ChunkKind::MethodName
+            {
+                if let Some(t) = tok.target_text {
+                    hit = Some((tok.text.clone(), t));
+                    break;
+                }
+            }
+            at = end;
+        }
+        let _ = row;
+        let Some((_display, target_text)) = hit else { return false };
+
+        // Resolve `target_text` against the bundle's
+        // method_lines map (same as the SmaliClass viewer).
+        let Some(bundle) = self.bundle() else { return false };
+        let Some((target_leaf, line_no)) = bundle.method_lines.get(&target_text).copied()
+        else {
+            return false;
+        };
+        self.goto_smali_method(target_leaf, line_no, cx);
+        true
     }
 
     /// Mouse-move while the left button is held — extend the
