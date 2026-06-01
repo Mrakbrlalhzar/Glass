@@ -355,11 +355,20 @@ impl CodeEditor {
         cmd: bool,
         key_char: Option<&str>,
     ) -> bool {
+        // Snapshot the cursor before so we can tell whether the
+        // keystroke actually moved it. We don't want to scroll
+        // the viewport when a key was a no-op (e.g. backspace
+        // at offset 0): the user may have trackpad-scrolled the
+        // viewport away from the caret on purpose.
+        let cursor_before = self.cursor;
         let result = self.handle_key_inner(key, shift, cmd, key_char);
-        // Any keystroke that could have moved the caret should
-        // scroll it back into view. Cheap — `scroll_to_reveal_item`
-        // is a no-op when the row is already visible.
-        self.ensure_caret_visible();
+        let moved = self.cursor != cursor_before;
+        if moved || result {
+            // Either the caret moved or the buffer changed — in
+            // both cases the user expects to see what they're
+            // doing.
+            self.ensure_caret_visible();
+        }
         result
     }
 
