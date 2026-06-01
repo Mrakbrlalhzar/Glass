@@ -2658,6 +2658,32 @@ impl Render for Shell {
                 }
                 this.palette_handle_key(k, cx);
             }))
+            // Window-wide mouse tracking for the debug-dock
+            // resize gesture. The 6px handle moves with the
+            // dock during a drag — a flick that exceeded
+            // 6px/event used to leave the pointer outside its
+            // hit zone and drop the gesture. Listening here
+            // (the root spans the whole window) lets the
+            // pointer travel freely; `debug_dock_resize_anchor`
+            // gates the handlers so they're no-ops outside a
+            // drag.
+            .on_mouse_move(cx.listener(
+                |shell, ev: &gpui::MouseMoveEvent, _w, cx| {
+                    if shell.debug_dock_resize_anchor.is_some()
+                        && ev.pressed_button == Some(gpui::MouseButton::Left)
+                    {
+                        shell.update_dock_resize(ev.position.y, cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|shell, _ev, _w, cx| {
+                    if shell.debug_dock_resize_anchor.is_some() {
+                        shell.finish_dock_resize(cx);
+                    }
+                }),
+            )
             .child(header)
             .child(body);
         // Snapshot once and share between the dock + dialog.

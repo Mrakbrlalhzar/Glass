@@ -56,11 +56,11 @@ pub fn render_debug_dock(
 
 /// 6px-tall strip at the very top of the dock that acts as the
 /// drag handle for resizing. Hover changes the cursor to a
-/// row-resize hint. Resize works in two stages: mouse-down on
-/// the handle stashes the current Y position on Shell; while
-/// the mouse moves with the button held, we compute the delta
-/// against the stashed position and apply it to the dock
-/// height in real time. Mouse-up clears the stash.
+/// row-resize hint; mouse-down stashes the anchor. Move + up
+/// listeners live on the Shell root (see `lib.rs` render) so
+/// the pointer can travel anywhere during a drag without
+/// leaving this 6px hit zone — a flick that exceeded 6px/event
+/// otherwise dropped the gesture.
 fn drag_handle(
     border: gpui::Rgba,
     cx: &mut Context<Shell>,
@@ -76,19 +76,6 @@ fn drag_handle(
             gpui::MouseButton::Left,
             cx.listener(|shell, ev: &gpui::MouseDownEvent, _w, cx| {
                 shell.start_dock_resize(ev.position.y, cx);
-            }),
-        )
-        .on_mouse_move(cx.listener(
-            |shell, ev: &gpui::MouseMoveEvent, _w, cx| {
-                if ev.pressed_button.is_some() {
-                    shell.update_dock_resize(ev.position.y, cx);
-                }
-            },
-        ))
-        .on_mouse_up(
-            gpui::MouseButton::Left,
-            cx.listener(|shell, _ev, _w, cx| {
-                shell.finish_dock_resize(cx);
             }),
         )
 }
