@@ -9,12 +9,33 @@
 //! the bundle's `smali_edits` map so the existing
 //! `export-patched` pipeline picks it up at export time.
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Context;
 use smali::types::{SmaliClass, SmaliField, SmaliMethod};
 
 use crate::{Shell, TabKind};
+
+/// Collect every smali class JNI in the bundle into an Arc'd set
+/// suitable for stashing on a `CodeEditor`. The renderer
+/// consults this to decide whether class / method / field
+/// tokens get the hover-underline link affordance — references
+/// to classes the bundle doesn't know about (platform types,
+/// other apps) stay plain.
+fn build_resolvable_classes(shell: &Shell) -> Arc<HashSet<String>> {
+    let Some(bundle) = shell.bundle() else {
+        return Arc::new(HashSet::new());
+    };
+    Arc::new(
+        bundle
+            .smali_classes
+            .keys()
+            .map(|(_, jni)| jni.clone())
+            .collect(),
+    )
+}
 
 /// Reorder `parsed.methods` and `parsed.fields` so the i-th
 /// item matches the i-th item in `original` (keyed by name +
@@ -149,6 +170,7 @@ impl Shell {
         let mut editor = crate::code_editor::CodeEditor::from_string(body)
             .with_highlight(crate::code_editor::HighlightMode::Smali);
         editor.reparse_smali();
+        editor.resolvable_classes = build_resolvable_classes(self);
         tab.code_editor = Some(editor);
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);

@@ -122,6 +122,14 @@ pub(crate) struct CodeEditor {
     /// visible immediately — `.metho` instead of `.method` and
     /// the like. Recomputed alongside `parsed_smali`.
     pub(crate) bad_rows: std::collections::HashSet<u32>,
+    /// Set of class JNIs (`Lcom/Foo;` form) that resolve to a
+    /// smali class in the bundle. The renderer consults this
+    /// before marking a token as a clickable link — so
+    /// references to platform types (`Ljava/lang/Object;`,
+    /// `Landroid/...;`) and other unresolved classes render
+    /// plain. Empty on non-smali editors; refreshed when a
+    /// smali editor opens.
+    pub(crate) resolvable_classes: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
 /// Identifier for a class member within a smali class. Used to
@@ -188,6 +196,9 @@ impl CodeEditor {
             last_reparse_at: None,
             changed_rows: std::collections::HashSet::new(),
             bad_rows: std::collections::HashSet::new(),
+            resolvable_classes: std::sync::Arc::new(
+                std::collections::HashSet::new(),
+            ),
         }
     }
 
@@ -1370,6 +1381,12 @@ pub fn render_code_editor(
     let mut changed_tint = theme.state.committed_bg.rgba();
     changed_tint.a = 0.18;
     let changed_rows = std::sync::Arc::new(editor.changed_rows.clone());
+    // Resolvable class set — used by the per-row token loop
+    // below to decide whether a Method/Field/Type token should
+    // get the hover-underline link affordance. References to
+    // out-of-bundle classes (`Ljava/lang/Object;`, etc.) render
+    // plain since there's nowhere to navigate to.
+    let resolvable_classes = editor.resolvable_classes.clone();
     // "Bad row" tint — same translucent treatment but in the
     // errors-highlight colour. Wins over the changed tint when
     // both apply, since a parse error is the more pressing
@@ -1384,6 +1401,7 @@ pub fn render_code_editor(
 
     let body = list(list_state, {
         let snapshot = snapshot.clone();
+        let resolvable_classes = resolvable_classes.clone();
         move |index, _window, _cx| {
             // Pull the line text from the rope. `Lines::next` is a
             // streaming iterator; we advance to `index` then take
@@ -1410,6 +1428,7 @@ pub fn render_code_editor(
                 caret_colour,
                 selection_colour,
                 highlight,
+                &resolvable_classes,
             );
             // Row tint: bad (parse error) > changed (staged) >
             // nothing. Parse errors are the more pressing
@@ -1661,6 +1680,7 @@ fn render_line_body(
     caret_colour: gpui::Rgba,
     selection_colour: gpui::Rgba,
     highlight: HighlightMode,
+    resolvable_classes: &std::collections::HashSet<String>,
 ) -> gpui::Div {
     let line_len_bytes = text.len();
     // Selection range for this row, in byte columns. None when
@@ -1715,13 +1735,27 @@ fn render_line_body(
                 //   * Type tokens that contain a class JNI
                 //     (`L...;`) — primitives like `I` are not
                 //     links.
+                // Only mark a token as a link when its target
+                // actually resolves in this bundle — references
+                // to platform types (`Ljava/lang/Object;` etc.)
+                // would otherwise underline + cursor-pointer
+                // without any navigation behind them.
                 let is_link = match c.kind {
                     glass_arch_arm::ChunkKind::MethodName
                     | glass_arch_arm::ChunkKind::FieldName => {
-                        c.target_text.is_some()
+                        // target_text shape: `Lcom/Foo;->name(sig)`
+                        // (method) or `Lcom/Foo;->name:Sig` (field).
+                        // Extract the class JNI prefix and check
+                        // membership.
+                        c.target_text.as_deref().and_then(|t| {
+                            t.split("->").next()
+                        }).map(|cls| resolvable_classes.contains(cls))
+                            .unwrap_or(false)
                     }
                     glass_arch_arm::ChunkKind::Type => {
-                        crate::smali::extract_class_jni(&c.text).is_some()
+                        crate::smali::extract_class_jni(&c.text)
+                            .map(|jni| resolvable_classes.contains(jni))
+                            .unwrap_or(false)
                     }
                     _ => false,
                 };

@@ -628,6 +628,13 @@ impl Shell {
                     let mut editor = crate::code_editor::CodeEditor::from_string(body)
                         .with_highlight(crate::code_editor::HighlightMode::Smali);
                     editor.reparse_smali();
+                    editor.resolvable_classes = std::sync::Arc::new(
+                        bundle
+                            .smali_classes
+                            .keys()
+                            .map(|(_, jni)| jni.clone())
+                            .collect(),
+                    );
                     if let Some(line) = pending_line {
                         let snap = editor.buffer.snapshot();
                         let max_row = snap.max_point().row;
