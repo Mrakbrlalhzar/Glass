@@ -84,6 +84,13 @@ glass callers ./libfoo.so --artifact libfoo.so --symbol "glass::main"
 
 # Every `onCreate` across DEX, machine-readable:
 glass search ./app.apk onCreate | jq '.data.hits[] | select(.kind=="method")'
+
+# All ObjC + Swift types in an iOS bundle (filter by kind if you like):
+glass types ./app.ipa --kind swift-class --text
+
+# Drill into one type — methods, ivars, properties for ObjC;
+# fields + vtable for Swift:
+glass type ./app.ipa --artifact app --name blackjack.ContentView
 ```
 
 Pass `--text` for a human-readable rendering, omit it for JSON.
@@ -206,6 +213,9 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 **iOS — IPA / Mach-O**
 - Unzip the IPA, locate `Payload/*.app/`, parse `Info.plist`, and pick the arm64 / arm64e slice from any fat binary inside.
 - Main executable and every `Frameworks/*.framework` + `*.dylib` is loaded as its own native artifact, with the same Overview + per-section disassembly views used for Android `.so` files.
+- Objective-C class browser sourced from `__objc_classlist` — classes, categories, methods, ivars, properties — with demangled names (legacy `_TtC...` Swift mangling included) and clickable jumps from method addresses into the listing.
+- Swift type browser sourced from `__swift5_types` — classes, structs, enums with their fields and (for classes) vtables, also clickable into the listing.
+- Symbol map enriched with ObjC method symbols and Swift type symbols, so listing rows that previously fell back to raw addresses now show resolved names.
 
 **Android — APK / DEX / native**
 - Class tree across all DEX files in the APK.
@@ -249,8 +259,6 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 - x86 / x86_64 disassembly (those code sections currently route to the hex view).
 - ARMv7 in-place edits that need to *grow without an adjacent NOP* — refused with a clear error today; would need section-level relayout + branch-target rebinding to support.
 - iOS entitlements and `embedded.mobileprovision` parsing.
-- Swift metadata pass — Swift Mach-O symbol stubs are sparse without it.
-- ObjC `__objc_classlist` extraction.
 - Cross-references DEX ↔ native via JNI signatures.
 - QuickJS scripting host.
 - Drag-to-scroll on scrollbars (currently visual-only — use trackpad / wheel).
@@ -348,8 +356,7 @@ Two ways to grab a prebuilt zip without building locally:
 
 ## Roadmap
 
-- **iOS deeper** — Entitlements, `embedded.mobileprovision`, ObjC `__objc_classlist`, Swift metadata pass.
+- **iOS deeper** — Entitlements and `embedded.mobileprovision` parsing. (ObjC `__objc_classlist` and the Swift `__swift5_types` metadata pass have landed — see `glass types` / `glass type`.)
 - **x86 / x86_64** — Disassembly for emulator-builds of Android `.so` files.
-- **ARMv7 xref + CFG parity** — wire callers / refs / register-tracking through the unified `DecodedInsn` facade so the existing AArch64 cross-reference engine works for armeabi-v7a libraries too.
 - **Internal Scripting** — QuickJS plugin host with a stable API for analysis passes.
 - **Advanced** — Signed APK rebuilding, downstream-shift on ARMv7 in-place edits (so 2→4-byte grows can splice past adjacent code instead of refusing).
