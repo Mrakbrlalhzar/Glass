@@ -99,7 +99,6 @@ impl Shell {
             method_edit: None,
             op_edit: None,
             annotation_stack: None,
-            external_edit: None,
             device_manager: {
                 // Honour an `adb_path` override from the window
                 // settings, falling back to the default
@@ -669,7 +668,6 @@ impl Shell {
         self.method_edit = None;
         self.op_edit = None;
         self.annotation_stack = None;
-        self.external_edit = None;
         self.frida_probes.clear();
         self.injection_dialog = None;
         self.injection_progress = None;
@@ -772,9 +770,11 @@ impl Shell {
                 SharedString::from(format!("{name}.js{star}"))
             }
             // Smali editor: simple class name (`Foo` rather than
-            // `com.example.Foo`) + `.smali`, plus `*` when
-            // dirty. Full package shows in the tooltip / Open
-            // Recent / Changes dialog so we don't lose it.
+            // `com.example.Foo`), plus `*` when dirty. No
+            // `.smali` suffix — every smali tab is `.smali`, so
+            // showing it everywhere just steals tab-bar width.
+            // The full package name shows in the tooltip / Open
+            // Recent / Changes dialog so it's still discoverable.
             TabKind::SmaliEditor { class_jni, .. } => {
                 let dirty = self
                     .tabs
@@ -788,7 +788,7 @@ impl Shell {
                     .rsplit('.')
                     .next()
                     .unwrap_or(dotted.as_str());
-                SharedString::from(format!("{short}.smali{star}"))
+                SharedString::from(format!("{short}{star}"))
             }
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
@@ -2150,255 +2150,6 @@ impl Shell {
         self.resync_smali_editor_buffer(&resync_artifact, &resync_class_jni);
     }
 
-    // ---- External editor ----------------------------------------------
-
-    /// Stop the live-watch session. Drops the temp file. Doesn't
-    /// touch any staged edits the watcher has already applied —
-    /// those stay in the bundle and can be reverted from the
-    /// Changes dialog like any other smali edit.
-    pub(crate) fn stop_external_edit_watch(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.external_edit.as_mut() {
-            // Signal the background poll task to exit. It'll see
-            // the flag on its next tick (<=500ms) and stop. The
-            // task itself drops the temp file when it exits — we
-            // don't delete it here in case the next tick is mid-
-            // way through a re-read.
-            state.stop_requested = true;
-        }
-        cx.notify();
-    }
-
-    /// Entry point from the toolbar Edit File button. Writes the
-    /// active smali class to a temp file, launches the OS's
-    /// registered editor for `.smali` (without waiting), and
-    /// starts a background poller that re-ingests the file on
-    /// every save until the user clicks Stop on the toolbar chip.
-    pub(crate) fn open_active_smali_in_external_editor(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.external_edit.is_some() {
-            return;
-        }
-        let Some(active) = self.active_tab else { return };
-        let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
-            _ => None,
-        }) else {
-            return;
-        };
-        // Find the (artifact, current body). Prefer the staged
-        // edit so the external editor sees what's in the GUI.
-        let (artifact, body, class_display) = {
-            let Some(bundle) = self.bundle() else { return };
-            let owner = bundle.smali_classes.iter().find_map(|((aid, jni), c)| {
-                if jni == &class_jni {
-                    Some((aid.clone(), c.clone()))
-                } else {
-                    None
-                }
-            });
-            let Some((artifact, original)) = owner else { return };
-            let display = original.name.as_java_type();
-            let current = bundle
-                .smali_edits
-                .get(&artifact, &class_jni)
-                .map(|e| e.modified.clone())
-                .unwrap_or(original);
-            (artifact, current.to_smali(), display)
-        };
-        let temp_path = match crate::external_editor::write_temp_file(&class_jni, &body)
-        {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("external edit: write temp failed: {e}");
-                return;
-            }
-        };
-        if let Err(e) = crate::external_editor::launch_editor(&temp_path) {
-            tracing::warn!("external edit: launch failed: {e}");
-            // Stash the path on Shell so the chip can surface a
-            // launch error even though the editor never opened —
-            // user might want to inspect / open it manually.
-            self.external_edit = Some(crate::external_editor::ExternalEditState {
-                artifact,
-                class_jni,
-                class_display,
-                temp_path,
-                last_mtime: std::time::SystemTime::UNIX_EPOCH,
-                last_error: Some(format!("launch failed: {e}")),
-                stop_requested: false,
-            });
-            cx.notify();
-            return;
-        }
-        let now = crate::external_editor::mtime(&temp_path);
-        self.external_edit = Some(crate::external_editor::ExternalEditState {
-            artifact: artifact.clone(),
-            class_jni: class_jni.clone(),
-            class_display,
-            temp_path: temp_path.clone(),
-            last_mtime: now,
-            last_error: None,
-            stop_requested: false,
-        });
-        cx.notify();
-        self.spawn_external_edit_poll(artifact, class_jni, temp_path, cx);
-    }
-
-    // PollAction is the per-tick verdict the foreground hands
-    // back to the polling task — kept private to this method.
-    /// Background polling loop. Ticks at ~500ms; on every tick
-    /// stats the temp file and, if mtime moved forward, re-reads
-    /// and re-parses on the foreground thread. Exits when the
-    /// session's `stop_requested` flag flips or the session
-    /// disappears entirely (e.g. bundle closed).
-    fn spawn_external_edit_poll(
-        &mut self,
-        artifact: glass_db::ArtifactId,
-        class_jni: String,
-        temp_path: std::path::PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(500))
-                    .await;
-                // Probe the file's mtime off the foreground so a
-                // slow disk can't stall the UI. The result we
-                // need to compare against lives on Shell, so we
-                // hand it to the foreground via `update`.
-                let observed = crate::external_editor::mtime(&temp_path);
-                let action = this.update(cx, |shell, _cx| {
-                    let Some(state) = shell.external_edit.as_ref() else {
-                        return PollAction::Exit;
-                    };
-                    if state.artifact != artifact || state.class_jni != class_jni {
-                        return PollAction::Exit;
-                    }
-                    if state.stop_requested {
-                        return PollAction::StopAndCleanup;
-                    }
-                    if observed > state.last_mtime {
-                        PollAction::Ingest(observed)
-                    } else {
-                        PollAction::Continue
-                    }
-                });
-                let action = match action {
-                    Ok(a) => a,
-                    Err(_) => return, // entity gone
-                };
-                match action {
-                    PollAction::Exit => return,
-                    PollAction::Continue => continue,
-                    PollAction::StopAndCleanup => {
-                        let _ = this.update(cx, |shell, cx| {
-                            if let Some(state) = shell.external_edit.take() {
-                                let _ = std::fs::remove_file(&state.temp_path);
-                            }
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    PollAction::Ingest(new_mtime) => {
-                        let body = match std::fs::read_to_string(&temp_path) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let _ = this.update(cx, |shell, cx| {
-                                    shell.record_external_edit_error(
-                                        &artifact,
-                                        &class_jni,
-                                        format!("reading temp file: {e}"),
-                                        new_mtime,
-                                        cx,
-                                    );
-                                });
-                                continue;
-                            }
-                        };
-                        let _ = this.update(cx, |shell, cx| {
-                            shell.ingest_external_edit(
-                                &artifact,
-                                &class_jni,
-                                &body,
-                                new_mtime,
-                                cx,
-                            );
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Foreground handler for a single observed save. Parses and
-    /// stages on success, records the error on failure. Caller
-    /// guarantees the session is still active and matches
-    /// `(artifact, class_jni)`.
-    fn ingest_external_edit(
-        &mut self,
-        artifact: &glass_db::ArtifactId,
-        class_jni: &str,
-        body: &str,
-        observed_mtime: std::time::SystemTime,
-        cx: &mut Context<Self>,
-    ) {
-        let parsed = match glass_api::parse_smali_class(body) {
-            Ok(c) => c,
-            Err(e) => {
-                self.record_external_edit_error(
-                    artifact,
-                    class_jni,
-                    format!("{e:#}"),
-                    observed_mtime,
-                    cx,
-                );
-                return;
-            }
-        };
-        let body_jni = glass_api::smali_class_jni(&parsed);
-        if body_jni != class_jni {
-            self.record_external_edit_error(
-                artifact,
-                class_jni,
-                format!(
-                    "body declares class {body_jni:?} but this session edits {class_jni:?}"
-                ),
-                observed_mtime,
-                cx,
-            );
-            return;
-        }
-        self.stage_smali_class_edit(artifact.clone(), class_jni.to_string(), parsed, cx);
-        if let Some(state) = self.external_edit.as_mut() {
-            state.last_mtime = observed_mtime;
-            state.last_error = None;
-        }
-        cx.notify();
-    }
-
-    fn record_external_edit_error(
-        &mut self,
-        artifact: &glass_db::ArtifactId,
-        class_jni: &str,
-        msg: String,
-        observed_mtime: std::time::SystemTime,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(state) = self.external_edit.as_mut() {
-            // Only update if the session is still the same — the
-            // user might have stopped and restarted in the gap.
-            if &state.artifact == artifact && state.class_jni == class_jni {
-                state.last_error = Some(msg);
-                state.last_mtime = observed_mtime;
-            }
-        }
-        cx.notify();
-    }
-
 }
 
 /// Best-effort short ASCII preview of the string at `addr`, used
@@ -2640,20 +2391,6 @@ pub(crate) enum SmaliMemberKind {
     Method { name: String, signature: String },
 }
 
-/// Per-tick verdict from the foreground to the external-edit
-/// polling task. Lives at file scope so the poll method can name
-/// the type in its match arms.
-enum PollAction {
-    /// Session is gone or its identity changed — stop polling.
-    Exit,
-    /// Nothing observed this tick.
-    Continue,
-    /// User clicked Stop — clean up the temp file and exit.
-    StopAndCleanup,
-    /// File changed; read + parse off the foreground using the
-    /// observed mtime as the new high-water mark.
-    Ingest(std::time::SystemTime),
-}
 
 #[cfg(test)]
 mod tests {

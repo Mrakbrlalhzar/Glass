@@ -71,7 +71,6 @@ mod text_input;
 mod section_map;
 mod annotation_popover;
 mod class_decl_popover;
-mod external_editor;
 mod field_popover;
 mod method_popover;
 mod modifier_picker;
@@ -1538,7 +1537,6 @@ pub(crate) struct Shell {
     pub(crate) method_edit: Option<method_popover::MethodEditState>,
     pub(crate) op_edit: Option<op_editor::OpEditState>,
     pub(crate) annotation_stack: Option<annotation_popover::AnnotationStack>,
-    pub(crate) external_edit: Option<external_editor::ExternalEditState>,
     /// Cross-platform device manager — populated once at Shell
     /// construction with both an ADB backend (for Android) and
     /// an iDevice backend (for iOS). `Arc` so the background
@@ -1967,18 +1965,6 @@ impl Render for Shell {
         // tab is active. Driven by the background poll task in
         // app.rs::spawn_device_poll.
         let header = header.child(device_picker::render_chip(self, fg, dim, cx));
-
-        // The "Edit File" toolbar button (external editor launcher)
-        // is retired now that the in-app `SmaliEditor` is the
-        // default for smali — leaf clicks open it directly. We
-        // keep the live-watching chip in case `external_edit` is
-        // still set from an in-flight session (e.g. opened before
-        // the retirement); it self-dismisses on stop.
-        let header = if let Some(state) = self.external_edit.as_ref() {
-            header.child(external_editor::render_chip(state, fg, dim, cx))
-        } else {
-            header
-        };
 
         // Staged-edits chip. Only renders when the loaded bundle
         // has at least one staged edit; clicking opens the
