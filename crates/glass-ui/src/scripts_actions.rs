@@ -222,6 +222,34 @@ impl Shell {
         self.refresh_scripts(cx);
     }
 
+    /// Route a key event to the code editor on the active
+    /// `ScriptEditor` tab, when one is active. Returns true when
+    /// the key was consumed (so the dispatcher can stop further
+    /// handlers from firing).
+    pub(crate) fn code_editor_handle_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(active) = self.active_tab else { return false };
+        let Some(tab) = self.tabs.get_mut(active) else { return false };
+        if !matches!(tab.kind, crate::TabKind::ScriptEditor { .. }) {
+            return false;
+        }
+        let Some(editor) = tab.code_editor.as_mut() else { return false };
+
+        let k = &ev.keystroke;
+        // Collapse "platform" (cmd on macOS, ctrl elsewhere) into a
+        // single `cmd` flag — matches the convention used by
+        // text_input.rs.
+        let cmd = k.modifiers.platform || k.modifiers.control;
+        let shift = k.modifiers.shift;
+        let key_char = k.key_char.as_deref();
+        editor.handle_key(&k.key, shift, cmd, key_char);
+        cx.notify();
+        true
+    }
+
     /// Write `body` to the on-disk file for `name` and bump the
     /// `modified_unix` timestamp. Used by the editor's save flow.
     pub(crate) fn save_script_body(

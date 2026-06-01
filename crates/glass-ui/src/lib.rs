@@ -2533,6 +2533,15 @@ impl Render for Shell {
                     op_editor::handle_key(this, k, cx);
                     return;
                 }
+                // Script editor — when the active tab is a
+                // ScriptEditor, route all keystrokes (typing,
+                // arrows, backspace, etc.) into its rope-backed
+                // buffer. Wraps the chain *after* the
+                // popovers/op-edit because those overlay surfaces
+                // should win when both are active.
+                if this.code_editor_handle_key(ev, cx) {
+                    return;
+                }
                 if !this.palette_open {
                     return;
                 }
