@@ -214,7 +214,7 @@ impl Shell {
     /// that aren't in the original (newly-added) count as changed.
     /// Cheap — single-class scope, line-prefix scan + per-member
     /// text render.
-    fn refresh_changed_rows(
+    pub(crate) fn refresh_changed_rows(
         &mut self,
         artifact: &glass_db::ArtifactId,
         class_jni: &str,

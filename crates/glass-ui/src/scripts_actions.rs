@@ -1108,7 +1108,53 @@ impl Shell {
         let key_char = k.key_char.as_deref();
         editor.handle_key(&k.key, shift, cmd, key_char);
         cx.notify();
+        // For SmaliEditor: if the user has just returned the
+        // buffer to the on-disk state (typed and immediately
+        // undid, backspaced the last edit, etc.) we want to
+        // drop any staged entry right now rather than waiting
+        // for the 500ms idle reparse to discover it. Cheap —
+        // a single text-equality check, no parse required.
+        if let EditorKind::Smali(artifact, class_jni) = editor_kind {
+            self.drop_stage_if_buffer_matches_original(&artifact, &class_jni, cx);
+        }
         true
+    }
+
+    /// Cheap post-edit check used by the smali editor: if the
+    /// buffer text now equals the original lifted class's
+    /// rendered form, drop any staged edit for the class so
+    /// the Changes dialog updates immediately. No parse — just
+    /// a text comparison.
+    fn drop_stage_if_buffer_matches_original(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (matches, has_staged) = {
+            let Some(bundle) = self.bundle() else { return };
+            let key = (artifact.clone(), class_jni.to_string());
+            let Some(original) = bundle.smali_classes.get(&key) else { return };
+            let Some(active) = self.active_tab else { return };
+            let Some(editor) = self
+                .tabs
+                .get(active)
+                .and_then(|t| t.code_editor.as_ref())
+            else {
+                return;
+            };
+            (
+                editor.text() == original.to_smali(),
+                bundle.smali_edits.get(artifact, class_jni).is_some(),
+            )
+        };
+        if matches && has_staged {
+            if let Some(bundle) = self.bundle_mut() {
+                bundle.smali_edits.remove(artifact, class_jni);
+            }
+            self.refresh_changed_rows(artifact, class_jni);
+            cx.notify();
+        }
     }
 
     /// Write the active script editor's buffer to disk via
