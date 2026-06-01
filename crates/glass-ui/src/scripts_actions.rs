@@ -322,6 +322,23 @@ impl Shell {
             return true;
         }
 
+        // Cmd-Z / Cmd-Shift-Z — undo / redo via text::Buffer's
+        // transaction history. Handled before the clipboard
+        // chords so shift-Z doesn't get swallowed by anything.
+        if cmd && k.key == "z" {
+            if let Some(editor) = self
+                .tabs
+                .get_mut(active)
+                .and_then(|t| t.code_editor.as_mut())
+            {
+                let changed = if shift { editor.redo() } else { editor.undo() };
+                if changed {
+                    cx.notify();
+                }
+            }
+            return true;
+        }
+
         // Cmd-C / Cmd-X / Cmd-V — system clipboard. handle_key
         // ignores these (it returned false on cmd+letter except
         // Cmd-A), so we intercept here and call the buffer's

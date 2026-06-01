@@ -496,6 +496,55 @@ impl CodeEditor {
         self.dragging = false;
     }
 
+    /// Undo the last transaction (or group of transactions when
+    /// they were merged within `transaction_group_interval`).
+    /// Returns true when something was undone — caller refreshes
+    /// the view.
+    ///
+    /// `text::Buffer` records a transaction per `buffer.edit` call,
+    /// and each call to `CodeEditor::apply_edit` makes exactly one,
+    /// so each typed character / paste / cut becomes its own undo
+    /// step. Burst-typing groups by the buffer's own interval
+    /// heuristic.
+    pub fn undo(&mut self) -> bool {
+        if self.buffer.undo().is_some() {
+            self.after_history_step();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo the next transaction on the redo stack. Returns
+    /// true when something was redone.
+    pub fn redo(&mut self) -> bool {
+        if self.buffer.redo().is_some() {
+            self.after_history_step();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Refresh derived state after an undo/redo. Clears
+    /// selection (Zed's text::Buffer doesn't restore anchors
+    /// across undo for us), clamps cursor into the new buffer
+    /// length, marks the editor dirty (undo doesn't get back to
+    /// "saved" — the user has to Save to clear that), and
+    /// resizes the visible-row list.
+    fn after_history_step(&mut self) {
+        let new_len = self.buffer.snapshot().len();
+        self.cursor = self.cursor.min(new_len);
+        self.selection_anchor = None;
+        self.desired_column = None;
+        self.save_error = None;
+        // Undo/redo are themselves edits from the user's POV;
+        // flag dirty so the footer reflects "buffer doesn't
+        // match what's on disk".
+        self.dirty = true;
+        self.refresh_cache();
+    }
+
     /// Insert `text` at the caret (or replace the selection
     /// when one is active). Used by the paste flow. Returns
     /// true when the buffer changed.
@@ -1254,6 +1303,51 @@ mod tests {
         // Shift-click at 6 — selection should be 3..6.
         e.begin_click_drag(6, true);
         assert_eq!(e.selection_range(), (3, 6));
+    }
+
+    #[test]
+    fn undo_redo_round_trip() {
+        let mut e = CodeEditor::from_string("abc");
+        e.handle_key("end", false, false, None);
+        e.handle_key("d", false, false, Some("d"));
+        e.handle_key("e", false, false, Some("e"));
+        assert_eq!(e.text(), "abcde");
+        // Undo each character. text::Buffer's group_interval is
+        // long enough that synchronous tests bundle bursts into
+        // one transaction, but our test executes serially fast
+        // and they may merge. Just keep undoing until empty of
+        // those edits.
+        let mut undone = false;
+        while e.text() != "abc" && e.undo() {
+            undone = true;
+        }
+        assert!(undone, "expected at least one undo to succeed");
+        assert_eq!(e.text(), "abc");
+        // Now redo back.
+        while e.text() != "abcde" && e.redo() {}
+        assert_eq!(e.text(), "abcde");
+    }
+
+    #[test]
+    fn undo_with_no_history_returns_false() {
+        let mut e = CodeEditor::from_string("nothing edited");
+        assert!(!e.undo());
+        assert_eq!(e.text(), "nothing edited");
+    }
+
+    #[test]
+    fn undo_marks_dirty_clamps_cursor() {
+        let mut e = CodeEditor::from_string("");
+        e.handle_key("a", false, false, Some("a"));
+        e.handle_key("b", false, false, Some("b"));
+        assert_eq!(e.cursor(), 2);
+        e.mark_clean();
+        assert!(!e.dirty);
+        // Undo — must reflect dirty again, cursor clamped to
+        // the shorter buffer.
+        e.undo();
+        assert!(e.dirty);
+        assert!(e.cursor() <= e.text().len());
     }
 
     #[test]
