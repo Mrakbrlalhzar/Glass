@@ -47,7 +47,7 @@ pub fn render_two_pane(
         let scripts_panel_el =
             crate::scripts_panel::render_panel(shell, panel, border, fg, dim, accent, cx);
         let left = div()
-            .w(px(340.))
+            .w(shell.left_pane_width)
             .h_full()
             .flex_shrink_0()
             .relative()
@@ -1312,12 +1312,44 @@ pub fn render_two_pane(
             None
         };
 
+        // Splitter handle between the left nav and right body.
+        // 5px-wide hit target with a ResizeLeftRight cursor;
+        // doesn't render a visible bar of its own (the left
+        // pane's right border already separates them visually).
+        // Drag updates `shell.left_pane_width`; release persists
+        // to `WindowSettings`.
+        let splitter = div()
+            .id("left-pane-splitter")
+            .w(px(5.))
+            .h_full()
+            .flex_shrink_0()
+            .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|shell, ev: &gpui::MouseDownEvent, _w, cx| {
+                    shell.start_left_pane_resize(ev.position.x, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(
+                |shell, ev: &gpui::MouseMoveEvent, _w, cx| {
+                    if ev.pressed_button.is_some() {
+                        shell.update_left_pane_resize(ev.position.x, cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|shell, _ev, _w, cx| {
+                    shell.finish_left_pane_resize(cx);
+                }),
+            );
         let mut outer = div()
             .flex_1()
             .flex()
             .flex_row()
             .overflow_hidden()
             .child(left)
+            .child(splitter)
             .child(right);
         if let Some(p) = pane {
             outer = outer.child(p);

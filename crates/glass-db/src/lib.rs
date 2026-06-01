@@ -329,6 +329,11 @@ pub struct WindowSettings {
     /// unusual and Glass can't find it on its own.
     #[serde(default)]
     pub adb_path: Option<String>,
+    /// Width of the left nav pane in pixels. `None` → use the
+    /// built-in default. Persisted across sessions so a wider
+    /// tree (Android packages get long) survives a restart.
+    #[serde(default)]
+    pub left_pane_width: Option<f32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]

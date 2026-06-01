@@ -144,6 +144,66 @@ impl Shell {
                 Arc::new(set.resolve(settings.theme.as_deref()).clone())
             },
             window_tint: 0,
+            left_pane_width: {
+                // Restore the persisted splitter position; fall
+                // back to the built-in default. Clamp into the
+                // sane range so a corrupted setting can't push
+                // the pane out of reach.
+                let settings = glass_db::load_window_settings();
+                let raw = settings
+                    .left_pane_width
+                    .unwrap_or(crate::LEFT_PANE_DEFAULT_PX);
+                gpui::Pixels::from(
+                    raw.clamp(crate::LEFT_PANE_MIN_PX, crate::LEFT_PANE_MAX_PX),
+                )
+            },
+            left_pane_resize_anchor: None,
+        }
+    }
+
+    /// Stash the pointer X + current left-pane width on the
+    /// splitter's mouse-down so subsequent moves resize
+    /// relative to a stable anchor. Mirrors the debug-dock
+    /// drag pattern.
+    pub(crate) fn start_left_pane_resize(
+        &mut self,
+        pointer_x: gpui::Pixels,
+        _cx: &mut Context<Self>,
+    ) {
+        self.left_pane_resize_anchor = Some((pointer_x, self.left_pane_width));
+    }
+
+    /// Apply the current drag delta against the stashed
+    /// anchor. Pointer moving right grows the pane; left
+    /// shrinks. Clamped to the sane bounds.
+    pub(crate) fn update_left_pane_resize(
+        &mut self,
+        pointer_x: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((anchor_x, anchor_w)) = self.left_pane_resize_anchor else {
+            return;
+        };
+        let dx = pointer_x.as_f32() - anchor_x.as_f32();
+        let new_w = (anchor_w.as_f32() + dx)
+            .clamp(crate::LEFT_PANE_MIN_PX, crate::LEFT_PANE_MAX_PX);
+        let new_px = gpui::Pixels::from(new_w);
+        if (new_px - self.left_pane_width).as_f32().abs() > 0.5 {
+            self.left_pane_width = new_px;
+            cx.notify();
+        }
+    }
+
+    /// End the drag and persist the new width. Persistence
+    /// fires only on release, not on every move, so the
+    /// settings file isn't rewritten dozens of times during a
+    /// single drag.
+    pub(crate) fn finish_left_pane_resize(&mut self, cx: &mut Context<Self>) {
+        if self.left_pane_resize_anchor.take().is_some() {
+            let mut settings = glass_db::load_window_settings();
+            settings.left_pane_width = Some(self.left_pane_width.as_f32());
+            let _ = glass_db::save_window_settings(&settings);
+            cx.notify();
         }
     }
 

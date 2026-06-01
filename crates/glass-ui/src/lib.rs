@@ -63,6 +63,15 @@ mod frida_server_install;
 mod code_editor;
 mod scripts_actions;
 mod scripts_panel;
+
+/// Default width of the left navigator pane on first run, in
+/// CSS pixels. Persisted on resize via `WindowSettings`.
+pub(crate) const LEFT_PANE_DEFAULT_PX: f32 = 340.0;
+/// Min/max bounds the splitter clamps the left pane to. Min
+/// chosen so the chevron + tree icon stay visible; max so the
+/// right pane keeps at least its scrollbars + footer.
+pub(crate) const LEFT_PANE_MIN_PX: f32 = 160.0;
+pub(crate) const LEFT_PANE_MAX_PX: f32 = 800.0;
 mod smali_editor;
 mod string_edit_popover;
 mod scrollbar;
@@ -1500,6 +1509,15 @@ pub(crate) struct Shell {
     /// to the bundle record; default false. Auto-opens on write or
     /// when the user clicks an edge-icon (Phase 4).
     pub(crate) annotations_pane_open: bool,
+    /// Width of the left navigator pane in pixels. Persisted in
+    /// `WindowSettings`; the user drags the splitter between
+    /// the nav and the right pane to resize. Clamped to a
+    /// sensible range so the pane can't disappear or take over.
+    pub(crate) left_pane_width: gpui::Pixels,
+    /// Transient drag-anchor for the splitter: `(pointer_x_at_press,
+    /// pane_width_at_press)`. `None` outside an active drag.
+    /// Same pattern as `debug_dock_resize_anchor`.
+    pub(crate) left_pane_resize_anchor: Option<(gpui::Pixels, gpui::Pixels)>,
     /// Active theme for this window. Cloned from the global `ThemeSet`
     /// when the window opens. Re-cloning happens when the user picks a
     /// different theme in settings.
