@@ -291,14 +291,43 @@ impl CodeEditor {
 
     /// Scroll the viewport so the caret's row is visible. Call
     /// after any motion or edit that could push the caret off
-    /// screen (arrows, PageUp/Dn, Home/End, Enter, etc.). The
-    /// list's own `scroll_to_reveal_item` does the math: no-op
-    /// when the row is already visible; clamps to top when
-    /// caret moved above the viewport, clamps to bottom when
-    /// below.
+    /// screen (arrows, PageUp/Dn, Home/End, Enter, etc.).
+    ///
+    /// We don't use gpui's `scroll_to_reveal_item` because that
+    /// snaps the viewport whenever the target row is at or
+    /// above the current scroll-top — which means typing at the
+    /// top of the buffer with the viewport scrolled down would
+    /// yank the user back to row 0 on every keystroke. Our
+    /// version is a no-op when the caret is already on a
+    /// visible row.
     pub fn ensure_caret_visible(&self) {
         let row = self.cursor_point().row as usize;
-        self.list_state.scroll_to_reveal_item(row);
+        let body_h: f32 = self.body_bounds.size.height.into();
+        // Fewer rows visible than the buffer claims when the
+        // body is short — round down to whole rows so the last
+        // partially-visible row is treated as "not really
+        // visible." Min 1 so an unmeasured layout still has a
+        // sensible reveal step.
+        let visible_rows = ((body_h / LINE_HEIGHT).floor() as usize).max(1);
+        let top = self.list_state.logical_scroll_top().item_ix;
+        let bottom_exclusive = top + visible_rows;
+        if row < top {
+            // Above viewport: pull viewport up so caret row
+            // sits at the top.
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: row,
+                offset_in_item: gpui::Pixels::from(0.),
+            });
+        } else if row >= bottom_exclusive {
+            // Below viewport: pull viewport down so caret row
+            // sits at the bottom.
+            let new_top = row.saturating_sub(visible_rows - 1);
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: new_top,
+                offset_in_item: gpui::Pixels::from(0.),
+            });
+        }
+        // else: already visible — no-op.
     }
 
     /// Select the entire buffer.
@@ -553,6 +582,39 @@ impl CodeEditor {
         self.set_cursor(offset, extend);
     }
 
+    /// Select the word containing `offset`. A "word" is a
+    /// maximal run of alphanumeric / underscore bytes —
+    /// matches the convention every other code editor uses for
+    /// double-click. Cursor lands at the end of the word with
+    /// the selection anchor at the start.
+    pub fn select_word_at(&mut self, offset: usize) {
+        let snap = self.buffer.snapshot();
+        let len = snap.len();
+        if len == 0 {
+            return;
+        }
+        let start = offset.min(len);
+        let bytes: Vec<u8> = snap.as_rope().chunks().flat_map(|c| c.bytes()).collect();
+        // Expand left.
+        let mut a = start;
+        while a > 0 && is_word_byte(bytes[a - 1]) {
+            a -= 1;
+        }
+        // Expand right.
+        let mut b = start;
+        while b < len && is_word_byte(bytes[b]) {
+            b += 1;
+        }
+        if a == b {
+            // Cursor isn't on a word char — leave caret in place.
+            return;
+        }
+        self.selection_anchor = Some(a);
+        self.cursor = b;
+        self.desired_column = None;
+        self.dragging = false;
+    }
+
     /// Begin a click-drag: place the caret + anchor at `offset`.
     /// Subsequent mouse-move events while `dragging` is true
     /// call `move_cursor_to_offset(.., true)` to extend.
@@ -729,6 +791,19 @@ fn next_char_boundary(snap: &text::BufferSnapshot, offset: usize) -> usize {
         o += 1;
     }
     len
+}
+
+/// Byte counts as part of a "word" for double-click selection.
+/// Matches the convention used by most code editors: letters,
+/// digits, underscore. Non-ASCII bytes (UTF-8 continuation +
+/// leading bytes for chars ≥ U+0080) are included so identifiers
+/// in non-Latin scripts still select cleanly; punctuation /
+/// whitespace / control bytes are excluded.
+fn is_word_byte(b: u8) -> bool {
+    if b >= 0x80 {
+        return true;
+    }
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 fn digit_count(n: usize) -> usize {
@@ -914,8 +989,9 @@ pub fn render_code_editor(
                 if let Some(entity) = weak_md.upgrade() {
                     let pos = ev.position;
                     let extend = ev.modifiers.shift;
+                    let click_count = ev.click_count;
                     cx.update_entity(&entity, |shell, cx| {
-                        shell.code_editor_mouse_down(pos, extend, cx);
+                        shell.code_editor_mouse_down(pos, extend, click_count, cx);
                     });
                 }
             },
@@ -1562,6 +1638,35 @@ mod tests {
         let p = e.buffer.snapshot().offset_to_point(off);
         // Visible col 10 + h_offset 50 → buffer col ≈ 60.
         assert_eq!((p.row, p.column), (0, 60));
+    }
+
+    #[test]
+    fn select_word_at_expands_both_ways() {
+        let mut e = CodeEditor::from_string("foo bar_baz qux");
+        // Click inside "bar_baz" (offset 6, the 'r').
+        e.select_word_at(6);
+        let (a, b) = e.selection_range();
+        // "bar_baz" is bytes 4..11.
+        assert_eq!((a, b), (4, 11));
+    }
+
+    #[test]
+    fn select_word_at_punctuation_is_noop() {
+        let mut e = CodeEditor::from_string("foo + bar");
+        e.cursor = 5; // start of "bar"
+        // Click on the space (offset 4).
+        e.select_word_at(4);
+        // Cursor unchanged; no selection started.
+        assert_eq!(e.cursor(), 5);
+        assert_eq!(e.selection_range(), (5, 5));
+    }
+
+    #[test]
+    fn select_word_at_underscore_included() {
+        let mut e = CodeEditor::from_string("hello_world rest");
+        e.select_word_at(3);
+        let (a, b) = e.selection_range();
+        assert_eq!((a, b), (0, 11));
     }
 
     #[test]

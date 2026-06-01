@@ -270,6 +270,9 @@ impl Shell {
             .saturating_sub(1)
             .max(1);
         editor.move_by_page(dir, rows, false);
+        // PgUp/Dn bypasses handle_key, so we have to drive the
+        // caret-into-view step ourselves.
+        editor.ensure_caret_visible();
         cx.notify();
     }
 
@@ -292,11 +295,18 @@ impl Shell {
         &mut self,
         pos: gpui::Point<gpui::Pixels>,
         extend: bool,
+        click_count: usize,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.active_code_editor_mut() else { return };
         let Some(off) = editor.offset_for_window_point(pos) else { return };
-        editor.begin_click_drag(off, extend);
+        if click_count >= 2 {
+            // Double-click: select the word under the cursor.
+            // Single + drag is still the prior path.
+            editor.select_word_at(off);
+        } else {
+            editor.begin_click_drag(off, extend);
+        }
         cx.notify();
     }
 
