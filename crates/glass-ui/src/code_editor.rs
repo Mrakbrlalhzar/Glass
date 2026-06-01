@@ -392,8 +392,8 @@ impl CodeEditor {
     /// numbers.
     pub fn gutter_width_px(&self) -> f32 {
         let n_digits = digit_count(self.line_count().max(1)).max(4) as f32;
-        // ~7px per digit in our small fixed-width font + 12px inset.
-        n_digits * 7.5 + 12.0
+        // GLYPH_WIDTH per digit (matches the body font) + 12px inset.
+        n_digits * GLYPH_WIDTH + 12.0
     }
 }
 
@@ -532,7 +532,7 @@ pub fn render_code_editor(
                         .flex()
                         .items_center()
                         .justify_end()
-                        .text_xs()
+                        .text_base()
                         .text_color(dim)
                         .font_family(EDITOR_FONT)
                         .child(line_no_str),
@@ -543,7 +543,7 @@ pub fn render_code_editor(
                         .min_w(px(0.))
                         .pl_2()
                         .h_full()
-                        .text_xs()
+                        .text_base()
                         .font_family(EDITOR_FONT)
                         .child(body_el),
                 )
@@ -719,15 +719,15 @@ fn safe_slice(text: &str, mut start: usize, mut end: usize) -> &str {
 }
 
 /// Approximate per-glyph width in the editor font, in pixels.
-/// Courier New at our `text_xs` size renders close to monospace;
-/// tuned by eye to align the caret with the underlying text. If
-/// this drifts we'll measure at runtime instead.
-const GLYPH_WIDTH: f32 = 7.5;
+/// Courier New at `text_base` (16px) renders close to monospace
+/// at ~9.6px per glyph. Tuned by eye to align the caret with the
+/// underlying text; if it drifts we'll measure at runtime.
+const GLYPH_WIDTH: f32 = 9.6;
 
-/// Height of a single editor line. Matches `text_xs` rendering at
-/// our usual zoom. Tuned by eye against the listing view's row
-/// height.
-const LINE_HEIGHT: f32 = 16.0;
+/// Height of a single editor line. Matches the listing view's
+/// row height so disassembly, smali, and the editor all share a
+/// vertical rhythm.
+const LINE_HEIGHT: f32 = 22.0;
 
 /// Editor monospace font. Same family the smali / listing views
 /// use so it feels consistent.
