@@ -81,7 +81,55 @@ impl Shell {
         tab.code_editor = Some(editor);
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);
+        // Compute the initial changed_rows set so any pre-existing
+        // staged edit (the user opened the editor on a class with
+        // changes already staged from inline popovers, etc.) shows
+        // tinted rows from the first paint.
+        self.refresh_changed_rows(&artifact, &class_jni);
         cx.notify();
+    }
+
+    /// Refresh the `changed_rows` set on the named SmaliEditor's
+    /// CodeEditor. Diffs each member (method / field) in the
+    /// buffer against its original-lifted counterpart by rendering
+    /// just that member to smali and comparing line-wise. Members
+    /// that aren't in the original (newly-added) count as changed.
+    /// Cheap — single-class scope, line-prefix scan + per-member
+    /// text render.
+    fn refresh_changed_rows(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+    ) {
+        // Need the original lifted class to diff against. If the
+        // bundle's gone or doesn't have it, drop any existing
+        // changed set so the renderer doesn't show stale tints.
+        let original = match self.bundle() {
+            Some(b) => b
+                .smali_classes
+                .get(&(artifact.clone(), class_jni.to_string()))
+                .cloned(),
+            None => None,
+        };
+        // Find the matching tab. There can only be one per
+        // (artifact, class_jni) but the loop is cheap.
+        let Some(tab) = self.tabs.iter_mut().find(|t| {
+            matches!(
+                &t.kind,
+                TabKind::SmaliEditor { artifact: a, class_jni: c }
+                    if a == artifact && c == class_jni
+            )
+        }) else {
+            return;
+        };
+        let Some(editor) = tab.code_editor.as_mut() else { return };
+        let Some(original) = original else {
+            editor.changed_rows.clear();
+            return;
+        };
+        let buffer_text = editor.text();
+        editor.changed_rows =
+            crate::code_editor::compute_changed_rows(&buffer_text, &original);
     }
 
     /// Walk every open `SmaliEditor` tab and reparse any whose
@@ -160,6 +208,7 @@ impl Shell {
                 if let Some(bundle) = self.bundle_mut() {
                     bundle.smali_edits.remove(artifact, class_jni);
                 }
+                self.refresh_changed_rows(artifact, class_jni);
                 return true;
             }
             return false;
@@ -193,6 +242,9 @@ impl Shell {
                 }
             }
         }
+        // Refresh the changed-rows set so tinting reflects the
+        // new staged state.
+        self.refresh_changed_rows(artifact, class_jni);
         true
     }
 

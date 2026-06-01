@@ -112,6 +112,31 @@ pub(crate) struct CodeEditor {
     /// (successful or not). Lets the idle loop skip when
     /// nothing has changed since the last attempt.
     pub(crate) last_reparse_at: Option<std::time::Instant>,
+    /// Rows whose member (method or field) has been modified
+    /// versus the original lifted class. Tinted in the
+    /// renderer so the user can see what they've changed at a
+    /// glance. Refreshed alongside `parsed_smali`.
+    pub(crate) changed_rows: std::collections::HashSet<u32>,
+}
+
+/// Identifier for a class member within a smali class. Used to
+/// label buffer ranges + route revert actions to the right
+/// existing Shell method.
+#[derive(Clone, Debug)]
+pub(crate) enum MemberId {
+    /// `.method` block, identified by `name(sig)return` for use
+    /// with `revert_smali_method_edit`. `method_signature_jni`
+    /// is the JNI-form sig — the underlying revert keys on it.
+    Method {
+        name: String,
+        signature_jni: String,
+    },
+    /// `.field` line. Same shape as methods, used with
+    /// `revert_smali_field_edit`.
+    Field {
+        name: String,
+        signature_jni: String,
+    },
 }
 
 /// Per-language highlighter selection. Line-local for v1: each
@@ -156,6 +181,7 @@ impl CodeEditor {
             last_edit_at: None,
             parsed_smali: None,
             last_reparse_at: None,
+            changed_rows: std::collections::HashSet::new(),
         }
     }
 
@@ -818,6 +844,144 @@ impl CodeEditor {
     }
 }
 
+/// Diff a buffer's text against the original lifted class and
+/// return the set of buffer rows that sit inside a *changed*
+/// `.method` / `.field`. A method is "changed" when its text in
+/// the buffer differs (after trimming) from the original's
+/// rendered form; a method that doesn't exist in the original
+/// (newly-added) counts as changed wholesale.
+///
+/// The scan is line-prefix based — no full parse — so it stays
+/// useful mid-edit when the buffer can't be parsed. Robust to
+/// reordered methods (we match by `name(sig)return`, not
+/// position).
+pub(crate) fn compute_changed_rows(
+    buffer_text: &str,
+    original: &smali::types::SmaliClass,
+) -> std::collections::HashSet<u32> {
+    use std::collections::HashMap;
+    // Index original members by their text key. Methods key on
+    // `name(sig)return`; fields on `name:sig`.
+    let mut orig_methods: HashMap<String, String> = HashMap::new();
+    for m in &original.methods {
+        let key = format!(
+            "{}{}",
+            m.name,
+            m.signature.to_jni(),
+        );
+        // Rendered method text — what the buffer should match
+        // when unchanged.
+        orig_methods.insert(key, format!("{m}"));
+    }
+    let mut orig_fields: HashMap<String, String> = HashMap::new();
+    for f in &original.fields {
+        let key = format!("{}:{}", f.name, f.signature.to_jni());
+        orig_fields.insert(key, format!("{f}"));
+    }
+
+    let mut changed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let lines: Vec<&str> = buffer_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(".method ") {
+            // Find the matching .end method.
+            let block_start = i;
+            let mut end = i + 1;
+            while end < lines.len() && lines[end].trim_start() != ".end method" {
+                end += 1;
+            }
+            let block_end = end.min(lines.len().saturating_sub(1));
+            // Parse the .method declaration's name + sig from
+            // its tail: ` [modifiers...] name(sig)return`.
+            let key = method_key_from_decl(rest);
+            let buf_text = lines[block_start..=block_end].join("\n");
+            let differs = match key.as_ref().and_then(|k| orig_methods.get(k)) {
+                Some(orig_text) => {
+                    normalise_member(orig_text) != normalise_member(&buf_text)
+                }
+                None => true, // new method or unrecognised decl → changed
+            };
+            if differs {
+                for row in block_start..=block_end {
+                    changed.insert(row as u32);
+                }
+            }
+            i = block_end + 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(".field ") {
+            let key = field_key_from_decl(rest);
+            let differs = match key.as_ref().and_then(|k| orig_fields.get(k)) {
+                Some(orig_text) => {
+                    normalise_member(orig_text) != normalise_member(line)
+                }
+                None => true,
+            };
+            if differs {
+                changed.insert(i as u32);
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    changed
+}
+
+/// Extract the method's `name + signature_jni` from a
+/// `.method` declaration's tail (the part after `.method `).
+/// e.g. for `.method public foo(I)V`, returns `Some("foo(I)V")`.
+/// Returns None when the line doesn't end with `name(args)ret`.
+fn method_key_from_decl(rest: &str) -> Option<String> {
+    // Strip modifiers (all the words before the one containing `(`).
+    let tail = rest.split_whitespace().last()?;
+    // Sanity: must contain `(` and `)`.
+    if !tail.contains('(') || !tail.contains(')') {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+/// Extract `name:signature_jni` from a `.field` declaration.
+/// e.g. for `.field public static count:I`, returns
+/// `Some("count:I")`. Handles trailing `= …` initialisers — we
+/// search for the first whitespace-separated token containing
+/// `:` rather than just taking the last word, which would
+/// otherwise pick up the literal value.
+fn field_key_from_decl(rest: &str) -> Option<String> {
+    let key = rest
+        .split_whitespace()
+        .find(|tok| tok.contains(':'))?
+        .split('=')
+        .next()?
+        .trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+/// Normalise smali member text for diff comparison. Trim
+/// trailing whitespace from each line and drop trailing blank
+/// lines so insignificant whitespace differences don't register
+/// as changes.
+fn normalise_member(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Walk every row of the buffer and return the longest line's
 /// length in bytes. Used to size the horizontal scrollbar.
 ///
@@ -936,6 +1100,12 @@ pub fn render_code_editor(
     let caret_colour = theme.shell.text_bright.rgba();
     let selection_colour = theme.modals.palette_hover.rgba();
     let highlight = editor.highlight;
+    // Soft "changed" row tint — committed-bg colour at low
+    // alpha so the syntax-highlighted text on top stays
+    // readable. Cloned into the row closure as a plain Rgba.
+    let mut changed_tint = theme.state.committed_bg.rgba();
+    changed_tint.a = 0.18;
+    let changed_rows = std::sync::Arc::new(editor.changed_rows.clone());
 
     // gpui's list takes the list_state by value; we clone here so
     // the editor keeps owning its copy.
@@ -970,12 +1140,20 @@ pub fn render_code_editor(
                 selection_colour,
                 highlight,
             );
-            div()
+            // Soft tint when this row sits inside a staged
+            // change — gives the user a glance-able view of
+            // what they've modified.
+            let is_changed = changed_rows.contains(&row);
+            let mut row_div = div()
                 .h(px(LINE_HEIGHT))
                 .w_full()
                 .flex()
                 .flex_row()
-                .items_center()
+                .items_center();
+            if is_changed {
+                row_div = row_div.bg(changed_tint);
+            }
+            row_div
                 .child(
                     // Right-aligned line-number gutter, dim text,
                     // bordered on the right to separate from the
@@ -1813,6 +1991,42 @@ mod tests {
         e.select_word_at(3);
         let (a, b) = e.selection_range();
         assert_eq!((a, b), (0, 11));
+    }
+
+    #[test]
+    fn method_key_from_decl_extracts_tail() {
+        assert_eq!(
+            method_key_from_decl("public foo(I)V"),
+            Some("foo(I)V".to_string()),
+        );
+        assert_eq!(
+            method_key_from_decl("public static constructor <init>()V"),
+            Some("<init>()V".to_string()),
+        );
+        assert_eq!(method_key_from_decl("public static"), None);
+    }
+
+    #[test]
+    fn field_key_from_decl_strips_initialiser() {
+        assert_eq!(
+            field_key_from_decl("public static count:I"),
+            Some("count:I".to_string()),
+        );
+        // With initialiser.
+        assert_eq!(
+            field_key_from_decl("public static MAX:I = 0xff"),
+            Some("MAX:I".to_string()),
+        );
+        // No colon → not a field key.
+        assert_eq!(field_key_from_decl("public static"), None);
+    }
+
+    #[test]
+    fn normalise_member_trims_trailing_whitespace() {
+        assert_eq!(
+            normalise_member(".method foo()V  \n  return-void   \n.end method\n\n\n"),
+            ".method foo()V\n  return-void\n.end method",
+        );
     }
 
     #[test]
