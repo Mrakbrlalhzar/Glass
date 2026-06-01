@@ -852,6 +852,7 @@ pub fn render_code_editor(
     let weak_mm = weak.clone();
     let weak_mu = weak.clone();
     let weak_sw = weak.clone();
+    let weak_rc = weak.clone();
     let body_wrapper = div()
         .flex_1()
         .relative()
@@ -866,6 +867,17 @@ pub fn render_code_editor(
                     let extend = ev.modifiers.shift;
                     cx.update_entity(&entity, |shell, cx| {
                         shell.code_editor_mouse_down(pos, extend, cx);
+                    });
+                }
+            },
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                if let Some(entity) = weak_rc.upgrade() {
+                    let pos = ev.position;
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.code_editor_open_context_menu(pos, cx);
                     });
                 }
             },

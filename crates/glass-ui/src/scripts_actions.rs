@@ -308,6 +308,48 @@ impl Shell {
         }
     }
 
+    /// Right-click in the editor body — open a small Copy /
+    /// Cut / Paste menu at the click position. Copy + Cut are
+    /// only included when there's an active selection; Paste
+    /// only when the clipboard has text. When all three would
+    /// be missing (no selection + empty clipboard) the menu
+    /// isn't opened at all.
+    pub(crate) fn code_editor_open_context_menu(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        // Snapshot selection text + clipboard state up-front so
+        // we can decide what items to include.
+        let selected = editor.selected_text();
+        let clipboard_has_text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|s| !s.is_empty())
+            .is_some();
+
+        let mut items = Vec::new();
+        if let Some(s) = selected {
+            items.push(crate::context_menu::ContextMenuItem::CopyText {
+                text: s.clone(),
+                label: gpui::SharedString::from("selection"),
+            });
+            items.push(crate::context_menu::ContextMenuItem::EditorCut);
+        }
+        if clipboard_has_text {
+            items.push(crate::context_menu::ContextMenuItem::EditorPaste);
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.context_menu = Some(crate::context_menu::ContextMenuState {
+            position: pos,
+            items,
+        });
+        cx.notify();
+    }
+
     /// Route a key event to the code editor on the active
     /// `ScriptEditor` or `SmaliEditor` tab. Returns true when
     /// the key was consumed (so the dispatcher can stop further

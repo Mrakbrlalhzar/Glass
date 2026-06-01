@@ -1033,6 +1033,27 @@ impl Shell {
             ContextMenuItem::DeleteScript { name, .. } => {
                 self.delete_script_and_close_tab(&name, cx);
             }
+            ContextMenuItem::EditorCut => {
+                let cut = self
+                    .active_code_editor_mut()
+                    .and_then(|e| e.cut_selection());
+                if let Some(s) = cut {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+                    cx.notify();
+                }
+            }
+            ContextMenuItem::EditorPaste => {
+                let text = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text());
+                if let Some(t) = text {
+                    if let Some(editor) = self.active_code_editor_mut() {
+                        if editor.paste_text(&t) {
+                            cx.notify();
+                        }
+                    }
+                }
+            }
         }
     }
 }

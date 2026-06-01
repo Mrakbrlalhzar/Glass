@@ -235,6 +235,14 @@ pub enum ContextMenuItem {
         name: String,
         label: SharedString,
     },
+    /// "Cut" — remove the active code editor's selection and
+    /// place it on the clipboard. Shown only when there's a
+    /// non-empty selection in the active editor tab.
+    EditorCut,
+    /// "Paste" — insert clipboard text at the caret (replacing
+    /// any active selection). Shown only when the clipboard
+    /// holds text.
+    EditorPaste,
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -383,6 +391,12 @@ pub fn render_context_menu(
             }
             ContextMenuItem::DeleteScript { label, .. } => {
                 ("Delete script".to_string(), label.clone())
+            }
+            ContextMenuItem::EditorCut => {
+                ("Cut".to_string(), SharedString::from(""))
+            }
+            ContextMenuItem::EditorPaste => {
+                ("Paste".to_string(), SharedString::from(""))
             }
         };
         let weak = weak.clone();
