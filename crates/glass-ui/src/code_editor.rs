@@ -117,6 +117,11 @@ pub(crate) struct CodeEditor {
     /// renderer so the user can see what they've changed at a
     /// glance. Refreshed alongside `parsed_smali`.
     pub(crate) changed_rows: std::collections::HashSet<u32>,
+    /// Rows whose line-prefix doesn't match any known smali
+    /// directive / op shape. Tinted red so syntax errors are
+    /// visible immediately — `.metho` instead of `.method` and
+    /// the like. Recomputed alongside `parsed_smali`.
+    pub(crate) bad_rows: std::collections::HashSet<u32>,
 }
 
 /// Identifier for a class member within a smali class. Used to
@@ -182,6 +187,7 @@ impl CodeEditor {
             parsed_smali: None,
             last_reparse_at: None,
             changed_rows: std::collections::HashSet::new(),
+            bad_rows: std::collections::HashSet::new(),
         }
     }
 
@@ -280,17 +286,29 @@ impl CodeEditor {
     /// in Shell once the buffer has been quiet long enough.
     /// On parse failure, keeps the previous good model so the
     /// UI doesn't flicker while the user is mid-edit.
+    ///
+    /// Also refreshes the line-shape error set (`bad_rows`)
+    /// regardless of whether the whole-class parse succeeded —
+    /// a class can be wholly parseable but still contain an
+    /// unknown directive somewhere if the parser fell into a
+    /// permissive arm; conversely a parse failure usually
+    /// shows up as a row-shape mismatch we can locate. On
+    /// success, clears `save_error`; on failure, sets it to
+    /// the parser's message so the footer surfaces it.
     pub fn reparse_smali(&mut self) {
         self.last_reparse_at = Some(std::time::Instant::now());
         let body = self.text();
+        self.bad_rows = compute_bad_rows(&body);
         match glass_api::parse_smali_class(&body) {
             Ok(c) => {
                 self.parsed_smali = Some(c);
+                self.save_error = None;
             }
-            Err(_) => {
+            Err(e) => {
                 // Hold onto the last good parse; users can keep
                 // navigating links even while the syntax is
                 // mid-edit and unparseable.
+                self.save_error = Some(format_parse_error(&e.to_string()));
             }
         }
     }
@@ -1078,6 +1096,128 @@ fn field_key_from_decl(rest: &str) -> Option<String> {
 /// trailing whitespace from each line and drop trailing blank
 /// lines so insignificant whitespace differences don't register
 /// as changes.
+/// Set of buffer rows whose line-prefix doesn't look like
+/// valid smali. Catches surface-level structural typos like
+/// `.metho` instead of `.method` — the kinds of single-line
+/// errors that would otherwise be invisible because the
+/// whole-class parser fails with a single error rather than
+/// pointing at the bad line.
+///
+/// Lines counted as valid:
+///   * Empty / whitespace-only.
+///   * Comments (`#…`).
+///   * Known `.directives` (allowlist below).
+///   * Lines inside a `.method` body (i.e. between `.method`
+///     and `.end method`). We don't try to validate ops here —
+///     too many shapes, and the parser does it better.
+///   * Lines inside an `.annotation` block.
+///
+/// Anything else is flagged.
+pub(crate) fn compute_bad_rows(buffer_text: &str) -> std::collections::HashSet<u32> {
+    let mut bad: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut in_method = false;
+    let mut in_annotation = false;
+    let mut in_array_data = false;
+    for (i, raw) in buffer_text.lines().enumerate() {
+        let row = i as u32;
+        let trimmed = raw.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Track context transitions first — these always count
+        // as valid regardless of what comes next.
+        if trimmed.starts_with(".method ")
+            || trimmed.starts_with(".method\t")
+            || trimmed == ".method"
+        {
+            in_method = true;
+            continue;
+        }
+        if trimmed.starts_with(".end method") {
+            in_method = false;
+            continue;
+        }
+        if trimmed.starts_with(".annotation") || trimmed.starts_with(".subannotation") {
+            in_annotation = true;
+            continue;
+        }
+        if trimmed.starts_with(".end annotation")
+            || trimmed.starts_with(".end subannotation")
+        {
+            in_annotation = false;
+            continue;
+        }
+        if trimmed.starts_with(".array-data")
+            || trimmed.starts_with(".packed-switch")
+            || trimmed.starts_with(".sparse-switch")
+        {
+            in_array_data = true;
+            continue;
+        }
+        if trimmed.starts_with(".end array-data")
+            || trimmed.starts_with(".end packed-switch")
+            || trimmed.starts_with(".end sparse-switch")
+        {
+            in_array_data = false;
+            continue;
+        }
+        // Inside a method body we don't validate op shapes —
+        // there are too many and the parser handles them.
+        if in_method || in_annotation || in_array_data {
+            continue;
+        }
+        // Outside any block: must be a directive we know.
+        if !is_known_top_level_directive(trimmed) {
+            bad.insert(row);
+        }
+    }
+    bad
+}
+
+/// Whether `line` starts with a directive valid at the class
+/// or class-annotation level. Conservative — we'd rather miss
+/// a typo than flag a real directive as bad. Add new
+/// directives here as the smali grammar grows.
+fn is_known_top_level_directive(line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        ".class",
+        ".super",
+        ".source",
+        ".implements",
+        ".field",
+        ".enum",
+        ".annotation",
+        ".subannotation",
+        ".end",
+    ];
+    PREFIXES.iter().any(|p| {
+        line.starts_with(p)
+            && line[p.len()..]
+                .chars()
+                .next()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(line.len() == p.len())
+    })
+}
+
+/// Strip the noisy `parsing smali body:` prefix from the
+/// editor's error message. The underlying nom-error format
+/// changes between smali crate versions; trying to extract a
+/// specific snippet is fragile. Just expose the rest verbatim —
+/// the footer is wide enough to render it and the user can copy
+/// it if needed.
+fn format_parse_error(raw: &str) -> String {
+    let trimmed = raw.strip_prefix("parsing smali body: ").unwrap_or(raw);
+    // Cap to a sensible length — gigantic nom debug strings
+    // would otherwise blow out the footer.
+    const MAX: usize = 220;
+    if trimmed.len() > MAX {
+        format!("{}…", &trimmed[..MAX.saturating_sub(1)])
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn normalise_member(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
@@ -1217,6 +1357,13 @@ pub fn render_code_editor(
     let mut changed_tint = theme.state.committed_bg.rgba();
     changed_tint.a = 0.18;
     let changed_rows = std::sync::Arc::new(editor.changed_rows.clone());
+    // "Bad row" tint — same translucent treatment but in the
+    // errors-highlight colour. Wins over the changed tint when
+    // both apply, since a parse error is the more pressing
+    // signal.
+    let mut bad_tint = theme.errors.highlight.rgba();
+    bad_tint.a = 0.25;
+    let bad_rows = std::sync::Arc::new(editor.bad_rows.clone());
 
     // gpui's list takes the list_state by value; we clone here so
     // the editor keeps owning its copy.
@@ -1251,9 +1398,10 @@ pub fn render_code_editor(
                 selection_colour,
                 highlight,
             );
-            // Soft tint when this row sits inside a staged
-            // change — gives the user a glance-able view of
-            // what they've modified.
+            // Row tint: bad (parse error) > changed (staged) >
+            // nothing. Parse errors are the more pressing
+            // signal so they win when both apply.
+            let is_bad = bad_rows.contains(&row);
             let is_changed = changed_rows.contains(&row);
             let mut row_div = div()
                 .h(px(LINE_HEIGHT))
@@ -1261,7 +1409,9 @@ pub fn render_code_editor(
                 .flex()
                 .flex_row()
                 .items_center();
-            if is_changed {
+            if is_bad {
+                row_div = row_div.bg(bad_tint);
+            } else if is_changed {
                 row_div = row_div.bg(changed_tint);
             }
             row_div
@@ -2226,6 +2376,51 @@ mod tests {
             Some(("<init>".to_string(), "()V".to_string())),
         );
         assert_eq!(split_method_key("nope"), None);
+    }
+
+    #[test]
+    fn compute_bad_rows_flags_unknown_top_level_directive() {
+        let body = ".class Lcom/A;\n.metho foo()V\n.end method\n";
+        let bad = compute_bad_rows(body);
+        // Row 1 = `.metho ...` — unknown directive at class level.
+        assert!(bad.contains(&1));
+        // Row 0 (`.class`) is fine.
+        assert!(!bad.contains(&0));
+    }
+
+    #[test]
+    fn compute_bad_rows_ignores_method_body_lines() {
+        let body = ".class Lcom/A;\n.method foo()V\n  return-void\n  garbage qux\n.end method\n";
+        let bad = compute_bad_rows(body);
+        // Method-body lines aren't validated — we'd false-flag
+        // legit ops. Only top-level directives get scrutinised.
+        assert!(bad.is_empty());
+    }
+
+    #[test]
+    fn compute_bad_rows_clean_class_is_clean() {
+        let body = ".class Lcom/A;\n.super Ljava/lang/Object;\n.source \"A.java\"\n.field count:I\n.method foo()V\n.end method\n";
+        assert!(compute_bad_rows(body).is_empty());
+    }
+
+    #[test]
+    fn format_parse_error_strips_prefix() {
+        let raw = "parsing smali body: something completely different";
+        assert_eq!(
+            format_parse_error(raw),
+            "something completely different",
+        );
+    }
+
+    #[test]
+    fn format_parse_error_caps_at_max_length() {
+        let raw =
+            format!("parsing smali body: {}", "x".repeat(500));
+        let formatted = format_parse_error(&raw);
+        // The ellipsis is 3 bytes but 1 char in UTF-8 — count
+        // chars so the assertion reads naturally.
+        assert!(formatted.chars().count() <= 220);
+        assert!(formatted.ends_with('…'));
     }
 
     #[test]
