@@ -354,6 +354,12 @@ impl CodeEditor {
         self.buffer.snapshot().text()
     }
 
+    /// Clear the dirty flag (the buffer is now in sync with
+    /// disk). Called by the save flow after a successful write.
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
     /// Total visual lines — used for the line-number gutter width
     /// and the list size.
     pub fn line_count(&self) -> usize {

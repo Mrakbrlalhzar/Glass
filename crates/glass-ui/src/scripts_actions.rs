@@ -232,22 +232,71 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
-        let Some(tab) = self.tabs.get_mut(active) else { return false };
-        if !matches!(tab.kind, crate::TabKind::ScriptEditor { .. }) {
+        let Some(tab) = self.tabs.get(active) else { return false };
+        let crate::TabKind::ScriptEditor { name } = &tab.kind else {
             return false;
-        }
-        let Some(editor) = tab.code_editor.as_mut() else { return false };
+        };
+        let script_name = name.clone();
 
         let k = &ev.keystroke;
-        // Collapse "platform" (cmd on macOS, ctrl elsewhere) into a
-        // single `cmd` flag — matches the convention used by
-        // text_input.rs.
         let cmd = k.modifiers.platform || k.modifiers.control;
         let shift = k.modifiers.shift;
+
+        // Intercept Cmd-S before forwarding to the editor — Save
+        // is a Shell-level action (writes through the open DB
+        // handle + bumps modified_unix in glass-db).
+        if cmd && !shift && k.key == "s" {
+            self.save_active_script_editor(&script_name, cx);
+            return true;
+        }
+
+        let Some(tab) = self.tabs.get_mut(active) else { return false };
+        let Some(editor) = tab.code_editor.as_mut() else { return false };
         let key_char = k.key_char.as_deref();
         editor.handle_key(&k.key, shift, cmd, key_char);
         cx.notify();
         true
+    }
+
+    /// Write the active script editor's buffer to disk via
+    /// `save_script_body`. Clears the dirty flag on success;
+    /// leaves the buffer alone on failure (with a log entry —
+    /// no toast UX yet).
+    pub(crate) fn save_active_script_editor(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active_tab else { return };
+        let body = match self
+            .tabs
+            .get(active)
+            .and_then(|t| t.code_editor.as_ref())
+        {
+            Some(e) => e.text(),
+            None => return,
+        };
+        match self.save_script_body(name, &body, cx) {
+            Ok(path) => {
+                tracing::info!(
+                    script = name,
+                    path = %path.display(),
+                    "saved script"
+                );
+                // Clear dirty so the tab label loses its `*`.
+                if let Some(editor) = self
+                    .tabs
+                    .get_mut(active)
+                    .and_then(|t| t.code_editor.as_mut())
+                {
+                    editor.mark_clean();
+                }
+                cx.notify();
+            }
+            Err(e) => {
+                tracing::warn!(script = name, error = e, "save failed");
+            }
+        }
     }
 
     /// Write `body` to the on-disk file for `name` and bump the
