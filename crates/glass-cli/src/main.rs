@@ -41,7 +41,8 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
                  use them through an MCP client.",
             )))
         }
-        Cmd::FridaAttach { .. }
+        Cmd::FridaSpawn { .. }
+        | Cmd::FridaAttach { .. }
         | Cmd::FridaDetach
         | Cmd::FridaStatus
         | Cmd::FridaLoadScript { .. }
@@ -64,6 +65,18 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
         Cmd::DeviceForceStop { serial, package } => Some(verbs::device_force_stop(
             serial.clone(),
             package.clone(),
+            format,
+        )),
+        Cmd::DevicePull { serial, remote, local } => Some(verbs::device_pull(
+            serial.clone(),
+            remote.clone(),
+            local.clone(),
+            format,
+        )),
+        Cmd::DevicePush { serial, local, remote } => Some(verbs::device_push(
+            serial.clone(),
+            local.clone(),
+            remote.clone(),
             format,
         )),
         Cmd::DeviceShell { serial, args } => {
@@ -333,6 +346,13 @@ enum Cmd {
     /// (MCP-only) Report what bundle (if any) is currently cached.
     BundleStatus,
 
+    /// (MCP-only) Spawn a target paused and attach to it.
+    FridaSpawn {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        program: String,
+    },
     /// (MCP-only) Attach to a Frida-instrumented process.
     FridaAttach {
         #[arg(long)]
@@ -393,6 +413,24 @@ enum Cmd {
         serial: String,
         #[arg(long)]
         package: String,
+    },
+    /// Pull a file from an Android device to the host.
+    DevicePull {
+        #[arg(long)]
+        serial: String,
+        #[arg(long)]
+        remote: String,
+        #[arg(long)]
+        local: PathBuf,
+    },
+    /// Push a local file to an Android device.
+    DevicePush {
+        #[arg(long)]
+        serial: String,
+        #[arg(long)]
+        local: PathBuf,
+        #[arg(long)]
+        remote: String,
     },
     /// Run an arbitrary `adb shell` command on a device.
     DeviceShell {
@@ -994,10 +1032,13 @@ fn main() -> Result<()> {
         | Cmd::FridaPostMessage { .. }
         | Cmd::FridaPollEvents
         | Cmd::FridaResume { .. }
+        | Cmd::FridaSpawn { .. }
         | Cmd::DeviceList
         | Cmd::DevicePidof { .. }
         | Cmd::DeviceLaunch { .. }
         | Cmd::DeviceForceStop { .. }
+        | Cmd::DevicePull { .. }
+        | Cmd::DevicePush { .. }
         | Cmd::DeviceShell { .. }
         | Cmd::Inspect { .. }
         | Cmd::Artifacts { .. }

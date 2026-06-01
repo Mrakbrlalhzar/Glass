@@ -1519,6 +1519,50 @@ pub fn device_force_stop(
     })
 }
 
+pub fn device_pull(
+    serial: String,
+    remote: String,
+    local: PathBuf,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let out = mgr
+            .android_pull(&serial, &remote, &local)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({
+            "output": out,
+            "local": local.display().to_string(),
+        }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let s = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        write!(out, "{s}")
+    })
+}
+
+pub fn device_push(
+    serial: String,
+    local: PathBuf,
+    remote: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let out = mgr
+            .android_push(&serial, &local, &remote)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({
+            "output": out,
+            "remote": remote,
+        }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let s = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        write!(out, "{s}")
+    })
+}
+
 pub fn device_shell(
     serial: String,
     args: Vec<String>,

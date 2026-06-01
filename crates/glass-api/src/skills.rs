@@ -907,6 +907,36 @@ pub fn catalog() -> SkillCatalog {
                 example: "glass device-force-stop --serial <s> --package com.example.app",
             },
             Skill {
+                name: "device-pull",
+                description: "Pull a file from an Android device to the host via `adb pull`. Paths under `/data/data/<pkg>/` need root or a debuggable package — this verb does not try to elevate.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","remote","local"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "remote": {"type":"string","description":"path on the device"},
+                        "local": {"type":"string","description":"path on the host (file or dest dir)"}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "device-pull {\"serial\":\"...\",\"remote\":\"/sdcard/Download/a.txt\",\"local\":\"/tmp/a.txt\"}",
+            },
+            Skill {
+                name: "device-push",
+                description: "Push a local file to an Android device via `adb push`.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","local","remote"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "local": {"type":"string"},
+                        "remote": {"type":"string"}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "device-push {\"serial\":\"...\",\"local\":\"/tmp/a.so\",\"remote\":\"/data/local/tmp/a.so\"}",
+            },
+            Skill {
                 name: "device-shell",
                 description: "Run an arbitrary `adb shell` command. `args` is the argv passed after `adb -s <serial> shell …`. Returns stdout.",
                 input_schema: json!({
@@ -924,6 +954,29 @@ pub fn catalog() -> SkillCatalog {
             // ---- Frida session lifecycle (MCP-only) ------------------
             // Frida sessions can only exist inside a stateful MCP server;
             // the CLI stubs print "MCP-only" and exit non-zero.
+            Skill {
+                name: "frida-spawn",
+                description: "Spawn a target by program name (Android package) on the device and attach to it paused. Returns the new pid. The process stays paused until `frida-resume` is called with this pid — load scripts in between to instrument startup code. Replaces any existing session.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["program"],
+                    "properties": {
+                        "host": {"type":"string","description":"host:port (default 127.0.0.1:27042)"},
+                        "program": {"type":"string","description":"package name on Android, executable path elsewhere"}
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "spawned": {"type":"boolean"},
+                        "host": {"type":"string"},
+                        "program": {"type":"string"},
+                        "pid": {"type":"integer"},
+                        "paused": {"type":"boolean"}
+                    }
+                }),
+                example: "frida-spawn {\"program\":\"com.example.app\"}",
+            },
             Skill {
                 name: "frida-attach",
                 description: "Attach to a Frida-instrumented process. `host` is a host:port reachable from the dev machine — for gadget mode use `127.0.0.1:27042` after `adb forward tcp:27042 tcp:27042`. Replaces any prior session. Returns the agent version + OS when the gadget surfaces them.",

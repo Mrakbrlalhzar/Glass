@@ -193,6 +193,32 @@ impl DeviceManager {
         }
     }
 
+    /// Pull a file from an Android device to the host.
+    pub fn android_pull(
+        &self,
+        serial: &str,
+        remote: &str,
+        local: &std::path::Path,
+    ) -> Result<String, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.pull(serial, remote, local),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Push a local file to an Android device.
+    pub fn android_push(
+        &self,
+        serial: &str,
+        local: &std::path::Path,
+        remote: &str,
+    ) -> Result<String, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.push(serial, local, remote),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
     /// Run an arbitrary `adb shell` command and return stdout.
     pub fn android_shell(
         &self,

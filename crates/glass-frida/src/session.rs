@@ -49,6 +49,16 @@ enum Command {
         pid: u32,
         reply: mpsc::Sender<Result<AttachReport, String>>,
     },
+    /// Spawn a process on the device in the paused state, then
+    /// attach to it. The caller gets back the new pid; the
+    /// session is paused until `Resume`. Use this when you
+    /// need to instrument code that runs before / during app
+    /// startup — `monkey` + `attach` always races startup.
+    SpawnRemote {
+        host: String,
+        program: String,
+        reply: mpsc::Sender<Result<SpawnReport, String>>,
+    },
     CreateScript {
         id: ScriptId,
         name: String,
@@ -80,6 +90,14 @@ enum Command {
     /// Tell the actor to shut down cleanly. Drops everything,
     /// then exits the loop. Used when the dock closes.
     Shutdown,
+}
+
+/// Result of [`Session::spawn_remote`]. The new process is
+/// already attached but paused — call [`Session::resume`]
+/// (with this pid) once instrumentation is loaded.
+#[derive(Clone, Debug)]
+pub struct SpawnReport {
+    pub pid: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +172,27 @@ impl Session {
     /// events back to the feature that owns the script.
     pub fn alloc_script_id(&self) -> ScriptId {
         self.next_script_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Spawn `program` on the device in the paused state and
+    /// attach to the new process. The returned pid stays
+    /// paused until [`Session::resume`] is called against it.
+    /// On Android `program` is a package name; frida-core
+    /// resolves it to the launcher activity.
+    pub fn spawn_remote(
+        &self,
+        host: impl Into<String>,
+        program: impl Into<String>,
+    ) -> Result<SpawnReport, String> {
+        let (tx, rx) = mpsc::channel();
+        self.cmd_tx
+            .send(Command::SpawnRemote {
+                host: host.into(),
+                program: program.into(),
+                reply: tx,
+            })
+            .map_err(|_| "session actor dead".to_string())?;
+        rx.recv().map_err(|_| "actor dropped reply".to_string())?
     }
 
     pub fn attach_remote(
@@ -347,6 +386,9 @@ fn drain_commands_with_error(cmd_rx: mpsc::Receiver<Command>, msg: &str) {
             Command::AttachRemote { reply, .. } => {
                 let _ = reply.send(Err(msg.to_string()));
             }
+            Command::SpawnRemote { reply, .. } => {
+                let _ = reply.send(Err(msg.to_string()));
+            }
             Command::CreateScript { reply, .. } => {
                 let _ = reply.send(Err(msg.to_string()));
             }
@@ -511,6 +553,103 @@ fn handle_command(
                 agent_version: None,
                 os: None,
             }));
+        }
+        Command::SpawnRemote { host, program, reply } => {
+            // Drop any prior session before spawning a new one.
+            *session = None;
+            scripts.clear();
+            let host_c = match CString::new(host.clone()) {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = reply.send(Err("invalid host string".into()));
+                    return true;
+                }
+            };
+            let program_c = match CString::new(program.clone()) {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = reply.send(Err("invalid program string".into()));
+                    return true;
+                }
+            };
+            unsafe {
+                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let device = frida_sys::frida_device_manager_add_remote_device_sync(
+                    mgr.ptr,
+                    host_c.as_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut err,
+                );
+                if !err.is_null() || device.is_null() {
+                    let _ = reply.send(Err(format!(
+                        "add_remote_device {host}: error"
+                    )));
+                    if !err.is_null() {
+                        frida_sys::g_clear_error(&mut err);
+                    }
+                    return true;
+                }
+                // Spawn with default options — frida-core handles
+                // Android package resolution itself (`program`
+                // can be a package name on Android).
+                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let opts = frida_sys::frida_spawn_options_new();
+                let pid = frida_sys::frida_device_spawn_sync(
+                    device,
+                    program_c.as_ptr(),
+                    opts,
+                    std::ptr::null_mut(),
+                    &mut err,
+                );
+                frida_sys::frida_unref(opts as _);
+                if !err.is_null() || pid == 0 {
+                    frida_sys::frida_unref(device as _);
+                    if !err.is_null() {
+                        frida_sys::g_clear_error(&mut err);
+                    }
+                    let _ = reply.send(Err(format!(
+                        "spawn {program}: error"
+                    )));
+                    return true;
+                }
+                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let sess_ptr = frida_sys::frida_device_attach_sync(
+                    device,
+                    pid,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut err,
+                );
+                if !err.is_null() || sess_ptr.is_null() {
+                    // Best-effort kill so we don't leave a paused
+                    // process orphaned on the device.
+                    let mut kill_err: *mut frida_sys::GError =
+                        std::ptr::null_mut();
+                    frida_sys::frida_device_kill_sync(
+                        device,
+                        pid,
+                        std::ptr::null_mut(),
+                        &mut kill_err,
+                    );
+                    if !kill_err.is_null() {
+                        frida_sys::g_clear_error(&mut kill_err);
+                    }
+                    frida_sys::frida_unref(device as _);
+                    if !err.is_null() {
+                        frida_sys::g_clear_error(&mut err);
+                    }
+                    let _ = reply.send(Err(format!(
+                        "attach pid {pid} after spawn: error"
+                    )));
+                    return true;
+                }
+                *session = Some(SessionHolder {
+                    ptr: sess_ptr,
+                    device_ptr: device,
+                });
+                let _ = reply.send(Ok(SpawnReport { pid }));
+            }
         }
         Command::CreateScript {
             id,

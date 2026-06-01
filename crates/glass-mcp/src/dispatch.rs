@@ -556,6 +556,45 @@ pub(crate) fn call(
                 "os": os,
             })
         }
+        "frida-spawn" => {
+            // Spawn a target by program name (package on Android)
+            // and attach to it paused. Returns the new pid; call
+            // `frida-load-script` to set up instrumentation, then
+            // `frida-resume` with the same pid to let it run.
+            let host = opt_str(args, "host")
+                .unwrap_or_else(|| "127.0.0.1:27042".to_string());
+            let program = require_str(args, "program")?;
+            // Tear down any prior session first.
+            {
+                let mut st = state.lock();
+                if let Some(prev) = st.frida.take() {
+                    let _ = prev.session.detach();
+                    prev.session.shutdown();
+                }
+            }
+            let session = glass_frida::Session::spawn();
+            let report = session
+                .spawn_remote(host.clone(), program.clone())
+                .map_err(DispatchError::Other)?;
+            let pid = report.pid;
+            {
+                let mut st = state.lock();
+                st.frida = Some(crate::state::FridaAttached {
+                    session,
+                    host: host.clone(),
+                    pid,
+                    agent_version: None,
+                    os: None,
+                });
+            }
+            json!({
+                "spawned": true,
+                "host": host,
+                "program": program,
+                "pid": pid,
+                "paused": true,
+            })
+        }
         "frida-detach" => {
             let prev = { state.lock().frida.take() };
             let had = prev.is_some();
@@ -697,6 +736,29 @@ pub(crate) fn call(
                 .android_force_stop(&serial, &package)
                 .map_err(|e| DispatchError::Other(e.to_string()))?;
             json!({ "output": out })
+        }
+        "device-pull" => {
+            // `adb pull <remote> <local>`. Note paths under
+            // `/data/data/<pkg>/` need root or a debuggable
+            // package; this verb doesn't try to elevate.
+            let serial = require_str(args, "serial")?;
+            let remote = require_str(args, "remote")?;
+            let local = PathBuf::from(require_str(args, "local")?);
+            let mgr = glass_device::DeviceManager::new();
+            let out = mgr
+                .android_pull(&serial, &remote, &local)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "output": out, "local": local.display().to_string() })
+        }
+        "device-push" => {
+            let serial = require_str(args, "serial")?;
+            let local = PathBuf::from(require_str(args, "local")?);
+            let remote = require_str(args, "remote")?;
+            let mgr = glass_device::DeviceManager::new();
+            let out = mgr
+                .android_push(&serial, &local, &remote)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "output": out, "remote": remote })
         }
         "device-shell" => {
             // Run an arbitrary `adb shell` command. `args` is

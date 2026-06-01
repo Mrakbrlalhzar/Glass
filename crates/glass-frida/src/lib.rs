@@ -31,7 +31,7 @@ pub use injection::{
     PlanWarning,
 };
 pub use patch::{apply_plan, PatchError, GADGET_LIBRARY_NAME};
-pub use session::{AttachReport, ScriptId, Session, SessionEvent};
+pub use session::{AttachReport, ScriptId, Session, SessionEvent, SpawnReport};
 pub use trace_js::{
     build_bridged_script, render_hook_script, render_trace_script, HookBody, JsRenderError,
 };

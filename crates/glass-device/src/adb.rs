@@ -494,6 +494,31 @@ impl AdbBackend {
         .map_err(crate::DeviceError::Backend)
     }
 
+    /// Pull a file from the device to the host. Thin wrapper
+    /// around `adb pull <remote> <local>`. Note that paths
+    /// under `/data/data/<pkg>/` are only readable by the
+    /// shell user on rooted devices, or when the package is
+    /// debuggable (in which case `run-as <pkg> cat` is an
+    /// alternative). Returns combined stdout+stderr.
+    pub fn pull(
+        &self,
+        serial: &str,
+        remote: &str,
+        local: &Path,
+    ) -> Result<String, crate::DeviceError> {
+        let local_str = local.to_str().ok_or_else(|| {
+            crate::DeviceError::Backend(format!(
+                "non-UTF-8 local path: {}",
+                local.display(),
+            ))
+        })?;
+        run_capture_combined(
+            &self.binary,
+            &["-s", serial, "pull", remote, local_str],
+        )
+        .map_err(crate::DeviceError::Backend)
+    }
+
     /// Start `frida-server` on a rooted device, detached so it
     /// survives the adb shell closing. Requires `su` on the
     /// device (Magisk and most root toolchains expose it on
