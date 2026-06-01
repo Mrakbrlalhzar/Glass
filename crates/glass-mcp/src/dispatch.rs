@@ -20,24 +20,78 @@ use crate::DispatchError;
 
 type Result<T> = std::result::Result<T, DispatchError>;
 
-pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
+pub(crate) fn call(
+    name: &str,
+    args: &Value,
+    state: &crate::state::StateHandle,
+) -> Result<String> {
     let start = Instant::now();
     let data: Value = match name {
+        // ---- Stateful bundle lifecycle ----------------------------
+        "bundle-open" => {
+            // Open and cache a bundle for subsequent calls.
+            // Returns a small summary (kind + label + source_path
+            // + artifact count) — the full inspect data is one
+            // verb away. Replaces any previously-open bundle.
+            let path = require_path(args)?;
+            let bundle = std::sync::Arc::new(glass_api::open(&path)?);
+            let inspection = bundle.inspect();
+            {
+                let mut st = state.lock();
+                st.bundle = Some(crate::state::OpenBundle {
+                    source_path: path.clone(),
+                    bundle,
+                });
+            }
+            json!({
+                "source_path": path.display().to_string(),
+                "kind": inspection.kind,
+                "label": inspection.label,
+                "artifact_count": inspection.artifacts.len(),
+                "bundle_id": inspection.bundle_id,
+            })
+        }
+        "bundle-close" => {
+            // Drop the cached bundle. Subsequent path-bearing verbs
+            // re-parse fresh. No-op when nothing is open.
+            let had = {
+                let mut st = state.lock();
+                let had = st.bundle.is_some();
+                st.bundle = None;
+                had
+            };
+            json!({ "closed": had })
+        }
+        "bundle-status" => {
+            // Report what (if anything) is currently open. Useful
+            // for an LLM to check before issuing path-less follow-up
+            // verbs once those land.
+            let st = state.lock();
+            match st.bundle.as_ref() {
+                Some(b) => json!({
+                    "open": true,
+                    "source_path": b.source_path.display().to_string(),
+                    "label": b.bundle.label(),
+                }),
+                None => json!({ "open": false }),
+            }
+        }
+
         "inspect" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             json_of(&bundle.inspect())?
         }
         "artifacts" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             json_of(&bundle.artifacts())?
         }
         "sections" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = opt_str(args, "artifact");
             json_of(&bundle.sections(artifact.as_deref()))?
         }
         "binary-info" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             json_of(&bundle.binary_info())?
         }
         "hash" => {
@@ -45,7 +99,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&glass_api::hash_file(&path)?)?
         }
         "symbols" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = opt_str(args, "artifact");
             let filter = opt_str(args, "filter");
             let kind = opt_str(args, "kind").as_deref().and_then(parse_kind);
@@ -59,7 +113,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&bundle.symbols(query))?
         }
         "symbol-at" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let addr = require_hex_u64(args, "addr")?;
             json_of(&bundle.symbol_at(&artifact, addr))?
@@ -69,7 +123,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&glass_api::demangle(&name))?
         }
         "disasm" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let section = opt_str(args, "section");
             let limit = opt_usize(args, "limit");
@@ -87,24 +141,24 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&glass_api::decode_word(word, addr))?
         }
         "cfg-of" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let func = require_str(args, "func")?;
             json_of(&bundle.cfg(&artifact, &func)?)?
         }
         "calls-from" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let func = require_str(args, "func")?;
             json_of(&bundle.calls_from(&artifact, &func)?)?
         }
         "classes" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let package = opt_str(args, "package");
             json_of(&bundle.classes(package.as_deref()))?
         }
         "types" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = opt_str(args, "artifact");
             let package = opt_str(args, "package");
             let kind = match opt_str(args, "kind") {
@@ -127,7 +181,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             )?)?
         }
         "type" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let name = require_str(args, "name")?;
             let raw = args
@@ -186,56 +240,56 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&glass_api::enabled_scripts(&path)?)?
         }
         "smali" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let class = require_str(args, "class")?;
             json_of(&bundle.smali(&class)?)?
         }
         "methods" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let class = require_str(args, "class")?;
             json_of(&bundle.methods(&class)?)?
         }
         "fields" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let class = require_str(args, "class")?;
             json_of(&bundle.fields(&class)?)?
         }
         "method-calls" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let class = require_str(args, "class")?;
             let method = require_str(args, "method")?;
             json_of(&bundle.method_calls(&class, &method)?)?
         }
         "xref-addr" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let addr = require_hex_u64(args, "addr")?;
             json_of(&bundle.xref_addr(&artifact, addr)?)?
         }
         "callers" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let symbol = require_str(args, "symbol")?;
             json_of(&bundle.callers(&artifact, &symbol)?)?
         }
         "dex-callers" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let method = require_str(args, "method")?;
             json_of(&bundle.dex_callers(&method))?
         }
         "field-refs" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let field = require_str(args, "field")?;
             json_of(&bundle.field_refs(&field))?
         }
         "search" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let query = require_str(args, "query")?;
             let limit = opt_usize(args, "limit");
             json_of(&bundle.search(&query, limit))?
         }
         "strings" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let min = opt_usize(args, "min");
             let limit = opt_usize(args, "limit");
@@ -301,7 +355,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&glass_api::clear_annotation(&path, key_args)?)?
         }
         "bin-search" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let pattern = require_str(args, "pattern")?;
             let section = opt_str(args, "section");
@@ -309,7 +363,7 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
             json_of(&bundle.bin_search(&artifact, &pattern, section.as_deref(), limit)?)?
         }
         "insn-search" => {
-            let bundle = open(args)?;
+            let bundle = open(args, state)?;
             let artifact = require_str(args, "artifact")?;
             let pattern = require_str(args, "pattern")?;
             let section = opt_str(args, "section");
@@ -462,9 +516,31 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
 
 // ---- argument helpers ----------------------------------------------------
 
-fn open(args: &Value) -> Result<glass_api::Bundle> {
+/// Resolve the bundle for a path-bearing verb. Checks the
+/// stateful cache first — returning the shared `Arc<Bundle>`
+/// when the same path is already open — and falls back to a
+/// fresh `glass_api::open` otherwise. Newly-opened bundles are
+/// cached in state so the next path-using verb reuses them.
+fn open(
+    args: &Value,
+    state: &crate::state::StateHandle,
+) -> Result<std::sync::Arc<glass_api::Bundle>> {
     let path = require_path(args)?;
-    Ok(glass_api::open(path)?)
+    // Quick check: bundle for this path already cached?
+    if let Some(open) = state.lock().bundle_for(&path) {
+        return Ok(open.bundle);
+    }
+    // Otherwise open afresh and cache it. Multiple concurrent
+    // calls could race here; the loser's open is discarded but
+    // no soundness issue since `glass_api::open` is pure work
+    // on a file. Cheaper than holding the mutex across the open.
+    let bundle = std::sync::Arc::new(glass_api::open(&path)?);
+    let mut st = state.lock();
+    st.bundle = Some(crate::state::OpenBundle {
+        source_path: path,
+        bundle: bundle.clone(),
+    });
+    Ok(bundle)
 }
 
 fn require_path(args: &Value) -> Result<PathBuf> {

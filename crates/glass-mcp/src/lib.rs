@@ -16,6 +16,7 @@
 //! and matches on `params.name` in [`dispatch::call`].
 
 mod dispatch;
+mod state;
 
 use std::sync::Arc;
 
@@ -73,7 +74,7 @@ async fn run() -> SdkResult<()> {
     };
 
     let transport = StdioTransport::new(TransportOptions::default())?;
-    let handler = GlassHandler.to_mcp_server_handler();
+    let handler = GlassHandler::new().to_mcp_server_handler();
     let options = McpServerOptions {
         server_details: server_info,
         transport,
@@ -86,7 +87,21 @@ async fn run() -> SdkResult<()> {
     server.start().await
 }
 
-struct GlassHandler;
+/// Stateful handler — owns the `McpState` container so bundles +
+/// (future) Frida sessions survive across tool calls. The Arc
+/// is cheap to clone into each call's scope so we don't hold
+/// the mutex across the dispatch.
+struct GlassHandler {
+    state: state::StateHandle,
+}
+
+impl GlassHandler {
+    fn new() -> Self {
+        Self {
+            state: state::new_state(),
+        }
+    }
+}
 
 #[async_trait]
 impl ServerHandler for GlassHandler {
@@ -111,7 +126,7 @@ impl ServerHandler for GlassHandler {
     ) -> Result<CallToolResult, CallToolError> {
         let args = params.arguments.unwrap_or_default();
         let args_value = serde_json::Value::Object(args);
-        match dispatch::call(&params.name, &args_value) {
+        match dispatch::call(&params.name, &args_value, &self.state) {
             Ok(json) => Ok(CallToolResult {
                 content: vec![TextContent::new(json, None, None).into()],
                 is_error: None,

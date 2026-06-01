@@ -27,3 +27,16 @@ Also update `docs/cli-api.md` to keep the user-facing reference in
 sync. Skipping the catalog or the MCP dispatcher is the failure
 mode that bites here — the CLI keeps working while LLM-driven
 tooling silently loses the verb.
+
+### MCP-only verbs
+
+A handful of verbs are inherently stateful (bundle-open /
+bundle-close / bundle-status, Frida session control). They live in
+the MCP dispatcher and the skill catalog but have no CLI semantic
+— the CLI is one-shot and re-opens per call. For these:
+
+1. Skill catalog entry: present, marked MCP-only in the description.
+2. MCP dispatcher: full implementation.
+3. CLI: a stub variant that prints "this verb is MCP-only" and
+   exits non-zero, so users who try it get a clear pointer.
+4. docs/cli-api.md: a short paragraph listing them.

@@ -34,6 +34,13 @@ impl From<SymbolKindArg> for glass_api::SymbolKindName {
 /// regular match below dispatches.
 fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
     match cmd {
+        Cmd::BundleOpen { .. } | Cmd::BundleClose | Cmd::BundleStatus => {
+            Some(Err(anyhow::anyhow!(
+                "bundle-open / bundle-close / bundle-status are MCP-only verbs — \
+                 the CLI is stateless and re-opens per call. Run `glass mcp` and \
+                 use them through an MCP client.",
+            )))
+        }
         Cmd::Inspect { path } => Some(verbs::inspect(path.clone(), format)),
         Cmd::Artifacts { path } => Some(verbs::artifacts(path.clone(), format)),
         Cmd::Sections { path, artifact } => {
@@ -286,6 +293,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    // ----- MCP-only verbs (no CLI semantic) --------------------------
+    // These three exist in the skill catalog so MCP clients see them,
+    // but they're inherently stateful — the CLI is one-shot. Stubs
+    // here print a clear pointer so users who try them get redirected
+    // to `glass mcp`.
+    /// (MCP-only) Open a bundle and cache it for subsequent calls.
+    BundleOpen { path: PathBuf },
+    /// (MCP-only) Drop the cached bundle.
+    BundleClose,
+    /// (MCP-only) Report what bundle (if any) is currently cached.
+    BundleStatus,
+
     // ----- Automation verbs (structured JSON output) -----------------
     /// Inspect a bundle: kind, label, content hash, artifact list.
     Inspect { path: PathBuf },
@@ -867,7 +886,10 @@ fn main() -> Result<()> {
         }
         // Automation verbs are already handled by automation_dispatch
         // above; this arm exists only so the match is exhaustive.
-        Cmd::Inspect { .. }
+        Cmd::BundleOpen { .. }
+        | Cmd::BundleClose
+        | Cmd::BundleStatus
+        | Cmd::Inspect { .. }
         | Cmd::Artifacts { .. }
         | Cmd::Sections { .. }
         | Cmd::BinaryInfo { .. }

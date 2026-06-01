@@ -91,6 +91,57 @@ pub fn catalog() -> SkillCatalog {
     SkillCatalog {
         version: env!("CARGO_PKG_VERSION"),
         skills: vec![
+            // ---- Stateful bundle lifecycle ---------------------------
+            // The MCP server caches the open bundle across calls so
+            // subsequent verbs don't re-parse. These three verbs
+            // make the lifecycle explicit. Path-bearing verbs
+            // (`inspect`, `symbols`, etc.) still work standalone —
+            // they reuse the cache when the same path is already
+            // open, otherwise open + cache it themselves.
+            Skill {
+                name: "bundle-open",
+                description: "Open a bundle and cache it for subsequent calls. Returns kind / label / artifact_count / bundle_id. Replaces any previously-open bundle.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": { "path": path_arg() }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type":"string"},
+                        "kind": {"type":"string"},
+                        "label": {"type":"string"},
+                        "artifact_count": {"type":"integer"},
+                        "bundle_id": {"type":["string","null"]}
+                    }
+                }),
+                example: "glass bundle-open ./app.apk",
+            },
+            Skill {
+                name: "bundle-close",
+                description: "Drop the cached bundle. Subsequent path-bearing verbs re-parse fresh. No-op when nothing is open.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": { "closed": {"type":"boolean"} }
+                }),
+                example: "glass bundle-close",
+            },
+            Skill {
+                name: "bundle-status",
+                description: "Report what bundle (if any) is currently cached. Returns `{open: true, source_path, label}` or `{open: false}`.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass bundle-status",
+            },
+
             // ---- Bundle inspection -----------------------------------
             Skill {
                 name: "inspect",

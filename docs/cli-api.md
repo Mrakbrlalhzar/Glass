@@ -49,6 +49,20 @@ name when unambiguous; otherwise pass `name(descriptor)`.
 | `--fresh`   | (GUI only) ignore persisted tab / expansion state      |
 | `--help`    | Show the subcommand list                               |
 
+## MCP-only verbs
+
+A few verbs only make sense inside a long-lived MCP session,
+where state survives across calls. They appear in the skill
+catalog so MCP clients can use them, but the CLI is one-shot
+and re-opens per call — so these print "MCP-only" and exit
+non-zero:
+
+- `bundle-open <path>` — cache a bundle for subsequent calls.
+- `bundle-close` — drop the cache.
+- `bundle-status` — report what's currently open.
+
+Run `glass mcp` and invoke them through an MCP client.
+
 ## Bundle inspection
 
 ### `inspect <path>` — top-level summary
