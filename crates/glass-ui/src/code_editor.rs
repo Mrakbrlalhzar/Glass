@@ -556,9 +556,16 @@ impl CodeEditor {
             (local_x - self.gutter_width_px() - TEXT_INSET_PX).max(0.0) + h;
 
         // Visible-row index → buffer-row index via the list's
-        // logical scroll top.
+        // logical scroll top. ListState exposes the top item +
+        // a sub-row pixel offset (the slice of the first row
+        // that's been scrolled out of view); the row at the
+        // top of the viewport is `top.item_ix`, and the
+        // visible y=0 corresponds to buffer y = -offset_in_item
+        // relative to that row's top edge.
         let top = self.list_state.logical_scroll_top();
-        let visible_row = (local_y / LINE_HEIGHT) as u32;
+        let offset_in_first: f32 = top.offset_in_item.into();
+        let row_pixels = local_y + offset_in_first;
+        let visible_row = (row_pixels / LINE_HEIGHT) as u32;
         let row = top.item_ix as u32 + visible_row;
 
         let snap = self.buffer.snapshot();
