@@ -267,6 +267,56 @@ impl Shell {
             return true;
         }
 
+        // Cmd-C / Cmd-X / Cmd-V — system clipboard. handle_key
+        // ignores these (it returned false on cmd+letter except
+        // Cmd-A), so we intercept here and call the buffer's
+        // copy/cut/paste primitives.
+        if cmd && !shift {
+            match k.key.as_str() {
+                "c" => {
+                    let copied = self
+                        .tabs
+                        .get(active)
+                        .and_then(|t| t.code_editor.as_ref())
+                        .and_then(|e| e.selected_text());
+                    if let Some(s) = copied {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+                    }
+                    return true;
+                }
+                "x" => {
+                    let cut = self
+                        .tabs
+                        .get_mut(active)
+                        .and_then(|t| t.code_editor.as_mut())
+                        .and_then(|e| e.cut_selection());
+                    if let Some(s) = cut {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+                        cx.notify();
+                    }
+                    return true;
+                }
+                "v" => {
+                    let pasted: Option<String> = cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text());
+                    if let Some(text) = pasted {
+                        if let Some(editor) = self
+                            .tabs
+                            .get_mut(active)
+                            .and_then(|t| t.code_editor.as_mut())
+                        {
+                            if editor.paste_text(&text) {
+                                cx.notify();
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         let Some(tab) = self.tabs.get_mut(active) else { return false };
         let Some(editor) = tab.code_editor.as_mut() else { return false };
         let key_char = k.key_char.as_deref();

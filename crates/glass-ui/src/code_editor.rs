@@ -362,6 +362,53 @@ impl CodeEditor {
         self.buffer.snapshot().text()
     }
 
+    /// Text inside the current selection. Returns `None` when
+    /// there's no selection (just a caret). The Shell calls this
+    /// to feed the system clipboard.
+    pub fn selected_text(&self) -> Option<String> {
+        let (a, b) = self.selection_range();
+        if a == b {
+            return None;
+        }
+        let snap = self.buffer.snapshot();
+        let mut s = String::with_capacity(b - a);
+        for chunk in snap.as_rope().chunks_in_range(a..b) {
+            s.push_str(chunk);
+        }
+        Some(s)
+    }
+
+    /// Cut the current selection out of the buffer. Returns the
+    /// removed text so the Shell can place it on the clipboard.
+    /// `None` when there's no selection — no-op.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let (a, b) = self.selection_range();
+        if a == b {
+            return None;
+        }
+        let s = {
+            let snap = self.buffer.snapshot();
+            let mut s = String::with_capacity(b - a);
+            for chunk in snap.as_rope().chunks_in_range(a..b) {
+                s.push_str(chunk);
+            }
+            s
+        };
+        self.apply_edit(a..b, "");
+        Some(s)
+    }
+
+    /// Insert `text` at the caret (or replace the selection
+    /// when one is active). Used by the paste flow. Returns
+    /// true when the buffer changed.
+    pub fn paste_text(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        self.insert_str(text);
+        true
+    }
+
     /// Clear the dirty flag (the buffer is now in sync with
     /// disk). Called by the save flow after a successful write.
     pub fn mark_clean(&mut self) {
@@ -870,6 +917,66 @@ mod tests {
         e.handle_key("left", true, false, None);
         let (a, b) = e.selection_range();
         assert_eq!((a, b), (1, 3));
+    }
+
+    #[test]
+    fn selected_text_returns_only_selection() {
+        let mut e = CodeEditor::from_string("hello world");
+        // No selection yet → None.
+        assert_eq!(e.selected_text(), None);
+        // Select chars 6..11 ("world"): cursor at end then
+        // shift-home then... easier: move to 6 then shift-end.
+        for _ in 0..6 {
+            e.handle_key("right", false, false, None);
+        }
+        e.handle_key("end", true, false, None);
+        assert_eq!(e.selected_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn cut_removes_selection_and_returns_text() {
+        let mut e = CodeEditor::from_string("hello world");
+        for _ in 0..6 {
+            e.handle_key("right", false, false, None);
+        }
+        e.handle_key("end", true, false, None);
+        let cut = e.cut_selection();
+        assert_eq!(cut.as_deref(), Some("world"));
+        assert_eq!(e.text(), "hello ");
+        assert_eq!(e.cursor(), 6);
+        assert!(e.dirty);
+    }
+
+    #[test]
+    fn cut_with_no_selection_is_noop() {
+        let mut e = CodeEditor::from_string("hello");
+        assert_eq!(e.cut_selection(), None);
+        assert_eq!(e.text(), "hello");
+        assert!(!e.dirty);
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor() {
+        let mut e = CodeEditor::from_string("ac");
+        e.handle_key("right", false, false, None);
+        assert!(e.paste_text("b"));
+        assert_eq!(e.text(), "abc");
+        assert_eq!(e.cursor(), 2);
+    }
+
+    #[test]
+    fn paste_replaces_selection() {
+        let mut e = CodeEditor::from_string("alpha beta gamma");
+        // Select "beta" (chars 6..10).
+        for _ in 0..6 {
+            e.handle_key("right", false, false, None);
+        }
+        for _ in 0..4 {
+            e.handle_key("right", true, false, None);
+        }
+        assert_eq!(e.selected_text().as_deref(), Some("beta"));
+        assert!(e.paste_text("PASTED"));
+        assert_eq!(e.text(), "alpha PASTED gamma");
     }
 
     #[test]
