@@ -268,6 +268,12 @@ pub enum FollowTarget {
         leaf: crate::LeafId,
         line: usize,
     },
+    /// Smali class by leaf — opens (or focuses) the class's
+    /// existing tab. Used by the code editor's class-link
+    /// follow path.
+    SmaliClass {
+        leaf: crate::LeafId,
+    },
 }
 
 pub fn render_context_menu(

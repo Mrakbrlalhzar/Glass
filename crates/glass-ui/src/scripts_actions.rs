@@ -22,6 +22,55 @@ use gpui::{Context, MouseDownEvent, Window};
 
 use crate::Shell;
 
+/// Resolved kind for a cmd-clickable / right-click-Follow-able
+/// token in a smali editor row. Same shape the existing
+/// SmaliClass viewer's click handlers branch on.
+#[derive(Clone, Debug)]
+pub(crate) enum SmaliLinkTarget {
+    /// `Class;->name(sig)ret` reference — navigates to the
+    /// declaration via `bundle.method_lines`.
+    Method { target_text: String },
+    /// `Lcom/Foo;` reference — navigates by opening the smali
+    /// class leaf.
+    Class { class_jni: String },
+}
+
+/// Walk the tokens of `line_text` and return the link target
+/// covering the column `col_in_row` (in bytes), if any. Method
+/// links beat class links when both happen to overlap.
+pub(crate) fn smali_link_target_at_col(
+    line_text: &str,
+    col_in_row: usize,
+) -> Option<SmaliLinkTarget> {
+    let tokens = crate::smali::tokenize_smali_line(line_text);
+    let mut at = 0usize;
+    for tok in tokens {
+        let tok_len = tok.text.len();
+        let end = at + tok_len;
+        if col_in_row >= at && col_in_row < end {
+            match tok.kind {
+                glass_arch_arm::ChunkKind::MethodName => {
+                    if let Some(t) = tok.target_text {
+                        return Some(SmaliLinkTarget::Method {
+                            target_text: t,
+                        });
+                    }
+                }
+                glass_arch_arm::ChunkKind::Type => {
+                    if let Some(jni) = crate::smali::extract_class_jni(&tok.text) {
+                        return Some(SmaliLinkTarget::Class {
+                            class_jni: jni.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        at = end;
+    }
+    None
+}
+
 impl Shell {
     /// Create a fresh `untitled-N.js` and open it in the editor.
     pub(crate) fn create_new_script(&mut self, cx: &mut Context<Self>) {
@@ -365,36 +414,46 @@ impl Shell {
             (row, (off - line_start) as usize, text)
         };
 
-        // Walk tokens to find which one covers `col_in_row`.
-        let tokens = crate::smali::tokenize_smali_line(&line_text);
-        let mut at = 0usize;
-        let mut hit: Option<(String, String)> = None; // (display, target_text)
-        for tok in tokens {
-            let tok_len = tok.text.len();
-            let end = at + tok_len;
-            if col_in_row >= at
-                && col_in_row < end
-                && tok.kind == glass_arch_arm::ChunkKind::MethodName
-            {
-                if let Some(t) = tok.target_text {
-                    hit = Some((tok.text.clone(), t));
-                    break;
-                }
-            }
-            at = end;
-        }
+        // Walk tokens to find which one covers `col_in_row`,
+        // and classify it.
         let _ = row;
-        let Some((_display, target_text)) = hit else { return false };
+        let target = smali_link_target_at_col(&line_text, col_in_row);
+        let Some(target) = target else { return false };
+        self.follow_smali_link_target(target, cx)
+    }
 
-        // Resolve `target_text` against the bundle's
-        // method_lines map (same as the SmaliClass viewer).
-        let Some(bundle) = self.bundle() else { return false };
-        let Some((target_leaf, line_no)) = bundle.method_lines.get(&target_text).copied()
-        else {
-            return false;
-        };
-        self.goto_smali_method(target_leaf, line_no, cx);
-        true
+    /// Dispatch a resolved smali-link target. Used by cmd-click
+    /// and by the right-click menu's "Follow" item.
+    fn follow_smali_link_target(
+        &mut self,
+        target: SmaliLinkTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match target {
+            SmaliLinkTarget::Method { target_text } => {
+                let Some(bundle) = self.bundle() else { return false };
+                let Some((leaf, line_no)) = bundle
+                    .method_lines
+                    .get(&target_text)
+                    .copied()
+                else {
+                    return false;
+                };
+                self.goto_smali_method(leaf, line_no, cx);
+                true
+            }
+            SmaliLinkTarget::Class { class_jni } => {
+                let Some(bundle) = self.bundle() else { return false };
+                let Some(leaf) = bundle.resolve(&glass_db::TabState::SmaliClass {
+                    class_jni,
+                    scroll_line: 0,
+                }) else {
+                    return false;
+                };
+                self.open_leaf(leaf, cx);
+                true
+            }
+        }
     }
 
     /// Mouse-move while the left button is held — extend the
@@ -486,12 +545,19 @@ impl Shell {
         if let Some(crate::TabKind::SmaliEditor { artifact, class_jni }) =
             tab_kind.as_ref()
         {
+            // Try to find a follow-able link under the click —
+            // method ref or class type. If found, the "Follow"
+            // item is prepended *before* the generic copy/cut/
+            // paste so it reads as the primary action for the
+            // right-click.
+            let follow_target = self.code_editor_link_target_at_pos(pos);
             self.code_editor_smali_extra_items(
                 artifact,
                 class_jni,
                 click_row,
                 &buffer_text,
                 changed_at_row,
+                follow_target,
                 &mut items,
             );
         }
@@ -504,6 +570,33 @@ impl Shell {
             items,
         });
         cx.notify();
+    }
+
+    /// Resolve a smali link target (method ref or class type)
+    /// at the given window position. Returns None when the
+    /// position isn't over a follow-able token. Used by the
+    /// right-click menu builder to add a "Follow" item.
+    fn code_editor_link_target_at_pos(
+        &self,
+        pos: gpui::Point<gpui::Pixels>,
+    ) -> Option<SmaliLinkTarget> {
+        let active = self.active_tab?;
+        let editor = self.tabs.get(active)?.code_editor.as_ref()?;
+        let off = editor.offset_for_window_point(pos)?;
+        let snap = editor.buffer.snapshot();
+        let pt = snap.offset_to_point(off);
+        let row = pt.row;
+        let line_start = snap.point_to_offset(rope::Point::new(row, 0));
+        let line_end = if row == snap.max_point().row {
+            snap.len()
+        } else {
+            snap.point_to_offset(rope::Point::new(row + 1, 0)) - 1
+        };
+        let mut text = String::with_capacity(line_end - line_start);
+        for chunk in snap.as_rope().chunks_in_range(line_start..line_end) {
+            text.push_str(chunk);
+        }
+        smali_link_target_at_col(&text, (off - line_start) as usize)
     }
 
     /// Smali-specific context-menu builder: appends nav /
@@ -519,9 +612,60 @@ impl Shell {
         click_row: Option<u32>,
         buffer_text: &str,
         changed_at_row: bool,
+        follow_target: Option<SmaliLinkTarget>,
         items: &mut Vec<crate::context_menu::ContextMenuItem>,
     ) {
-        use crate::context_menu::ContextMenuItem;
+        use crate::context_menu::{ContextMenuItem, FollowTarget};
+
+        // Follow items first when a clickable target sits under
+        // the cursor — same convention the listing's right-click
+        // menu uses ("Follow" before generic copy / refs).
+        if let Some(target) = follow_target {
+            if let Some(bundle) = self.bundle() {
+                match target {
+                    SmaliLinkTarget::Method { target_text } => {
+                        if let Some((leaf, line)) =
+                            bundle.method_lines.get(&target_text).copied()
+                        {
+                            let display = target_text
+                                .split('(')
+                                .next()
+                                .unwrap_or(&target_text)
+                                .to_string();
+                            let label = gpui::SharedString::from(display);
+                            items.push(ContextMenuItem::Follow {
+                                target: FollowTarget::SmaliMethod { leaf, line },
+                                label: label.clone(),
+                            });
+                            items.push(ContextMenuItem::FollowInNewTab {
+                                target: FollowTarget::SmaliMethod { leaf, line },
+                                label,
+                            });
+                        }
+                    }
+                    SmaliLinkTarget::Class { class_jni: jni } => {
+                        if let Some(leaf) =
+                            bundle.resolve(&glass_db::TabState::SmaliClass {
+                                class_jni: jni.clone(),
+                                scroll_line: 0,
+                            })
+                        {
+                            let label = gpui::SharedString::from(
+                                crate::search::jni_to_dotted(&jni),
+                            );
+                            items.push(ContextMenuItem::Follow {
+                                target: FollowTarget::SmaliClass { leaf },
+                                label: label.clone(),
+                            });
+                            items.push(ContextMenuItem::FollowInNewTab {
+                                target: FollowTarget::SmaliClass { leaf },
+                                label,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Resolve "member at this row" up-front. Class-level
         // rows (no enclosing .method / .field) get neither
         // navigation nor revert items but still see the class-

@@ -160,6 +160,12 @@ impl Shell {
                 let _ = new_tab;
                 self.goto_smali_method(leaf, line, cx);
             }
+            FollowTarget::SmaliClass { leaf } => {
+                // Same as the method case: smali tabs dedupe per
+                // class, so a new-tab request would no-op anyway.
+                let _ = new_tab;
+                self.open_leaf(leaf, cx);
+            }
         }
     }
 

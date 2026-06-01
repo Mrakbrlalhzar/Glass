@@ -1545,10 +1545,21 @@ fn render_line_body(
                     b: (kind_rgb & 0xff) as f32 / 255.0,
                     a: 1.0,
                 };
-                let is_link = matches!(
-                    c.kind,
-                    glass_arch_arm::ChunkKind::MethodName
-                ) && c.target_text.is_some();
+                // Link-eligible tokens:
+                //   * MethodName with a target_text (the
+                //     tokeniser fills this for any `Class;->name(sig)ret`).
+                //   * Type tokens that contain a class JNI
+                //     (`L...;`) — primitives like `I` are not
+                //     links.
+                let is_link = match c.kind {
+                    glass_arch_arm::ChunkKind::MethodName => {
+                        c.target_text.is_some()
+                    }
+                    glass_arch_arm::ChunkKind::Type => {
+                        crate::smali::extract_class_jni(&c.text).is_some()
+                    }
+                    _ => false,
+                };
                 spans.push((at, at + len, colour, is_link));
                 at += len;
             }
