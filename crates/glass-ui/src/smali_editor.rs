@@ -89,6 +89,57 @@ impl Shell {
         cx.notify();
     }
 
+    /// Rewrite the open `SmaliEditor` buffer for
+    /// `(artifact, class_jni)` to match the current staged-or-
+    /// original text. Called by every revert path so the buffer
+    /// stays consistent — otherwise the next auto-stage would
+    /// just re-stage the in-editor (un-reverted) content.
+    ///
+    /// No-op when no editor is open for the class.
+    pub(crate) fn resync_smali_editor_buffer(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+    ) {
+        // Resolve the canonical body for this class — staged
+        // when there's a remaining edit, else the original
+        // lifted form.
+        let body = {
+            let Some(bundle) = self.bundle() else { return };
+            let key = (artifact.clone(), class_jni.to_string());
+            let Some(original) = bundle.smali_classes.get(&key) else { return };
+            match bundle.smali_edits.get(artifact, class_jni) {
+                Some(s) => s.modified.to_smali(),
+                None => original.to_smali(),
+            }
+        };
+
+        // Find the matching editor tab and replace its buffer
+        // content. CodeEditor doesn't expose a "set text"
+        // shortcut, but the rope-backed Buffer can replace its
+        // whole content via a single full-range edit.
+        let Some(tab) = self.tabs.iter_mut().find(|t| {
+            matches!(
+                &t.kind,
+                TabKind::SmaliEditor { artifact: a, class_jni: c }
+                    if a == artifact && c == class_jni
+            )
+        }) else {
+            return;
+        };
+        let Some(editor) = tab.code_editor.as_mut() else { return };
+        editor.replace_all_text(&body);
+        // The buffer now matches what's staged → drop dirty +
+        // recompute parsed model + tint. We don't need to call
+        // `auto_stage_if_changed` again; the bundle state is
+        // already where it should be.
+        editor.mark_clean();
+        editor.reparse_smali();
+        // Drop dropped-bundle borrow before refresh_changed_rows
+        // takes a new one.
+        self.refresh_changed_rows(artifact, class_jni);
+    }
+
     /// Refresh the `changed_rows` set on the named SmaliEditor's
     /// CodeEditor. Diffs each member (method / field) in the
     /// buffer against its original-lifted counterpart by rendering

@@ -816,6 +816,33 @@ impl CodeEditor {
         self.save_error = None;
     }
 
+    /// Replace the entire buffer with `text`. Used by the smali
+    /// editor's revert flow to push the canonical (staged-or-
+    /// original) text back into the editor after a revert
+    /// outside the editor — e.g. the Changes dialog's "Revert"
+    /// button. Resets cursor / selection to the start and
+    /// crucially does NOT bump `last_edit_at`: this isn't a
+    /// user edit and we don't want the auto-stage loop to
+    /// pick it up.
+    pub fn replace_all_text(&mut self, text: &str) {
+        let snap_len = self.buffer.snapshot().len();
+        self.buffer.edit([(0..snap_len, text)]);
+        self.cursor = 0;
+        self.selection_anchor = None;
+        self.desired_column = None;
+        self.save_error = None;
+        // `last_edit_at` deliberately untouched — see doc above.
+        // Updating cached_max_line_bytes + cached_row_count.
+        let snap = self.buffer.snapshot();
+        self.cached_row_count = snap.row_count() as usize;
+        self.cached_max_line_bytes = compute_max_line_bytes(&snap);
+        self.list_state = ListState::new(
+            self.cached_row_count,
+            ListAlignment::Top,
+            px(2000.),
+        );
+    }
+
     /// Surface a save / parse error to the user. Cleared on the
     /// next edit or the next successful save.
     pub fn set_save_error(&mut self, msg: impl Into<String>) {
@@ -842,6 +869,63 @@ impl CodeEditor {
         // GLYPH_WIDTH per digit (matches the body font) + 12px inset.
         n_digits * GLYPH_WIDTH + 12.0
     }
+}
+
+/// Return the `MemberId` covering buffer row `row`, if any.
+/// Uses the same line-prefix scan as `compute_changed_rows`.
+/// Returns `None` when the row is outside any `.method` / `.field`
+/// declaration (e.g. class-level header, blank lines between
+/// members).
+pub(crate) fn member_at_row(
+    buffer_text: &str,
+    row: u32,
+) -> Option<MemberId> {
+    let row = row as usize;
+    let lines: Vec<&str> = buffer_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if let Some(rest) = trimmed.strip_prefix(".method ") {
+            let block_start = i;
+            let mut end = i + 1;
+            while end < lines.len() && lines[end].trim_start() != ".end method" {
+                end += 1;
+            }
+            let block_end = end.min(lines.len().saturating_sub(1));
+            if row >= block_start && row <= block_end {
+                let key = method_key_from_decl(rest)?;
+                let (name, sig) = split_method_key(&key)?;
+                return Some(MemberId::Method {
+                    name,
+                    signature_jni: sig,
+                });
+            }
+            i = block_end + 1;
+            continue;
+        }
+        if trimmed.starts_with(".field ") {
+            if i == row {
+                let rest = trimmed.strip_prefix(".field ")?;
+                let key = field_key_from_decl(rest)?;
+                let (name, sig) = key.split_once(':')?;
+                return Some(MemberId::Field {
+                    name: name.to_string(),
+                    signature_jni: sig.to_string(),
+                });
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Split a method key `foo(args)ret` into `(name, "(args)ret")`.
+/// The JNI-form signature is everything from the `(` onwards.
+fn split_method_key(key: &str) -> Option<(String, String)> {
+    let paren = key.find('(')?;
+    Some((key[..paren].to_string(), key[paren..].to_string()))
 }
 
 /// Diff a buffer's text against the original lifted class and
@@ -2027,6 +2111,52 @@ mod tests {
             normalise_member(".method foo()V  \n  return-void   \n.end method\n\n\n"),
             ".method foo()V\n  return-void\n.end method",
         );
+    }
+
+    #[test]
+    fn member_at_row_finds_method_block() {
+        let body = ".class Lcom/A;\n.method foo(I)V\n  return-void\n.end method\n";
+        // row 0 = .class (outside)
+        assert!(member_at_row(body, 0).is_none());
+        // rows 1..=3 = method block
+        for row in 1..=3 {
+            let m = member_at_row(body, row).expect("method here");
+            match m {
+                MemberId::Method { name, signature_jni } => {
+                    assert_eq!(name, "foo");
+                    assert_eq!(signature_jni, "(I)V");
+                }
+                _ => panic!("expected method"),
+            }
+        }
+        // row past end = none
+        assert!(member_at_row(body, 99).is_none());
+    }
+
+    #[test]
+    fn member_at_row_finds_field_line() {
+        let body = ".class Lcom/A;\n.field count:I\n.method foo()V\n.end method\n";
+        let f = member_at_row(body, 1).expect("field here");
+        match f {
+            MemberId::Field { name, signature_jni } => {
+                assert_eq!(name, "count");
+                assert_eq!(signature_jni, "I");
+            }
+            _ => panic!("expected field"),
+        }
+    }
+
+    #[test]
+    fn split_method_key_splits_at_paren() {
+        assert_eq!(
+            split_method_key("foo(I)V"),
+            Some(("foo".to_string(), "(I)V".to_string())),
+        );
+        assert_eq!(
+            split_method_key("<init>()V"),
+            Some(("<init>".to_string(), "()V".to_string())),
+        );
+        assert_eq!(split_method_key("nope"), None);
     }
 
     #[test]

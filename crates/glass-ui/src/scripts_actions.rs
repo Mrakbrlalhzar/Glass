@@ -436,10 +436,31 @@ impl Shell {
         pos: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let Some(editor) = self.active_code_editor_mut() else { return };
-        // Snapshot selection text + clipboard state up-front so
-        // we can decide what items to include.
-        let selected = editor.selected_text();
+        // Pull editor state + tab kind up-front so we don't
+        // re-borrow self across menu construction.
+        let Some(active) = self.active_tab else { return };
+        let tab_kind = self.tabs.get(active).map(|t| t.kind.clone());
+        let (selected, click_row, buffer_text, changed_at_row) = {
+            let Some(editor) = self
+                .tabs
+                .get(active)
+                .and_then(|t| t.code_editor.as_ref())
+            else {
+                return;
+            };
+            let row = editor
+                .offset_for_window_point(pos)
+                .map(|off| editor.buffer.snapshot().offset_to_point(off).row);
+            let changed = row
+                .map(|r| editor.changed_rows.contains(&r))
+                .unwrap_or(false);
+            (
+                editor.selected_text(),
+                row,
+                editor.text(),
+                changed,
+            )
+        };
         let clipboard_has_text = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
@@ -457,6 +478,75 @@ impl Shell {
         if clipboard_has_text {
             items.push(crate::context_menu::ContextMenuItem::EditorPaste);
         }
+
+        // Smali-specific revert items when right-clicking on a
+        // row inside a changed method / field. Always offer
+        // "Revert class" so the user can wipe all changes at
+        // once from anywhere in the buffer.
+        if let Some(crate::TabKind::SmaliEditor { artifact, class_jni }) =
+            tab_kind.as_ref()
+        {
+            // The class-level revert is only meaningful when the
+            // class has any staged edit at all.
+            let class_has_edit = self
+                .bundle()
+                .map(|b| b.smali_edits.get(artifact, class_jni).is_some())
+                .unwrap_or(false);
+
+            if changed_at_row {
+                if let Some(row) = click_row {
+                    if let Some(member) =
+                        crate::code_editor::member_at_row(&buffer_text, row)
+                    {
+                        match member {
+                            crate::code_editor::MemberId::Method {
+                                name,
+                                signature_jni,
+                            } => {
+                                items.push(
+                                    crate::context_menu::ContextMenuItem::RevertSmaliMethodEdit {
+                                        artifact: artifact.clone(),
+                                        class_jni: class_jni.clone(),
+                                        method_name: name.clone(),
+                                        method_signature_jni: signature_jni.clone(),
+                                        label: gpui::SharedString::from(format!(
+                                            "Revert {}{}",
+                                            name, signature_jni,
+                                        )),
+                                    },
+                                );
+                            }
+                            crate::code_editor::MemberId::Field {
+                                name,
+                                signature_jni,
+                            } => {
+                                items.push(
+                                    crate::context_menu::ContextMenuItem::RevertSmaliFieldEdit {
+                                        artifact: artifact.clone(),
+                                        class_jni: class_jni.clone(),
+                                        field_name: name.clone(),
+                                        field_signature_jni: signature_jni.clone(),
+                                        label: gpui::SharedString::from(format!(
+                                            "Revert field {name}",
+                                        )),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if class_has_edit {
+                items.push(
+                    crate::context_menu::ContextMenuItem::RevertSmaliClassEdit {
+                        artifact: artifact.clone(),
+                        class_jni: class_jni.clone(),
+                        label: gpui::SharedString::from("Revert all changes to class"),
+                    },
+                );
+            }
+        }
+
         if items.is_empty() {
             return;
         }

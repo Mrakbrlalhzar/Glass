@@ -1688,6 +1688,10 @@ impl Shell {
                 }
             }
         }
+        // Also resync any open SmaliEditor for this class: the
+        // buffer needs to drop back to the original text, else
+        // the next auto-stage will simply re-stage it.
+        self.resync_smali_editor_buffer(&artifact, &class_jni);
         cx.notify();
     }
 
@@ -1793,7 +1797,17 @@ impl Shell {
             self.revert_smali_class_edit(artifact, class_jni, cx);
             return;
         }
-        self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+        self.stage_smali_class_edit(
+            artifact.clone(),
+            class_jni.clone(),
+            modified,
+            cx,
+        );
+        // Resync any open SmaliEditor buffer so it matches the
+        // post-revert staged text — without this, the editor
+        // would still hold the un-reverted member and the next
+        // auto-stage would re-stage the same change.
+        self.resync_smali_editor_buffer(&artifact, &class_jni);
     }
 
     // ---- Field popover -------------------------------------------------
