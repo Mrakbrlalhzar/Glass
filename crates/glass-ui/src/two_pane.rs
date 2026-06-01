@@ -407,7 +407,7 @@ pub fn render_two_pane(
                     (None, None) => div().flex_1().into_any_element(),
                 }
             }
-            Some(TabKind::ScriptEditor { .. }) => {
+            Some(TabKind::ScriptEditor { .. }) | Some(TabKind::SmaliEditor { .. }) => {
                 let editor = shell
                     .active_tab
                     .and_then(|i| shell.tabs.get(i))
@@ -417,7 +417,7 @@ pub fn render_two_pane(
                         e, panel, border, fg, dim, cx,
                     ),
                     // Tab was opened without an editor seeded —
-                    // shouldn't happen via `open_script_editor`, but
+                    // shouldn't happen via `open_*_editor`, but
                     // render an empty placeholder rather than panic.
                     None => div().flex_1().into_any_element(),
                 }

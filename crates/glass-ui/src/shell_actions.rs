@@ -727,6 +727,20 @@ impl Shell {
                 let star = if dirty { "*" } else { "" };
                 SharedString::from(format!("{name}.js{star}"))
             }
+            // Smali editor: Java-style class name + .smali (so it
+            // visually parallels the .js form of ScriptEditor),
+            // plus `*` when dirty.
+            TabKind::SmaliEditor { class_jni, .. } => {
+                let dirty = self
+                    .tabs
+                    .get(index)
+                    .and_then(|t| t.code_editor.as_ref())
+                    .map(|e| e.dirty)
+                    .unwrap_or(false);
+                let star = if dirty { "*" } else { "" };
+                let display = crate::search::jni_to_dotted(class_jni);
+                SharedString::from(format!("{display}.smali{star}"))
+            }
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1134,10 +1148,10 @@ impl Shell {
                     tab.lines = Some(Arc::new(Vec::new()));
                 }
             }
-            // Script editor: the CodeEditor owns its own ListState
-            // (one row per line). It's seeded at open_script_editor
+            // Script + Smali editors: the CodeEditor owns its own
+            // ListState (one row per line). It's seeded at open
             // time, so there's nothing to do here.
-            TabKind::ScriptEditor { .. } => {}
+            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {}
         }
     }
 

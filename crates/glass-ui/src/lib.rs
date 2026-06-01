@@ -63,6 +63,7 @@ mod frida_server_install;
 mod code_editor;
 mod scripts_actions;
 mod scripts_panel;
+mod smali_editor;
 mod string_edit_popover;
 mod scrollbar;
 mod search;
@@ -1152,6 +1153,15 @@ pub(crate) enum TabKind {
         /// in `scripts_panel`.
         name: String,
     },
+    /// Smali class editor. Same widget as `ScriptEditor` but
+    /// scoped to a DEX class — saving runs the buffer through
+    /// the smali parser and, on success, stages an edit on the
+    /// bundle (so the export-patched flow picks it up). Also
+    /// ephemeral.
+    SmaliEditor {
+        artifact: glass_db::ArtifactId,
+        class_jni: String,
+    },
 }
 
 impl TabKind {
@@ -1207,8 +1217,11 @@ impl TabKind {
                 mangled_name: mangled_name.clone(),
                 scroll_line: 0,
             },
-            // ScriptEditor is intentionally ephemeral.
-            TabKind::ScriptEditor { .. } => return None,
+            // ScriptEditor / SmaliEditor are intentionally
+            // ephemeral — they don't round-trip through glass-db.
+            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {
+                return None
+            }
         })
     }
 
@@ -1913,7 +1926,7 @@ impl Render for Shell {
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(|this, _ev, _w, cx| {
-                            this.open_active_smali_in_external_editor(cx);
+                            this.open_active_smali_in_glass_editor(cx);
                         }),
                     ),
             )

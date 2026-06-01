@@ -223,7 +223,7 @@ impl Shell {
     }
 
     /// Route a key event to the code editor on the active
-    /// `ScriptEditor` tab, when one is active. Returns true when
+    /// `ScriptEditor` or `SmaliEditor` tab. Returns true when
     /// the key was consumed (so the dispatcher can stop further
     /// handlers from firing).
     pub(crate) fn code_editor_handle_key(
@@ -233,20 +233,37 @@ impl Shell {
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
         let Some(tab) = self.tabs.get(active) else { return false };
-        let crate::TabKind::ScriptEditor { name } = &tab.kind else {
-            return false;
+        // Capture which editor kind this is so we can pick the
+        // right save flow for Cmd-S.
+        enum EditorKind {
+            Script(String),
+            Smali(glass_db::ArtifactId, String),
+        }
+        let editor_kind = match &tab.kind {
+            crate::TabKind::ScriptEditor { name } => {
+                EditorKind::Script(name.clone())
+            }
+            crate::TabKind::SmaliEditor { artifact, class_jni } => {
+                EditorKind::Smali(artifact.clone(), class_jni.clone())
+            }
+            _ => return false,
         };
-        let script_name = name.clone();
 
         let k = &ev.keystroke;
         let cmd = k.modifiers.platform || k.modifiers.control;
         let shift = k.modifiers.shift;
 
         // Intercept Cmd-S before forwarding to the editor — Save
-        // is a Shell-level action (writes through the open DB
-        // handle + bumps modified_unix in glass-db).
+        // semantics differ per editor kind.
         if cmd && !shift && k.key == "s" {
-            self.save_active_script_editor(&script_name, cx);
+            match editor_kind {
+                EditorKind::Script(name) => {
+                    self.save_active_script_editor(&name, cx);
+                }
+                EditorKind::Smali(artifact, class_jni) => {
+                    self.save_active_smali_editor(artifact, class_jni, cx);
+                }
+            }
             return true;
         }
 

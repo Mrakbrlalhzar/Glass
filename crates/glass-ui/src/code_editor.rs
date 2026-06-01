@@ -71,6 +71,10 @@ pub(crate) struct CodeEditor {
     /// we want to land back on the original column. Reset on any
     /// non-vertical motion.
     desired_column: Option<u32>,
+    /// Most-recent save / parse-error message. Rendered in the
+    /// footer; cleared on the next successful save or when the
+    /// buffer changes. None = no message to surface.
+    save_error: Option<String>,
 }
 
 impl CodeEditor {
@@ -92,6 +96,7 @@ impl CodeEditor {
             cursor: 0,
             selection_anchor: None,
             desired_column: None,
+            save_error: None,
         }
     }
 
@@ -147,6 +152,9 @@ impl CodeEditor {
         self.selection_anchor = None;
         self.desired_column = None;
         self.dirty = true;
+        // Any edit invalidates a stale save error — the next
+        // save attempt will produce a fresh verdict.
+        self.save_error = None;
         self.refresh_cache();
     }
 
@@ -358,6 +366,18 @@ impl CodeEditor {
     /// disk). Called by the save flow after a successful write.
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+        self.save_error = None;
+    }
+
+    /// Surface a save / parse error to the user. Cleared on the
+    /// next edit or the next successful save.
+    pub fn set_save_error(&mut self, msg: impl Into<String>) {
+        self.save_error = Some(msg.into());
+    }
+
+    /// Current save error, if any.
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
     }
 
     /// Total visual lines — used for the line-number gutter width
@@ -544,10 +564,25 @@ pub fn render_code_editor(
                 .flex()
                 .flex_col()
                 .child(body.flex_1())
-                .child(
-                    // Footer chip: line count + dirty indicator.
-                    // Tiny — just enough to confirm "this is the
-                    // editor pane" while we have no other affordances.
+                .child({
+                    // Footer chip: line count + dirty / save-state.
+                    // When the editor has a save_error message
+                    // (parse failure, write failure, etc.) it
+                    // takes over the right-hand slot tinted with
+                    // the error highlight colour so it's
+                    // impossible to miss.
+                    let theme = crate::theme::current();
+                    let (right_text, right_colour) =
+                        if let Some(err) = editor.save_error() {
+                            (
+                                SharedString::from(err.to_string()),
+                                theme.errors.highlight.rgba(),
+                            )
+                        } else if editor.dirty {
+                            (SharedString::from("● modified"), dim)
+                        } else {
+                            (SharedString::from("saved"), dim)
+                        };
                     div()
                         .h(px(20.))
                         .w_full()
@@ -561,15 +596,13 @@ pub fn render_code_editor(
                         .bg(theme.shell.panel.rgba())
                         .border_t_1()
                         .border_color(border)
-                        .child(SharedString::from(format!(
-                            "{row_count} lines"
-                        )))
-                        .child(SharedString::from(if editor.dirty {
-                            "● modified"
-                        } else {
-                            "saved"
-                        })),
-                ),
+                        .child(SharedString::from(format!("{row_count} lines")))
+                        .child(
+                            gpui::div()
+                                .text_color(right_colour)
+                                .child(right_text),
+                        )
+                }),
         )
         .child(scrollbar)
         .into_any_element()
