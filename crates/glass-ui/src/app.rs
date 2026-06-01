@@ -490,6 +490,7 @@ fn open_glass_window(
             spawn_device_poll(&shell, cx);
             spawn_frida_probe(&shell, cx);
             spawn_debug_dock_pump(&shell, cx);
+            spawn_smali_editor_reparse_poll(&shell, cx);
             shell.update(cx, |_shell, cx: &mut Context<Shell>| {
                 cx.observe_window_bounds(window, |_shell, window: &mut Window, _cx| {
                     // `window.bounds()` is the full frame (including
@@ -1090,6 +1091,26 @@ fn push_dock_log_line(shell: &mut Shell, line: String) {
             dock.log.drain(..drop);
         }
     }
+}
+
+/// Idle-reparse poll for `SmaliEditor` tabs. Ticks every 250ms;
+/// the editor itself decides whether a reparse is due based on
+/// `last_edit_at` vs `last_reparse_at` (≥ REPARSE_IDLE_MS quiet
+/// after the last edit). Cheap when nothing is dirty.
+fn spawn_smali_editor_reparse_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
+    let weak = shell.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let Some(entity) = weak.upgrade() else { break };
+            let _ = cx.update_entity(&entity, |shell, cx| {
+                shell.reparse_idle_smali_editors(cx);
+            });
+        }
+    })
+    .detach();
 }
 
 fn spawn_flush_timer(shell: &gpui::Entity<Shell>, db: glass_db::Database, cx: &mut App) {

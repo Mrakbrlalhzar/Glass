@@ -9,9 +9,17 @@
 //! the bundle's `smali_edits` map so the existing
 //! `export-patched` pipeline picks it up at export time.
 
+use std::time::Duration;
+
 use gpui::Context;
 
 use crate::{Shell, TabKind};
+
+/// How long after the last edit before the idle-reparse loop
+/// will reparse a smali buffer. Short enough that link-following
+/// feels responsive; long enough that mid-edit unparseable
+/// states don't churn the parser.
+pub(crate) const REPARSE_IDLE_MS: u64 = 500;
 
 impl Shell {
     /// Open (or focus) a `SmaliEditor` tab for the currently-
@@ -64,13 +72,38 @@ impl Shell {
             return;
         }
         let mut tab = crate::Tab::new(kind);
-        tab.code_editor = Some(
-            crate::code_editor::CodeEditor::from_string(body)
-                .with_highlight(crate::code_editor::HighlightMode::Smali),
-        );
+        let mut editor = crate::code_editor::CodeEditor::from_string(body)
+            .with_highlight(crate::code_editor::HighlightMode::Smali);
+        // Seed the parsed model from the initial buffer — the
+        // class came in from a known-good parse upstream so this
+        // should always succeed.
+        editor.reparse_smali();
+        tab.code_editor = Some(editor);
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);
         cx.notify();
+    }
+
+    /// Walk every open `SmaliEditor` tab and reparse any whose
+    /// buffer has been idle for `REPARSE_IDLE_MS` since the last
+    /// edit. Cheap: smali parse is microseconds; we skip tabs
+    /// where the buffer hasn't been touched since the last
+    /// successful reparse.
+    pub(crate) fn reparse_idle_smali_editors(&mut self, cx: &mut Context<Self>) {
+        let mut any_changed = false;
+        for tab in &mut self.tabs {
+            if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
+                continue;
+            }
+            let Some(editor) = tab.code_editor.as_mut() else { continue };
+            if editor.is_reparse_due(Duration::from_millis(REPARSE_IDLE_MS)) {
+                editor.reparse_smali();
+                any_changed = true;
+            }
+        }
+        if any_changed {
+            cx.notify();
+        }
     }
 
     /// Parse the active smali editor buffer and, on success,

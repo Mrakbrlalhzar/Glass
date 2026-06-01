@@ -98,6 +98,20 @@ pub(crate) struct CodeEditor {
     /// Set by the tab opener (`SmaliEditor` → Smali, plain
     /// scripts → None); the renderer branches on this.
     pub(crate) highlight: HighlightMode,
+    /// Wall-clock time of the most recent edit. The idle-reparse
+    /// loop reads this to decide when the buffer has settled
+    /// long enough to reparse. `None` until the first edit.
+    pub(crate) last_edit_at: Option<std::time::Instant>,
+    /// Most-recent successful parse of the buffer text as a
+    /// smali class. Used by features that need parsed state
+    /// (per-row context menu, field/class link resolution).
+    /// Stays at the previous good value while a new parse is
+    /// failing, so the live UI doesn't flicker mid-edit.
+    pub(crate) parsed_smali: Option<smali::types::SmaliClass>,
+    /// Wall-clock time of the most recent reparse attempt
+    /// (successful or not). Lets the idle loop skip when
+    /// nothing has changed since the last attempt.
+    pub(crate) last_reparse_at: Option<std::time::Instant>,
 }
 
 /// Per-language highlighter selection. Line-local for v1: each
@@ -139,6 +153,9 @@ impl CodeEditor {
             dragging: false,
             h_offset: gpui::Pixels::from(0.),
             highlight: HighlightMode::None,
+            last_edit_at: None,
+            parsed_smali: None,
+            last_reparse_at: None,
         }
     }
 
@@ -220,7 +237,42 @@ impl CodeEditor {
         // Any edit invalidates a stale save error — the next
         // save attempt will produce a fresh verdict.
         self.save_error = None;
+        self.last_edit_at = Some(std::time::Instant::now());
         self.refresh_cache();
+    }
+
+    /// Re-parse the buffer text as a smali class and cache the
+    /// result on `parsed_smali`. Driven by the idle-reparse loop
+    /// in Shell once the buffer has been quiet long enough.
+    /// On parse failure, keeps the previous good model so the
+    /// UI doesn't flicker while the user is mid-edit.
+    pub fn reparse_smali(&mut self) {
+        self.last_reparse_at = Some(std::time::Instant::now());
+        let body = self.text();
+        match glass_api::parse_smali_class(&body) {
+            Ok(c) => {
+                self.parsed_smali = Some(c);
+            }
+            Err(_) => {
+                // Hold onto the last good parse; users can keep
+                // navigating links even while the syntax is
+                // mid-edit and unparseable.
+            }
+        }
+    }
+
+    /// Whether an idle reparse is due — `true` if there's been
+    /// an edit more recent than `last_reparse_at` *and* the
+    /// most-recent edit is at least `min_idle` old. Used by the
+    /// reparse loop to debounce.
+    pub fn is_reparse_due(&self, min_idle: std::time::Duration) -> bool {
+        let Some(edit) = self.last_edit_at else { return false };
+        if let Some(last) = self.last_reparse_at {
+            if last >= edit {
+                return false;
+            }
+        }
+        edit.elapsed() >= min_idle
     }
 
     fn set_cursor(&mut self, offset: usize, extend_selection: bool) {
