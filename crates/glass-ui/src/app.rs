@@ -472,6 +472,14 @@ fn open_glass_window(
             let shell = cx.new(|cx| {
                 Shell::new(path_for_window.clone(), db_for_window.clone(), window, cx)
             });
+            // Populate the Frida scripts panel from the user's
+            // library before the first render — the panel
+            // refresh API expects a `Context<Shell>`, so we run
+            // it through update_entity here rather than inside
+            // `Shell::new`.
+            shell.update(cx, |shell, cx| {
+                shell.refresh_scripts(cx);
+            });
             if let Some(p) = path_for_window.clone() {
                 spawn_loader(&shell, p, cx);
             }

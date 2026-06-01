@@ -128,6 +128,7 @@ impl Shell {
             injection_dialog: None,
             injection_progress: None,
             frida_server_install: None,
+            scripts_panel: crate::scripts_panel::ScriptsPanel::new(),
             debug_dock: None,
             debug_dock_resize_anchor: None,
             traces_dialog_open: false,

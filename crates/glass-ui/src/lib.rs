@@ -60,6 +60,8 @@ mod frida_dock;
 mod frida_hooks;
 mod frida_inject;
 mod frida_server_install;
+mod scripts_actions;
+mod scripts_panel;
 mod string_edit_popover;
 mod scrollbar;
 mod search;
@@ -1482,6 +1484,10 @@ pub(crate) struct Shell {
     /// `Some(Done)` for the user to read, cleared by Dismiss.
     pub(crate) frida_server_install:
         Option<frida_server_install::FridaServerInstallProgress>,
+    /// Left-nav "Frida Scripts" section state — cached rows +
+    /// expanded flag. Refreshed via `refresh_scripts()` after
+    /// any in-GUI script write / delete / toggle, plus on load.
+    pub(crate) scripts_panel: scripts_panel::ScriptsPanel,
     /// Bottom debug dock — `Some` after the user clicks
     /// Connect on the device picker for a Frida-reachable
     /// device with a loaded APK. Hosts Play / Stop controls

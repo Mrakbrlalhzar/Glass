@@ -40,6 +40,12 @@ pub fn render_two_pane(
         let self_handle = cx.entity().downgrade();
 
         let left_scrollbar = list_scrollbar(&shell.list_state, border, dim);
+        // Scripts section lives below the bundle tree, in the same
+        // flex column. Rendered above the list element so it sits
+        // *under* the tree visually (the tree gets `flex_1`, the
+        // scripts panel gets its natural height).
+        let scripts_panel_el =
+            crate::scripts_panel::render_panel(shell, panel, border, fg, dim, accent, cx);
         let left = div()
             .w(px(340.))
             .h_full()
@@ -49,7 +55,8 @@ pub fn render_two_pane(
             .border_color(border)
             .bg(panel)
             .child(
-                div().size_full().flex().flex_col().child(
+                div().size_full().flex().flex_col()
+                .child(
                 list(shell.list_state.clone(), {
                     let rows = rows.clone();
                     let leaf_icons = bundle.leaf_icons.clone();
@@ -133,6 +140,15 @@ pub fn render_two_pane(
                     }
                 })
                 .flex_1(),
+                )
+                .child(
+                    // Top-border separator so the scripts section
+                    // reads as visually distinct from the tree.
+                    div()
+                        .w_full()
+                        .border_t_1()
+                        .border_color(border)
+                        .child(scripts_panel_el),
                 ),
             )
             .child(left_scrollbar);
