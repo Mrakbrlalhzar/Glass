@@ -880,7 +880,19 @@ pub(crate) fn member_at_row(
     buffer_text: &str,
     row: u32,
 ) -> Option<MemberId> {
-    let row = row as usize;
+    member_at_row_with_offset(buffer_text, row).map(|(m, _)| m)
+}
+
+/// Like [`member_at_row`] but also returns the row offset
+/// within the member (0 = the `.method` / `.field` declaration
+/// itself, 1 = first body line, etc.). Used by the editor's
+/// context-menu builder to translate buffer rows to per-op
+/// annotation keys.
+pub(crate) fn member_at_row_with_offset(
+    buffer_text: &str,
+    row: u32,
+) -> Option<(MemberId, u32)> {
+    let row_usize = row as usize;
     let lines: Vec<&str> = buffer_text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -892,26 +904,33 @@ pub(crate) fn member_at_row(
                 end += 1;
             }
             let block_end = end.min(lines.len().saturating_sub(1));
-            if row >= block_start && row <= block_end {
+            if row_usize >= block_start && row_usize <= block_end {
                 let key = method_key_from_decl(rest)?;
                 let (name, sig) = split_method_key(&key)?;
-                return Some(MemberId::Method {
-                    name,
-                    signature_jni: sig,
-                });
+                let offset = (row_usize - block_start) as u32;
+                return Some((
+                    MemberId::Method {
+                        name,
+                        signature_jni: sig,
+                    },
+                    offset,
+                ));
             }
             i = block_end + 1;
             continue;
         }
         if trimmed.starts_with(".field ") {
-            if i == row {
+            if i == row_usize {
                 let rest = trimmed.strip_prefix(".field ")?;
                 let key = field_key_from_decl(rest)?;
                 let (name, sig) = key.split_once(':')?;
-                return Some(MemberId::Field {
-                    name: name.to_string(),
-                    signature_jni: sig.to_string(),
-                });
+                return Some((
+                    MemberId::Field {
+                        name: name.to_string(),
+                        signature_jni: sig.to_string(),
+                    },
+                    0,
+                ));
             }
             i += 1;
             continue;

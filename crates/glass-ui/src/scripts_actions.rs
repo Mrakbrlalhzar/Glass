@@ -479,72 +479,21 @@ impl Shell {
             items.push(crate::context_menu::ContextMenuItem::EditorPaste);
         }
 
-        // Smali-specific revert items when right-clicking on a
-        // row inside a changed method / field. Always offer
-        // "Revert class" so the user can wipe all changes at
-        // once from anywhere in the buffer.
+        // Smali-specific items when the active tab is a smali
+        // editor. The rich items (navigation, annotations,
+        // revert) are gathered by a dedicated helper so this
+        // function stays readable.
         if let Some(crate::TabKind::SmaliEditor { artifact, class_jni }) =
             tab_kind.as_ref()
         {
-            // The class-level revert is only meaningful when the
-            // class has any staged edit at all.
-            let class_has_edit = self
-                .bundle()
-                .map(|b| b.smali_edits.get(artifact, class_jni).is_some())
-                .unwrap_or(false);
-
-            if changed_at_row {
-                if let Some(row) = click_row {
-                    if let Some(member) =
-                        crate::code_editor::member_at_row(&buffer_text, row)
-                    {
-                        match member {
-                            crate::code_editor::MemberId::Method {
-                                name,
-                                signature_jni,
-                            } => {
-                                items.push(
-                                    crate::context_menu::ContextMenuItem::RevertSmaliMethodEdit {
-                                        artifact: artifact.clone(),
-                                        class_jni: class_jni.clone(),
-                                        method_name: name.clone(),
-                                        method_signature_jni: signature_jni.clone(),
-                                        label: gpui::SharedString::from(format!(
-                                            "Revert {}{}",
-                                            name, signature_jni,
-                                        )),
-                                    },
-                                );
-                            }
-                            crate::code_editor::MemberId::Field {
-                                name,
-                                signature_jni,
-                            } => {
-                                items.push(
-                                    crate::context_menu::ContextMenuItem::RevertSmaliFieldEdit {
-                                        artifact: artifact.clone(),
-                                        class_jni: class_jni.clone(),
-                                        field_name: name.clone(),
-                                        field_signature_jni: signature_jni.clone(),
-                                        label: gpui::SharedString::from(format!(
-                                            "Revert field {name}",
-                                        )),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            if class_has_edit {
-                items.push(
-                    crate::context_menu::ContextMenuItem::RevertSmaliClassEdit {
-                        artifact: artifact.clone(),
-                        class_jni: class_jni.clone(),
-                        label: gpui::SharedString::from("Revert all changes to class"),
-                    },
-                );
-            }
+            self.code_editor_smali_extra_items(
+                artifact,
+                class_jni,
+                click_row,
+                &buffer_text,
+                changed_at_row,
+                &mut items,
+            );
         }
 
         if items.is_empty() {
@@ -555,6 +504,230 @@ impl Shell {
             items,
         });
         cx.notify();
+    }
+
+    /// Smali-specific context-menu builder: appends nav /
+    /// annotation / revert items to `items` based on what
+    /// (method or field) sits under the right-clicked row.
+    /// Mirrors what `open_smali_context_menu` and
+    /// `open_field_context_menu` produce for the SmaliClass
+    /// viewer so the menu surface matches.
+    fn code_editor_smali_extra_items(
+        &self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        click_row: Option<u32>,
+        buffer_text: &str,
+        changed_at_row: bool,
+        items: &mut Vec<crate::context_menu::ContextMenuItem>,
+    ) {
+        use crate::context_menu::ContextMenuItem;
+        // Resolve "member at this row" up-front. Class-level
+        // rows (no enclosing .method / .field) get neither
+        // navigation nor revert items but still see the class-
+        // wide revert below.
+        let member_and_offset = click_row.and_then(|r| {
+            crate::code_editor::member_at_row_with_offset(buffer_text, r)
+        });
+
+        // Whether the class has any staged edit at all — drives
+        // the "Revert all changes to class" item.
+        let class_has_edit = self
+            .bundle()
+            .map(|b| b.smali_edits.get(artifact, class_jni).is_some())
+            .unwrap_or(false);
+
+        // The DEX artifact for annotation lookups — same trick
+        // `open_smali_context_menu` uses: first artifact in the
+        // bundle's list.
+        let dex_artifact = self
+            .bundle()
+            .and_then(|b| b.artifact_ids.first().cloned());
+
+        match member_and_offset {
+            Some((crate::code_editor::MemberId::Method { name, signature_jni }, line_offset)) => {
+                let method_decl = format!("{name}{signature_jni}");
+                let method_key = format!("{class_jni}->{method_decl}");
+                let label = gpui::SharedString::from(name.clone());
+                items.push(ContextMenuItem::CopyText {
+                    text: method_key.clone(),
+                    label: label.clone(),
+                });
+                items.push(ContextMenuItem::ShowDexCallGraph {
+                    class_jni: class_jni.to_string(),
+                    method_decl: method_decl.clone(),
+                    label: label.clone(),
+                });
+                items.push(ContextMenuItem::CallersOfMethod {
+                    method_key: method_key.clone(),
+                    label: label.clone(),
+                });
+                // Annotation items hang off the DEX artifact. We
+                // translate the row offset into either the method
+                // header (offset 0) or a per-op annotation key
+                // via the parsed SmaliMethod — same trick the
+                // existing viewer uses.
+                if let Some(artifact_id) = dex_artifact.clone() {
+                    let (anno_key, existing) =
+                        self.resolve_method_annotation_key(
+                            class_jni,
+                            &method_decl,
+                            &method_key,
+                            line_offset,
+                            &artifact_id,
+                        );
+                    let comment_label = if existing.comment.is_some() {
+                        "Edit comment…"
+                    } else {
+                        "Add comment…"
+                    };
+                    let line_chip = if line_offset == 0 {
+                        String::new()
+                    } else {
+                        format!(" (line {line_offset})")
+                    };
+                    items.push(ContextMenuItem::EditComment {
+                        artifact: artifact_id.clone(),
+                        key: anno_key.clone(),
+                        current: existing.comment.clone().unwrap_or_default(),
+                        label: gpui::SharedString::from(format!(
+                            "{comment_label}{line_chip}"
+                        )),
+                    });
+                    items.push(ContextMenuItem::PickColour {
+                        artifact: artifact_id.clone(),
+                        key: anno_key.clone(),
+                        current: existing.colour,
+                        label: gpui::SharedString::from(format!(
+                            "Set colour…{line_chip}"
+                        )),
+                    });
+                    if !existing.is_empty() {
+                        items.push(ContextMenuItem::ClearAnnotation {
+                            artifact: artifact_id,
+                            key: anno_key,
+                            label: gpui::SharedString::from(format!(
+                                "Clear annotation ({name}{line_chip})"
+                            )),
+                        });
+                    }
+                }
+                if changed_at_row {
+                    items.push(ContextMenuItem::RevertSmaliMethodEdit {
+                        artifact: artifact.clone(),
+                        class_jni: class_jni.to_string(),
+                        method_name: name.clone(),
+                        method_signature_jni: signature_jni.clone(),
+                        label: gpui::SharedString::from(format!(
+                            "Revert {name}{signature_jni}"
+                        )),
+                    });
+                }
+            }
+            Some((crate::code_editor::MemberId::Field { name, signature_jni }, _)) => {
+                let field_ref = format!("{class_jni}->{name}:{signature_jni}");
+                let label = gpui::SharedString::from(name.clone());
+                items.push(ContextMenuItem::CopyText {
+                    text: field_ref.clone(),
+                    label: label.clone(),
+                });
+                items.push(ContextMenuItem::RefsToField {
+                    field_ref,
+                    label: label.clone(),
+                });
+                if changed_at_row {
+                    items.push(ContextMenuItem::RevertSmaliFieldEdit {
+                        artifact: artifact.clone(),
+                        class_jni: class_jni.to_string(),
+                        field_name: name.clone(),
+                        field_signature_jni: signature_jni.clone(),
+                        label: gpui::SharedString::from(format!(
+                            "Revert field {name}"
+                        )),
+                    });
+                }
+            }
+            None => {}
+        }
+
+        if class_has_edit {
+            items.push(ContextMenuItem::RevertSmaliClassEdit {
+                artifact: artifact.clone(),
+                class_jni: class_jni.to_string(),
+                label: gpui::SharedString::from("Revert all changes to class"),
+            });
+        }
+    }
+
+    /// Translate a (method, line offset) into the canonical
+    /// `AnnotationKey` + the existing annotation for that key.
+    /// Mirrors the same translation in `open_smali_context_menu`:
+    /// offset 0 → `Method`; offset >0 → `OpIndex` when the
+    /// parsed method can map line offset to op index, else
+    /// `MethodLine` as fallback.
+    fn resolve_method_annotation_key(
+        &self,
+        class_jni: &str,
+        method_decl: &str,
+        method_key: &str,
+        line_offset: u32,
+        artifact: &glass_db::ArtifactId,
+    ) -> (glass_db::AnnotationKey, glass_db::Annotation) {
+        if line_offset == 0 {
+            let k = glass_db::AnnotationKey::Method(
+                class_jni.to_string(),
+                method_decl.to_string(),
+            );
+            let e = self
+                .bundle()
+                .and_then(|b| b.annotations.get(artifact))
+                .and_then(|idx| idx.at_method(method_key))
+                .cloned()
+                .unwrap_or_default();
+            return (k, e);
+        }
+        let op_index = self.bundle().and_then(|b| {
+            b.smali_classes.iter().find_map(|((_aid, jni), c)| {
+                if jni == class_jni {
+                    c.methods.iter().find(|m| {
+                        format!("{}{}", m.name, m.signature.to_jni()) == method_decl
+                    })
+                } else {
+                    None
+                }
+            })
+            .and_then(|m| crate::annotations::line_offset_to_op_index(m, line_offset))
+        });
+        match op_index {
+            Some(op_index) => {
+                let k = glass_db::AnnotationKey::OpIndex {
+                    class_jni: class_jni.to_string(),
+                    method_decl: method_decl.to_string(),
+                    op_index,
+                };
+                let e = self
+                    .bundle()
+                    .and_then(|b| b.annotations.get(artifact))
+                    .and_then(|idx| idx.at_op_index(method_key, op_index))
+                    .cloned()
+                    .unwrap_or_default();
+                (k, e)
+            }
+            None => {
+                let k = glass_db::AnnotationKey::MethodLine(
+                    class_jni.to_string(),
+                    method_decl.to_string(),
+                    line_offset,
+                );
+                let e = self
+                    .bundle()
+                    .and_then(|b| b.annotations.get(artifact))
+                    .and_then(|idx| idx.at_method_line(method_key, line_offset))
+                    .cloned()
+                    .unwrap_or_default();
+                (k, e)
+            }
+        }
     }
 
     /// Route a key event to the code editor on the active
