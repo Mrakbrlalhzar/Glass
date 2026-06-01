@@ -665,6 +665,69 @@ impl LoadedBundle {
         self.smali_classes.get(&key)
     }
 
+    /// Resolve a method navigation target — `class_jni->name(sig)ret`
+    /// — to `(leaf, line_no)` in the *current* class body
+    /// (staged when there's an edit, else original). The static
+    /// `method_lines` index is built once at load and lines drift
+    /// after edits; this re-scans the live body so inbound
+    /// navigation lands on the right row even when the user has
+    /// added / removed / moved methods.
+    ///
+    /// Falls back to the static `method_lines` entry when no
+    /// staged edit applies — same behaviour as before for
+    /// untouched classes, no extra cost on the hot path.
+    pub fn resolve_method_line(
+        &self,
+        method_key: &str,
+    ) -> Option<(LeafId, usize)> {
+        // Parse the class JNI out of the method key.
+        let (class_jni, method_decl) = method_key.split_once("->")?;
+        // Find the leaf via the static map first — gives us the
+        // LeafId regardless of edits, and shortcuts to the fast
+        // path when the class is untouched.
+        let static_hit = self.method_lines.get(method_key).copied();
+        let staged_text = {
+            // Walk smali_edits looking for a staged version of
+            // this class. `smali_edits` is keyed on
+            // (artifact, class_jni); we just need *any* match
+            // since a JNI is globally unique within a bundle.
+            self.smali_edits.entries().iter().find_map(|edit| {
+                if edit.key.class_jni == class_jni {
+                    Some(edit.modified.to_smali())
+                } else {
+                    None
+                }
+            })
+        };
+        let Some(text) = staged_text else {
+            return static_hit;
+        };
+        // Re-scan the staged text for the .method declaration.
+        for (line_no, raw) in text.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            let Some(after) = trimmed.strip_prefix(".method ") else { continue };
+            let Some(decl) = after.split_whitespace().last() else { continue };
+            if decl == method_decl {
+                let leaf = static_hit.map(|(l, _)| l).or_else(|| {
+                    self.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                        LeafKind::SmaliClass { class_jni: this }
+                            if this == class_jni =>
+                        {
+                            Some(LeafId(i))
+                        }
+                        _ => None,
+                    })
+                })?;
+                return Some((leaf, line_no));
+            }
+        }
+        // Method no longer exists in the staged class — fall back
+        // to the static entry so a stale link at least lands in
+        // the right *class*. Caller can decide what to do with a
+        // missing method.
+        static_hit
+    }
+
     /// Find the leaf that backs a given persisted tab state. Returns
     /// `None` if the bundle no longer contains it (e.g. a class
     /// disappeared between sessions).

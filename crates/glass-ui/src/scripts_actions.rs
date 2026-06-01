@@ -432,10 +432,8 @@ impl Shell {
         match target {
             SmaliLinkTarget::Method { target_text } => {
                 let Some(bundle) = self.bundle() else { return false };
-                let Some((leaf, line_no)) = bundle
-                    .method_lines
-                    .get(&target_text)
-                    .copied()
+                let Some((leaf, line_no)) =
+                    bundle.resolve_method_line(&target_text)
                 else {
                     return false;
                 };
@@ -625,7 +623,7 @@ impl Shell {
                 match target {
                     SmaliLinkTarget::Method { target_text } => {
                         if let Some((leaf, line)) =
-                            bundle.method_lines.get(&target_text).copied()
+                            bundle.resolve_method_line(&target_text)
                         {
                             let display = target_text
                                 .split('(')

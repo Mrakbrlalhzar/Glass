@@ -799,8 +799,7 @@ pub fn render_two_pane(
                                                 let key = tok.target_text.clone();
                                                 let location: Option<(LeafId, usize)> = key
                                                     .as_ref()
-                                                    .and_then(|k| bundle.method_lines.get(k))
-                                                    .copied();
+                                                    .and_then(|k| bundle.resolve_method_line(k));
                                                 let base_div = div()
                                                     .text_color(rgb(if location.is_some() {
                                                         COLOUR_PLAIN()

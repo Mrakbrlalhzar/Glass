@@ -121,7 +121,7 @@ impl Shell {
                 // scroll the smali tab to header + line_offset.
                 let method_key = format!("{class_jni}->{method_decl}");
                 let Some((leaf, header_line)) =
-                    bundle.method_lines.get(&method_key).copied()
+                    bundle.resolve_method_line(&method_key)
                 else {
                     // Fall back to opening the class — method
                     // index may not have been built (e.g. native).
@@ -146,7 +146,7 @@ impl Shell {
                 // offset where op `op_index` lands.
                 let method_key = format!("{class_jni}->{method_decl}");
                 let Some((leaf, header_line)) =
-                    bundle.method_lines.get(&method_key).copied()
+                    bundle.resolve_method_line(&method_key)
                 else {
                     if let Some(leaf) = bundle.resolve(&glass_db::TabState::SmaliClass {
                         class_jni: class_jni.clone(),

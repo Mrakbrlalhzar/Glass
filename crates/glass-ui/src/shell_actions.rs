@@ -2415,11 +2415,12 @@ pub(crate) fn build_dex_caller_entries(
         .filter_map(|(caller_key, line_offset)| {
             let class_jni = caller_key.split("->").next()?.to_string();
             // Resolve absolute line within the smali leaf:
-            // .method header line + line_offset.
+            // .method header line + line_offset. `resolve_method_line`
+            // returns the staged header line when the class has
+            // an edit, so xref lines stay accurate after edits.
             let header_line = bundle
-                .method_lines
-                .get(caller_key)
-                .map(|&(_, l)| l)
+                .resolve_method_line(caller_key)
+                .map(|(_, l)| l)
                 .unwrap_or(0);
             let line = header_line + *line_offset as usize;
             let cls = class_jni
@@ -2455,9 +2456,8 @@ pub(crate) fn build_dex_field_entries(
         .filter_map(|(method_key, line_offset)| {
             let class_jni = method_key.split("->").next()?.to_string();
             let header_line = bundle
-                .method_lines
-                .get(method_key)
-                .map(|&(_, l)| l)
+                .resolve_method_line(method_key)
+                .map(|(_, l)| l)
                 .unwrap_or(0);
             let line = header_line + *line_offset as usize;
             let cls = class_jni
