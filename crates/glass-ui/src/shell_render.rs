@@ -676,13 +676,16 @@ impl Shell {
     pub(crate) fn render_context_menu(
         &self,
         menu: &ContextMenuState,
+        viewport: gpui::Size<gpui::Pixels>,
         panel: gpui::Rgba,
         border: gpui::Rgba,
         fg: gpui::Rgba,
         accent: gpui::Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        context_menu::render_context_menu(menu, panel, border, fg, accent, cx)
+        context_menu::render_context_menu(
+            menu, viewport, panel, border, fg, accent, cx,
+        )
     }
 
     pub(crate) fn render_loading(

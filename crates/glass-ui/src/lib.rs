@@ -2118,9 +2118,10 @@ impl Render for Shell {
             None
         };
 
+        let viewport = window.viewport_size();
         let context_menu_overlay: Option<gpui::AnyElement> =
             self.context_menu.as_ref().map(|menu| {
-                self.render_context_menu(menu, panel, border, fg, accent, cx)
+                self.render_context_menu(menu, viewport, panel, border, fg, accent, cx)
                     .into_any_element()
             });
 

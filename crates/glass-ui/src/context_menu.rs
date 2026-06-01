@@ -294,6 +294,7 @@ pub enum FollowTarget {
 
 pub fn render_context_menu(
     menu: &ContextMenuState,
+    viewport: gpui::Size<gpui::Pixels>,
     panel: gpui::Rgba,
     border: gpui::Rgba,
     fg: gpui::Rgba,
@@ -302,10 +303,41 @@ pub fn render_context_menu(
 ) -> impl IntoElement {
     let weak = cx.entity().downgrade();
 
+    // Estimate the menu's height + width so we can flip it
+    // above / left of the click when it'd otherwise overflow
+    // the viewport. The actual element measures itself at paint
+    // time; this is an a-priori approximation good enough for
+    // anchoring.
+    let est_row_h = gpui::Pixels::from(28.0);
+    let est_width = gpui::Pixels::from(260.0);
+    let est_height = est_row_h * (menu.items.len() as f32).max(1.0);
+    let margin = gpui::Pixels::from(8.0);
+
+    // Default: anchor top-left at the click position. If that
+    // overflows the viewport in either axis, flip so the menu
+    // sits above / to the left of the click (with a small
+    // margin in from the viewport edge so the menu's border
+    // doesn't kiss the chrome).
+    let max_x = viewport.width - est_width - margin;
+    let max_y = viewport.height - est_height - margin;
+    let pos_x = if menu.position.x > max_x {
+        // Flip left: anchor the menu's right edge at the click,
+        // clamped to the viewport's left margin.
+        gpui::Pixels::from(0.0).max(menu.position.x - est_width).max(margin)
+    } else {
+        menu.position.x
+    };
+    let pos_y = if menu.position.y > max_y {
+        // Flip up: anchor the menu's bottom edge at the click.
+        gpui::Pixels::from(0.0).max(menu.position.y - est_height).max(margin)
+    } else {
+        menu.position.y
+    };
+
     let mut panel_el = div()
         .absolute()
-        .left(menu.position.x)
-        .top(menu.position.y)
+        .left(pos_x)
+        .top(pos_y)
         .min_w(px(220.))
         .bg(panel)
         .border_1()

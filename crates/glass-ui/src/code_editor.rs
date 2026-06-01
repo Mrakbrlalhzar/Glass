@@ -247,15 +247,28 @@ impl CodeEditor {
         let new_count = snap.row_count() as usize;
         self.cached_row_count = new_count;
         self.cached_max_line_bytes = compute_max_line_bytes(&snap);
-        // Splice in-place to preserve scroll position. Building a
-        // fresh `ListState::new` here reset `logical_scroll_top`
-        // to None, which then resolves to "top of buffer" — every
-        // keystroke yanked the viewport back to the top before
-        // `ensure_caret_visible` ran, which then re-scrolled to
-        // bring the caret into view (often at the bottom edge).
-        // `splice(0..old, new)` updates the item count while
-        // keeping the existing scroll offset intact.
-        self.list_state.splice(0..old_count, new_count);
+        // Splice only the count delta at the *end* of the list,
+        // never the whole range. ListState::splice resets the
+        // scroll-top whenever the spliced range contains the
+        // current scroll-top — so splicing `0..old_count`
+        // would slam the viewport back to row 0 on every
+        // keystroke. Touching only the tail of the list lets
+        // splice preserve the user's scroll position.
+        //
+        // For "content changed but count is the same" edits
+        // (the common case of typing on one line) we splice
+        // nothing — the renderer reads the current text from
+        // the buffer per row, so the list doesn't need to be
+        // told anything beyond "still N rows".
+        match new_count.cmp(&old_count) {
+            std::cmp::Ordering::Greater => {
+                self.list_state.splice(old_count..old_count, new_count - old_count);
+            }
+            std::cmp::Ordering::Less => {
+                self.list_state.splice(new_count..old_count, 0);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
     }
 
     /// Total pixel width of the widest line — what the
