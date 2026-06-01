@@ -237,11 +237,19 @@ impl CodeEditor {
     /// + max line width. Call after every mutation.
     fn refresh_cache(&mut self) {
         let snap = self.buffer.snapshot();
-        self.cached_row_count = snap.row_count() as usize;
+        let old_count = self.cached_row_count;
+        let new_count = snap.row_count() as usize;
+        self.cached_row_count = new_count;
         self.cached_max_line_bytes = compute_max_line_bytes(&snap);
-        // Resize the list to match. ListState doesn't grow itself.
-        self.list_state =
-            ListState::new(self.cached_row_count, ListAlignment::Top, px(2000.));
+        // Splice in-place to preserve scroll position. Building a
+        // fresh `ListState::new` here reset `logical_scroll_top`
+        // to None, which then resolves to "top of buffer" — every
+        // keystroke yanked the viewport back to the top before
+        // `ensure_caret_visible` ran, which then re-scrolled to
+        // bring the caret into view (often at the bottom edge).
+        // `splice(0..old, new)` updates the item count while
+        // keeping the existing scroll offset intact.
+        self.list_state.splice(0..old_count, new_count);
     }
 
     /// Total pixel width of the widest line — what the
