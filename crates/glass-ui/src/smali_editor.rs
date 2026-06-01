@@ -89,21 +89,111 @@ impl Shell {
     /// edit. Cheap: smali parse is microseconds; we skip tabs
     /// where the buffer hasn't been touched since the last
     /// successful reparse.
+    ///
+    /// When the reparse succeeds and the new class differs from
+    /// the original lifted version, also stage the edit into
+    /// `bundle.smali_edits` so it shows up in the Changes
+    /// dialog automatically — no Cmd-S needed.
     pub(crate) fn reparse_idle_smali_editors(&mut self, cx: &mut Context<Self>) {
-        let mut any_changed = false;
+        // First pass: collect (artifact, class_jni, new parse).
+        // Doing the parse + bundle staging in one pass would
+        // require a mutable borrow of `self.tabs` and an
+        // immutable borrow of `self.bundle()` concurrently, so
+        // split it into two phases.
+        let mut to_stage: Vec<(
+            glass_db::ArtifactId,
+            String,
+            smali::types::SmaliClass,
+        )> = Vec::new();
         for tab in &mut self.tabs {
-            if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
+            let (artifact, class_jni) = match &tab.kind {
+                TabKind::SmaliEditor { artifact, class_jni } => {
+                    (artifact.clone(), class_jni.clone())
+                }
+                _ => continue,
+            };
+            let Some(editor) = tab.code_editor.as_mut() else { continue };
+            if !editor.is_reparse_due(Duration::from_millis(REPARSE_IDLE_MS)) {
                 continue;
             }
-            let Some(editor) = tab.code_editor.as_mut() else { continue };
-            if editor.is_reparse_due(Duration::from_millis(REPARSE_IDLE_MS)) {
-                editor.reparse_smali();
-                any_changed = true;
+            editor.reparse_smali();
+            if let Some(parsed) = editor.parsed_smali.clone() {
+                to_stage.push((artifact, class_jni, parsed));
             }
         }
-        if any_changed {
+        let mut any_staged = false;
+        for (artifact, class_jni, parsed) in to_stage {
+            if self.auto_stage_if_changed(&artifact, &class_jni, parsed, cx) {
+                any_staged = true;
+            }
+        }
+        if any_staged {
             cx.notify();
         }
+    }
+
+    /// Stage `parsed` against the original lifted class — but
+    /// only if it actually differs from both (a) the original,
+    /// and (b) anything currently staged. Returns true when a
+    /// new edit landed in the changes registry.
+    fn auto_stage_if_changed(
+        &mut self,
+        artifact: &glass_db::ArtifactId,
+        class_jni: &str,
+        parsed: smali::types::SmaliClass,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(bundle) = self.bundle() else { return false };
+        let key = (artifact.clone(), class_jni.to_string());
+        let Some(original) = bundle.smali_classes.get(&key) else { return false };
+        // Render to smali text and compare — cheaper than a deep
+        // equality on the structured classes (and matches what
+        // export-patched will actually emit).
+        let new_text = parsed.to_smali();
+        let original_text = original.to_smali();
+        if new_text == original_text {
+            // No real change vs original — drop any existing
+            // staged edit (the user reverted by typing back to
+            // the original) and stop.
+            if bundle.smali_edits.get(artifact, class_jni).is_some() {
+                drop(bundle);
+                if let Some(bundle) = self.bundle_mut() {
+                    bundle.smali_edits.remove(artifact, class_jni);
+                }
+                return true;
+            }
+            return false;
+        }
+        // If something's already staged and it matches the new
+        // parse, skip — no-op write.
+        if let Some(staged) = bundle.smali_edits.get(artifact, class_jni) {
+            if staged.modified.to_smali() == new_text {
+                return false;
+            }
+        }
+        drop(bundle);
+        self.stage_smali_class_edit(
+            artifact.clone(),
+            class_jni.to_string(),
+            parsed,
+            cx,
+        );
+        // Buffer now matches what's staged → drop the `*` in
+        // the tab title. The Changes dialog is the source of
+        // truth for "what's pending" from here on. Look up by
+        // (artifact, class_jni) — the tab being staged might
+        // not be the currently active one.
+        for tab in &mut self.tabs {
+            if let TabKind::SmaliEditor { artifact: a, class_jni: c } = &tab.kind {
+                if a == artifact && c == class_jni {
+                    if let Some(editor) = tab.code_editor.as_mut() {
+                        editor.mark_clean();
+                    }
+                    break;
+                }
+            }
+        }
+        true
     }
 
     /// Parse the active smali editor buffer and, on success,

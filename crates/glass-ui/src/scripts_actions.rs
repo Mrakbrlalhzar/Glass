@@ -498,16 +498,20 @@ impl Shell {
         let cmd = k.modifiers.platform || k.modifiers.control;
         let shift = k.modifiers.shift;
 
-        // Intercept Cmd-S before forwarding to the editor — Save
-        // semantics differ per editor kind.
+        // Intercept Cmd-S before forwarding to the editor.
+        //
+        // Scripts: save to disk + refresh meta.
+        // Smali: no-op — smali edits auto-stage 500ms after
+        //   the user stops typing (see `reparse_idle_smali_editors`),
+        //   so there's nothing to save here. We still consume
+        //   the key so an accidental Cmd-S doesn't fall through
+        //   to inserting "s" or whatever.
         if cmd && !shift && k.key == "s" {
             match editor_kind {
                 EditorKind::Script(name) => {
                     self.save_active_script_editor(&name, cx);
                 }
-                EditorKind::Smali(artifact, class_jni) => {
-                    self.save_active_smali_editor(artifact, class_jni, cx);
-                }
+                EditorKind::Smali(_, _) => {}
             }
             return true;
         }
