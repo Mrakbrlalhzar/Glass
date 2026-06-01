@@ -79,6 +79,14 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fb
 # Linux build panics with `unreachable!()` in `current_platform`
 # at first window creation.
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f", features = ["font-kit", "wayland", "x11"] }
+# Rope-backed buffer + tree-sitter language support from Zed. Pinned
+# to the same rev as gpui so versions never drift. Used by the
+# `code_editor` widget to back script + (eventually) smali editing
+# with a proper text engine rather than the fixed-width text input.
+rope = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
+text = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
+language = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
+multi_buffer = { git = "https://github.com/zed-industries/zed", rev = "700b0b5de6b1101fbe699f714888d1b68680cb0f" }
 
 # Errors / logging / serde used across crates
 anyhow = "1"

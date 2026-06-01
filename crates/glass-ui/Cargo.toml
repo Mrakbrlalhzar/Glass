@@ -25,6 +25,10 @@ parking_lot.workspace = true
 plist.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+rope.workspace = true
+text.workspace = true
+language.workspace = true
+multi_buffer.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
