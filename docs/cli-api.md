@@ -60,6 +60,20 @@ non-zero:
 - `bundle-open <path>` — cache a bundle for subsequent calls.
 - `bundle-close` — drop the cache.
 - `bundle-status` — report what's currently open.
+- `frida-attach --pid <pid> [--host <host:port>]` — attach to a
+  Frida-instrumented process (gadget mode default is
+  `127.0.0.1:27042` after `adb forward tcp:27042 tcp:27042`).
+- `frida-detach` — drop the session.
+- `frida-status` — report the current Frida session.
+- `frida-load-script --source <js> [--name <tag>]` — load JS;
+  returns a `script_id`.
+- `frida-unload-script --script-id <id>` — drop a loaded script.
+- `frida-post-message --script-id <id> --message <json>` —
+  forward a message; the script observes via `recv(...)`.
+- `frida-poll-events` — drain accumulated `send(...)` / log /
+  error / detach events.
+- `frida-resume --pid <pid>` — unblock a gadget loaded with
+  `on_load: wait`.
 
 Run `glass mcp` and invoke them through an MCP client.
 

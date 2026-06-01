@@ -507,6 +507,157 @@ pub(crate) fn call(
             }))?
         }
         "patch-schema" => json_of(&glass_api::patch_file_schema())?,
+
+        // ---- Frida session lifecycle -----------------------------
+        "frida-attach" => {
+            // Attach to a Frida-instrumented process. `host` is a
+            // `host:port` reachable from the dev machine — for
+            // gadget mode this is typically `127.0.0.1:27042`
+            // after `adb forward tcp:27042 tcp:27042`. For
+            // frida-server mode `frida-ls-devices` shows the
+            // remote endpoint. Replaces any existing session.
+            let host = opt_str(args, "host")
+                .unwrap_or_else(|| "127.0.0.1:27042".to_string());
+            let pid = args
+                .get("pid")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required u32 arg \"pid\"".into(),
+                ))? as u32;
+            // Drop any prior session before spawning a new actor.
+            {
+                let mut st = state.lock();
+                if let Some(prev) = st.frida.take() {
+                    let _ = prev.session.detach();
+                    prev.session.shutdown();
+                }
+            }
+            let session = glass_frida::Session::spawn();
+            let report = session
+                .attach_remote(host.clone(), pid)
+                .map_err(DispatchError::Other)?;
+            let agent_version = report.agent_version.clone();
+            let os = report.os.clone();
+            {
+                let mut st = state.lock();
+                st.frida = Some(crate::state::FridaAttached {
+                    session,
+                    host: host.clone(),
+                    pid,
+                    agent_version: agent_version.clone(),
+                    os: os.clone(),
+                });
+            }
+            json!({
+                "attached": true,
+                "host": host,
+                "pid": pid,
+                "agent_version": agent_version,
+                "os": os,
+            })
+        }
+        "frida-detach" => {
+            let prev = { state.lock().frida.take() };
+            let had = prev.is_some();
+            if let Some(p) = prev {
+                let _ = p.session.detach();
+                p.session.shutdown();
+            }
+            json!({ "detached": had })
+        }
+        "frida-status" => {
+            let st = state.lock();
+            match st.frida.as_ref() {
+                Some(f) => json!({
+                    "attached": true,
+                    "host": f.host,
+                    "pid": f.pid,
+                    "agent_version": f.agent_version,
+                    "os": f.os,
+                }),
+                None => json!({ "attached": false }),
+            }
+        }
+        "frida-load-script" => {
+            // Load JS source into the attached session. `name` is
+            // a short tag for diagnostics; `source` is the literal
+            // JS (use frida's repl semantics). Returns a
+            // `script_id` to use for unload / post-message / event
+            // routing.
+            let name_arg = opt_str(args, "name")
+                .unwrap_or_else(|| "mcp-script".to_string());
+            let source = require_str(args, "source")?;
+            let session = clone_frida(state)?;
+            let id = session.alloc_script_id();
+            session
+                .create_script(id, name_arg.clone(), source)
+                .map_err(DispatchError::Other)?;
+            json!({ "script_id": id, "name": name_arg })
+        }
+        "frida-unload-script" => {
+            let id = args
+                .get("script_id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required u32 arg \"script_id\"".into(),
+                ))? as u32;
+            let session = clone_frida(state)?;
+            session.unload_script(id).map_err(DispatchError::Other)?;
+            json!({ "unloaded": id })
+        }
+        "frida-post-message" => {
+            // Forward a JSON value to the running script — the
+            // script observes it via `recv(...)`. Accepts either
+            // a JSON string (passed through) or any other JSON
+            // value (serialised here so the LLM doesn't have to
+            // double-encode).
+            let id = args
+                .get("script_id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required u32 arg \"script_id\"".into(),
+                ))? as u32;
+            let message_value = args
+                .get("message")
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required arg \"message\"".into(),
+                ))?;
+            let payload = match message_value {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other)?,
+            };
+            let session = clone_frida(state)?;
+            session
+                .post_message(id, payload)
+                .map_err(DispatchError::Other)?;
+            json!({ "posted": id })
+        }
+        "frida-poll-events" => {
+            // Non-blocking drain of accumulated events. Each
+            // event is rendered as a `{kind, ...}` object. Call
+            // this on a tick to surface `send(...)` from scripts.
+            let session = clone_frida(state)?;
+            let events = session.poll_events();
+            let rendered: Vec<Value> = events
+                .into_iter()
+                .map(render_session_event)
+                .collect();
+            json!({ "events": rendered })
+        }
+        "frida-resume" => {
+            // Unblock a gadget loaded with `on_load: wait`. Cheap
+            // no-op once already resumed.
+            let pid = args
+                .get("pid")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required u32 arg \"pid\"".into(),
+                ))? as u32;
+            let session = clone_frida(state)?;
+            session.resume(pid).map_err(DispatchError::Other)?;
+            json!({ "resumed": pid })
+        }
+
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
     let duration_ms = start.elapsed().as_millis();
@@ -570,6 +721,45 @@ fn require_hex_u64(args: &Value, key: &str) -> Result<u64> {
 
 fn json_of<T: serde::Serialize>(v: &T) -> Result<Value> {
     Ok(serde_json::to_value(v)?)
+}
+
+/// Pull a clone of the attached Frida session out of state, or
+/// fail with a useful error pointing the caller at `frida-attach`.
+fn clone_frida(state: &crate::state::StateHandle) -> Result<glass_frida::Session> {
+    state
+        .lock()
+        .frida
+        .as_ref()
+        .map(|f| f.session.clone())
+        .ok_or_else(|| DispatchError::Other(
+            "no Frida session attached — call frida-attach first".into(),
+        ))
+}
+
+fn render_session_event(ev: glass_frida::SessionEvent) -> Value {
+    use glass_frida::SessionEvent::*;
+    match ev {
+        ScriptMessage { script_id, payload } => json!({
+            "kind": "message",
+            "script_id": script_id,
+            "payload": payload,
+        }),
+        ScriptError { script_id, description } => json!({
+            "kind": "error",
+            "script_id": script_id,
+            "description": description,
+        }),
+        ScriptLog { script_id, level, message } => json!({
+            "kind": "log",
+            "script_id": script_id,
+            "level": level,
+            "message": message,
+        }),
+        Detached { reason } => json!({
+            "kind": "detached",
+            "reason": reason,
+        }),
+    }
 }
 
 fn parse_kind(s: &str) -> Option<glass_api::SymbolKindName> {

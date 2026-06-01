@@ -31,6 +31,17 @@ pub(crate) struct OpenBundle {
     pub bundle: Arc<glass_api::Bundle>,
 }
 
+/// An attached Frida session and the metadata about how it
+/// was set up. One per MCP connection — the GUI's Frida dock
+/// follows the same one-session model.
+pub(crate) struct FridaAttached {
+    pub session: glass_frida::Session,
+    pub host: String,
+    pub pid: u32,
+    pub agent_version: Option<String>,
+    pub os: Option<String>,
+}
+
 /// Container for everything the MCP server needs to remember
 /// across tool calls.
 pub(crate) struct McpState {
@@ -39,11 +50,16 @@ pub(crate) struct McpState {
     /// few legitimate "compare two apps" flows can use two MCP
     /// connections. Single-bundle keeps the state shape simple.
     pub bundle: Option<OpenBundle>,
+    /// The single attached Frida session, if any.
+    pub frida: Option<FridaAttached>,
 }
 
 impl McpState {
     pub fn new() -> Self {
-        Self { bundle: None }
+        Self {
+            bundle: None,
+            frida: None,
+        }
     }
 
     /// Return the open bundle when its `source_path` matches

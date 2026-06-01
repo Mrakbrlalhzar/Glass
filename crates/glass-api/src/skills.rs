@@ -852,6 +852,138 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({ "type": "object" }),
                 example: "glass patch-schema",
             },
+
+            // ---- Frida session lifecycle (MCP-only) ------------------
+            // Frida sessions can only exist inside a stateful MCP server;
+            // the CLI stubs print "MCP-only" and exit non-zero.
+            Skill {
+                name: "frida-attach",
+                description: "Attach to a Frida-instrumented process. `host` is a host:port reachable from the dev machine — for gadget mode use `127.0.0.1:27042` after `adb forward tcp:27042 tcp:27042`. Replaces any prior session. Returns the agent version + OS when the gadget surfaces them.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["pid"],
+                    "properties": {
+                        "host": {"type":"string","description":"host:port (default 127.0.0.1:27042)"},
+                        "pid": {"type":"integer","description":"target process id on the device"}
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "attached": {"type":"boolean"},
+                        "host": {"type":"string"},
+                        "pid": {"type":"integer"},
+                        "agent_version": {"type":["string","null"]},
+                        "os": {"type":["string","null"]}
+                    }
+                }),
+                example: "frida-attach {\"pid\": 12345}",
+            },
+            Skill {
+                name: "frida-detach",
+                description: "Detach from the current Frida session and tear down the actor thread. No-op when nothing is attached.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": { "detached": {"type":"boolean"} }
+                }),
+                example: "frida-detach",
+            },
+            Skill {
+                name: "frida-status",
+                description: "Report the current Frida session, if any. Returns `{attached: true, host, pid, agent_version, os}` or `{attached: false}`.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "frida-status",
+            },
+            Skill {
+                name: "frida-load-script",
+                description: "Load JS source into the attached session. Returns a `script_id` to use for unload / post-message / event correlation.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["source"],
+                    "properties": {
+                        "name": {"type":"string","description":"short diagnostic label (default \"mcp-script\")"},
+                        "source": {"type":"string","description":"raw JS source"}
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "script_id": {"type":"integer"},
+                        "name": {"type":"string"}
+                    }
+                }),
+                example: "frida-load-script {\"source\": \"send('hello')\"}",
+            },
+            Skill {
+                name: "frida-unload-script",
+                description: "Unload a previously-loaded script by id.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["script_id"],
+                    "properties": {
+                        "script_id": {"type":"integer"}
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": { "unloaded": {"type":"integer"} }
+                }),
+                example: "frida-unload-script {\"script_id\": 1}",
+            },
+            Skill {
+                name: "frida-post-message",
+                description: "Forward a JSON message to a loaded script. The script observes it via `recv(...)`. `message` may be either a JSON string (passed through) or any JSON value (serialised here).",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["script_id","message"],
+                    "properties": {
+                        "script_id": {"type":"integer"},
+                        "message": {"description":"any JSON value or string"}
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": { "posted": {"type":"integer"} }
+                }),
+                example: "frida-post-message {\"script_id\": 1, \"message\": {\"cmd\":\"go\"}}",
+            },
+            Skill {
+                name: "frida-poll-events",
+                description: "Drain any events the session has accumulated since the last call. Each event is `{kind: \"message\"|\"error\"|\"log\"|\"detached\", ...}`. Non-blocking; returns an empty array when nothing is ready.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "events": {"type":"array"}
+                    }
+                }),
+                example: "frida-poll-events",
+            },
+            Skill {
+                name: "frida-resume",
+                description: "Unblock a gadget loaded with `on_load: wait`. Cheap no-op once already resumed.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["pid"],
+                    "properties": { "pid": {"type":"integer"} }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": { "resumed": {"type":"integer"} }
+                }),
+                example: "frida-resume {\"pid\": 12345}",
+            },
         ],
     }
 }

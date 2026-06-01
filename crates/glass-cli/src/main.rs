@@ -41,6 +41,17 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
                  use them through an MCP client.",
             )))
         }
+        Cmd::FridaAttach { .. }
+        | Cmd::FridaDetach
+        | Cmd::FridaStatus
+        | Cmd::FridaLoadScript { .. }
+        | Cmd::FridaUnloadScript { .. }
+        | Cmd::FridaPostMessage { .. }
+        | Cmd::FridaPollEvents
+        | Cmd::FridaResume { .. } => Some(Err(anyhow::anyhow!(
+            "frida-* verbs are MCP-only — Frida sessions can't survive the CLI's \
+             one-shot lifecycle. Run `glass mcp` and use them through an MCP client.",
+        ))),
         Cmd::Inspect { path } => Some(verbs::inspect(path.clone(), format)),
         Cmd::Artifacts { path } => Some(verbs::artifacts(path.clone(), format)),
         Cmd::Sections { path, artifact } => {
@@ -304,6 +315,44 @@ enum Cmd {
     BundleClose,
     /// (MCP-only) Report what bundle (if any) is currently cached.
     BundleStatus,
+
+    /// (MCP-only) Attach to a Frida-instrumented process.
+    FridaAttach {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        pid: u32,
+    },
+    /// (MCP-only) Detach the current Frida session.
+    FridaDetach,
+    /// (MCP-only) Report the current Frida session, if any.
+    FridaStatus,
+    /// (MCP-only) Load JS source into the attached session.
+    FridaLoadScript {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        source: String,
+    },
+    /// (MCP-only) Unload a previously-loaded script by id.
+    FridaUnloadScript {
+        #[arg(long)]
+        script_id: u32,
+    },
+    /// (MCP-only) Forward a JSON message to a loaded script.
+    FridaPostMessage {
+        #[arg(long)]
+        script_id: u32,
+        #[arg(long)]
+        message: String,
+    },
+    /// (MCP-only) Drain accumulated session events.
+    FridaPollEvents,
+    /// (MCP-only) Unblock a gadget loaded with `on_load: wait`.
+    FridaResume {
+        #[arg(long)]
+        pid: u32,
+    },
 
     // ----- Automation verbs (structured JSON output) -----------------
     /// Inspect a bundle: kind, label, content hash, artifact list.
@@ -889,6 +938,14 @@ fn main() -> Result<()> {
         Cmd::BundleOpen { .. }
         | Cmd::BundleClose
         | Cmd::BundleStatus
+        | Cmd::FridaAttach { .. }
+        | Cmd::FridaDetach
+        | Cmd::FridaStatus
+        | Cmd::FridaLoadScript { .. }
+        | Cmd::FridaUnloadScript { .. }
+        | Cmd::FridaPostMessage { .. }
+        | Cmd::FridaPollEvents
+        | Cmd::FridaResume { .. }
         | Cmd::Inspect { .. }
         | Cmd::Artifacts { .. }
         | Cmd::Sections { .. }
