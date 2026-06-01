@@ -1527,6 +1527,10 @@ impl Shell {
         let Some(active) = self.active_tab else { return };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
             TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            // SmaliEditor tabs also drive the templated editors —
+            // launched via the right-click "Edit in template…"
+            // items in the code editor's context menu.
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return;
@@ -1598,6 +1602,7 @@ impl Shell {
             };
             state.build_modified(original)
         };
+        let resync_artifact = artifact.clone();
         if let Some(bundle) = self.bundle_mut() {
             bundle.smali_edits.insert(crate::smali_edits::SmaliEdit {
                 key: crate::smali_edits::SmaliEditKey {
@@ -1616,6 +1621,8 @@ impl Shell {
                 }
             }
         }
+        // Resync any open SmaliEditor buffer.
+        self.resync_smali_editor_buffer(&resync_artifact, &class_jni);
         cx.notify();
     }
 
@@ -1851,6 +1858,10 @@ impl Shell {
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
             TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            // Allow opening the templated field editor from a
+            // SmaliEditor tab too (via right-click "Edit field
+            // in template…").
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return false;
@@ -1936,6 +1947,7 @@ impl Shell {
                 }
             }
         };
+        let resync_artifact = artifact.clone();
         if let Some(bundle) = self.bundle_mut() {
             bundle.smali_edits.insert(crate::smali_edits::SmaliEdit {
                 key: crate::smali_edits::SmaliEditKey {
@@ -1952,6 +1964,11 @@ impl Shell {
                 }
             }
         }
+        // Resync any open SmaliEditor buffer so its text matches
+        // the freshly staged field — otherwise the editor's
+        // buffer still has the pre-popover text and the next
+        // auto-stage tick will overwrite the popover's change.
+        self.resync_smali_editor_buffer(&resync_artifact, &class_jni);
         cx.notify();
     }
 
@@ -1992,6 +2009,9 @@ impl Shell {
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
             TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            // Right-click "Edit method in template…" in the
+            // code editor.
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return false;
@@ -2072,7 +2092,13 @@ impl Shell {
                 }
             }
         };
+        let resync_artifact = artifact.clone();
+        let resync_class_jni = class_jni.clone();
         self.stage_smali_class_edit(artifact, class_jni, modified, cx);
+        // Resync any open SmaliEditor so its buffer matches the
+        // freshly staged method — otherwise the editor's
+        // pre-popover text wins on the next auto-stage tick.
+        self.resync_smali_editor_buffer(&resync_artifact, &resync_class_jni);
     }
 
     // ---- External editor ----------------------------------------------

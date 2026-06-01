@@ -22,6 +22,14 @@ use gpui::{Context, MouseDownEvent, Window};
 
 use crate::Shell;
 
+/// The `row`-th line of `text` as an owned String, or `None`
+/// when `row` is past the end. Used by the editor's right-click
+/// menu builder to pull `.method` / `.field` declaration lines
+/// straight out of the buffer.
+fn nth_line_of(text: &str, row: u32) -> Option<String> {
+    text.lines().nth(row as usize).map(|s| s.to_string())
+}
+
 /// Resolved kind for a cmd-clickable / right-click-Follow-able
 /// token in a smali editor row. Same shape the existing
 /// SmaliClass viewer's click handlers branch on.
@@ -597,6 +605,43 @@ impl Shell {
         smali_link_target_at_col(&text, (off - line_start) as usize)
     }
 
+    /// Whether the given row in the buffer text is a class-
+    /// declaration row (`.class`, `.super`, `.implements`,
+    /// `.source`, or sitting inside the class-level annotation
+    /// block before any `.field` / `.method`). Used by the
+    /// editor's right-click menu to offer "Edit class header in
+    /// template…" only when the row qualifies.
+    fn row_is_class_decl(buffer_text: &str, row: u32) -> bool {
+        let row = row as usize;
+        let mut in_class_scope = true;
+        for (i, raw) in buffer_text.lines().enumerate() {
+            let t = raw.trim_start();
+            if t.starts_with(".field ")
+                || t.starts_with(".field\t")
+                || t == ".field"
+                || t.starts_with(".method ")
+                || t.starts_with(".method\t")
+                || t == ".method"
+            {
+                in_class_scope = false;
+                if i >= row {
+                    return false;
+                }
+            }
+            if i == row {
+                return in_class_scope
+                    && (t.starts_with(".class")
+                        || t.starts_with(".super")
+                        || t.starts_with(".implements")
+                        || t.starts_with(".source")
+                        || t.starts_with(".annotation")
+                        || t.starts_with(".end annotation")
+                        || t.starts_with(".subannotation"));
+            }
+        }
+        false
+    }
+
     /// Smali-specific context-menu builder: appends nav /
     /// annotation / revert items to `items` based on what
     /// (method or field) sits under the right-clicked row.
@@ -754,6 +799,19 @@ impl Shell {
                         });
                     }
                 }
+                // Right on the `.method` header? Offer the
+                // templated header editor. Reading the buffer
+                // text for the header row gives the existing
+                // `open_method_edit_for_line` what it needs.
+                if line_offset == 0 {
+                    if let Some(header_line) =
+                        nth_line_of(buffer_text, click_row.unwrap_or(0))
+                    {
+                        items.push(ContextMenuItem::EditSmaliMethodInTemplate {
+                            line: header_line,
+                        });
+                    }
+                }
                 if changed_at_row {
                     items.push(ContextMenuItem::RevertSmaliMethodEdit {
                         artifact: artifact.clone(),
@@ -777,6 +835,13 @@ impl Shell {
                     field_ref,
                     label: label.clone(),
                 });
+                if let Some(field_line) =
+                    nth_line_of(buffer_text, click_row.unwrap_or(0))
+                {
+                    items.push(ContextMenuItem::EditSmaliFieldInTemplate {
+                        line: field_line,
+                    });
+                }
                 if changed_at_row {
                     items.push(ContextMenuItem::RevertSmaliFieldEdit {
                         artifact: artifact.clone(),
@@ -789,7 +854,16 @@ impl Shell {
                     });
                 }
             }
-            None => {}
+            None => {
+                // Class-header territory — `.class`, `.super`,
+                // `.implements`, etc. Offer the templated
+                // class-decl editor when the row qualifies.
+                if let Some(row) = click_row {
+                    if Self::row_is_class_decl(buffer_text, row) {
+                        items.push(ContextMenuItem::EditSmaliClassDeclInTemplate);
+                    }
+                }
+            }
         }
 
         if class_has_edit {

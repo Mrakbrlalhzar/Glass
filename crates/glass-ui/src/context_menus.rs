@@ -1042,6 +1042,15 @@ impl Shell {
                     cx.notify();
                 }
             }
+            ContextMenuItem::EditSmaliClassDeclInTemplate => {
+                self.open_class_decl_edit(cx);
+            }
+            ContextMenuItem::EditSmaliFieldInTemplate { line } => {
+                self.open_field_edit_for_line(&line, cx);
+            }
+            ContextMenuItem::EditSmaliMethodInTemplate { line } => {
+                self.open_method_edit_for_line(&line, cx);
+            }
             ContextMenuItem::EditorPaste => {
                 let text = cx
                     .read_from_clipboard()

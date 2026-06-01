@@ -243,6 +243,22 @@ pub enum ContextMenuItem {
     /// any active selection). Shown only when the clipboard
     /// holds text.
     EditorPaste,
+    /// "Edit class header in template…" — opens the templated
+    /// class-decl popover for the smali editor's class.
+    EditSmaliClassDeclInTemplate,
+    /// "Edit field in template…" — opens the templated field
+    /// editor seeded from `line` (the `.field …` text).
+    EditSmaliFieldInTemplate {
+        /// The verbatim `.field` declaration line — passed
+        /// straight into `open_field_edit_for_line`.
+        line: String,
+    },
+    /// "Edit method header in template…" — opens the templated
+    /// method-header editor seeded from `line` (the `.method …`
+    /// declaration text).
+    EditSmaliMethodInTemplate {
+        line: String,
+    },
 }
 
 /// Where a Follow / FollowInNewTab action points. Carries the
@@ -404,6 +420,18 @@ pub fn render_context_menu(
             ContextMenuItem::EditorPaste => {
                 ("Paste".to_string(), SharedString::from(""))
             }
+            ContextMenuItem::EditSmaliClassDeclInTemplate => (
+                "Edit class header in template…".to_string(),
+                SharedString::from(""),
+            ),
+            ContextMenuItem::EditSmaliFieldInTemplate { .. } => (
+                "Edit field in template…".to_string(),
+                SharedString::from(""),
+            ),
+            ContextMenuItem::EditSmaliMethodInTemplate { .. } => (
+                "Edit method header in template…".to_string(),
+                SharedString::from(""),
+            ),
         };
         let weak = weak.clone();
         panel_el = panel_el.child(
