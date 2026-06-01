@@ -64,8 +64,10 @@ impl Shell {
             return;
         }
         let mut tab = crate::Tab::new(kind);
-        tab.code_editor =
-            Some(crate::code_editor::CodeEditor::from_string(body));
+        tab.code_editor = Some(
+            crate::code_editor::CodeEditor::from_string(body)
+                .with_highlight(crate::code_editor::HighlightMode::Smali),
+        );
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);
         cx.notify();

@@ -94,6 +94,22 @@ pub(crate) struct CodeEditor {
     /// shifts each row's body by `-h_offset` so long lines pan
     /// in / out of view. Updated by the scroll-wheel handler.
     pub(crate) h_offset: gpui::Pixels,
+    /// Which highlighter to apply when painting line bodies.
+    /// Set by the tab opener (`SmaliEditor` → Smali, plain
+    /// scripts → None); the renderer branches on this.
+    pub(crate) highlight: HighlightMode,
+}
+
+/// Per-language highlighter selection. Line-local for v1: each
+/// renderer paint re-tokenises only the visible rows, so even
+/// large files stay cheap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HighlightMode {
+    /// No highlighting — plain text. Default for ScriptEditor
+    /// tabs until we add a JS tokeniser.
+    None,
+    /// Smali source (DEX classes). Uses `crate::smali::tokenize_smali_line`.
+    Smali,
 }
 
 impl CodeEditor {
@@ -122,7 +138,15 @@ impl CodeEditor {
             body_bounds: gpui::Bounds::default(),
             dragging: false,
             h_offset: gpui::Pixels::from(0.),
+            highlight: HighlightMode::None,
         }
+    }
+
+    /// Pick the highlighter for this editor. Returns `self` for
+    /// chained construction (`CodeEditor::from_string(body).with_highlight(HighlightMode::Smali)`).
+    pub fn with_highlight(mut self, mode: HighlightMode) -> Self {
+        self.highlight = mode;
+        self
     }
 
     /// Pan the horizontal scroll by `dx`, clamped to [0, max].
@@ -859,6 +883,7 @@ pub fn render_code_editor(
     };
     let caret_colour = theme.shell.text_bright.rgba();
     let selection_colour = theme.modals.palette_hover.rgba();
+    let highlight = editor.highlight;
 
     // gpui's list takes the list_state by value; we clone here so
     // the editor keeps owning its copy.
@@ -891,6 +916,7 @@ pub fn render_code_editor(
                 fg,
                 caret_colour,
                 selection_colour,
+                highlight,
             );
             div()
                 .h(px(LINE_HEIGHT))
@@ -1127,10 +1153,8 @@ fn render_line_body(
     fg: gpui::Rgba,
     caret_colour: gpui::Rgba,
     selection_colour: gpui::Rgba,
+    highlight: HighlightMode,
 ) -> gpui::Div {
-    // Convert per-row byte columns to char indices for slicing
-    // (the rope columns are bytes; rust slices need to be on
-    // char boundaries).
     let line_len_bytes = text.len();
     // Selection range for this row, in byte columns. None when
     // the selection doesn't touch this row.
@@ -1147,45 +1171,107 @@ fn render_line_body(
     } else {
         None
     };
+
+    // Build a list of coloured token spans (byte_start, byte_end,
+    // colour). Single Plain span when no highlighter is set.
+    let token_spans: Vec<(usize, usize, gpui::Rgba)> = match highlight {
+        HighlightMode::None => {
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![(0, line_len_bytes, fg)]
+            }
+        }
+        HighlightMode::Smali => {
+            let chunks = crate::smali::tokenize_smali_line(text);
+            let mut spans = Vec::with_capacity(chunks.len());
+            let mut at = 0usize;
+            for c in chunks {
+                let len = c.text.len();
+                let kind_rgb = crate::palette::chunk_colour(c.kind);
+                // Materialise the palette's rgb into the editor's
+                // Rgba form. The palette returns a packed 0xRRGGBB
+                // with no alpha; build an opaque colour.
+                let colour = gpui::Rgba {
+                    r: ((kind_rgb >> 16) & 0xff) as f32 / 255.0,
+                    g: ((kind_rgb >> 8) & 0xff) as f32 / 255.0,
+                    b: (kind_rgb & 0xff) as f32 / 255.0,
+                    a: 1.0,
+                };
+                spans.push((at, at + len, colour));
+                at += len;
+            }
+            if spans.is_empty() && !text.is_empty() {
+                spans.push((0, line_len_bytes, fg));
+            }
+            spans
+        }
+    };
+
     // Compose a flex row of spans. We always emit at least one
     // child so empty lines still register a row height.
-    let mut row_el = gpui::prelude::FluentBuilder::when(
-        gpui::div(),
-        true,
-        |d| d,
-    )
-    .flex()
-    .flex_row()
-    .items_center()
-    .h_full()
-    .text_color(fg)
-    // Allow horizontal overflow on long lines — gpui's flex row
-    // wraps without this.
-    .whitespace_nowrap();
+    let mut row_el = gpui::div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_full()
+        .text_color(fg)
+        // Allow horizontal overflow on long lines — gpui's flex
+        // row wraps without this.
+        .whitespace_nowrap();
+
     use gpui::prelude::*;
-    if let Some((s, e)) = row_sel.filter(|(s, e)| s < e) {
-        let before = safe_slice(text, 0, s);
-        let inside = safe_slice(text, s, e);
-        let after = safe_slice(text, e, line_len_bytes);
-        if !before.is_empty() {
-            row_el = row_el.child(gpui::div().child(SharedString::from(before.to_string())));
+    let sel_range = row_sel.filter(|(s, e)| s < e);
+    for (mut start, end, colour) in token_spans {
+        // For each token span, walk through the optional
+        // selection boundaries inside it so a selection that
+        // overlaps part of a token splits the token into
+        // selected + unselected halves preserving the token
+        // colour. The selection background sits *behind* the
+        // text colour — readability stays intact.
+        while start < end {
+            let mut chunk_end = end;
+            let mut selected = false;
+            if let Some((s, e)) = sel_range {
+                if start < s {
+                    // We're before the selection — render up to
+                    // the selection's start.
+                    chunk_end = end.min(s);
+                } else if start < e {
+                    // We're inside the selection — render up to
+                    // the selection's end.
+                    chunk_end = end.min(e);
+                    selected = true;
+                }
+                // else: past the selection, full span unselected.
+            }
+            let slice = safe_slice(text, start, chunk_end);
+            if !slice.is_empty() {
+                let mut child = gpui::div()
+                    .text_color(colour)
+                    .child(SharedString::from(slice.to_string()));
+                if selected {
+                    child = child.bg(selection_colour);
+                }
+                row_el = row_el.child(child);
+            }
+            start = chunk_end;
         }
+    }
+    // Empty line + active selection that spans this row — render
+    // a thin highlight strip so the user can see the line is
+    // selected. (The token loop emits nothing for an empty line.)
+    if text.is_empty() && sel_range.is_some() {
         row_el = row_el.child(
             gpui::div()
-                .bg(selection_colour)
-                .child(SharedString::from(inside.to_string())),
+                .w(px(GLYPH_WIDTH))
+                .h_full()
+                .bg(selection_colour),
         );
-        if !after.is_empty() {
-            row_el = row_el.child(gpui::div().child(SharedString::from(after.to_string())));
-        }
-    } else if !text.is_empty() {
-        row_el = row_el.child(gpui::div().child(SharedString::from(text.to_string())));
     }
-    // Caret: rendered as a 1px-wide div positioned absolutely
-    // inside a relative wrapper so it sits on top of the text.
-    // For now we approximate horizontal position by the byte
-    // column × a fixed glyph width — Courier New at our zoom is
-    // close to monospace so this looks right within a pixel.
+
+    // Caret — same as before, positioned absolutely inside the
+    // relative wrapper.
     if let Some(col) = caret_col {
         let x = col as f32 * GLYPH_WIDTH;
         row_el = row_el.child(
@@ -1198,8 +1284,6 @@ fn render_line_body(
                 .bg(caret_colour),
         );
     }
-    // Wrap in a relative container so the absolute-positioned
-    // caret has the right reference frame.
     gpui::div()
         .relative()
         .h_full()
