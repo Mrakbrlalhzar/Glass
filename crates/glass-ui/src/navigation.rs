@@ -421,18 +421,27 @@ impl Shell {
         line_no: usize,
         cx: &mut Context<Self>,
     ) {
-        // Reuse the existing open_leaf path so we get tab dedupe + the
-        // line-cache rebuild on first activation.
+        // Reuse the existing open_leaf path so we get tab dedupe.
+        // For smali classes this now opens a `SmaliEditor` tab
+        // (the read-only viewer is retired), so we move the
+        // editor's caret to `line_no` and scroll the viewport
+        // to reveal it.
         self.open_leaf(target_leaf, cx);
-        // Find the active tab (= the smali tab we just opened), set
-        // the row + scroll. ensure_active_tab_lines runs on the next
-        // paint via render, which builds tab.lines and sizes tab.scroll
-        // — *after* that, scroll-to becomes meaningful. We schedule the
-        // scroll for the next frame via a tiny defer.
         if let Some(active) = self.active_tab {
             if let Some(tab) = self.tabs.get_mut(active) {
                 tab.selected_row = Some(line_no);
                 tab.pending_smali_scroll_line = Some(line_no);
+                if let Some(editor) = tab.code_editor.as_mut() {
+                    // Place the caret at column 0 of `line_no`
+                    // via the editor's anchor helpers — same
+                    // path a click would take.
+                    let snap = editor.buffer.snapshot();
+                    let max_row = snap.max_point().row;
+                    let row = (line_no as u32).min(max_row);
+                    let off = snap.point_to_offset(rope::Point::new(row, 0));
+                    editor.move_cursor_to_offset(off, false);
+                    editor.ensure_caret_visible();
+                }
             }
         }
         cx.notify();
@@ -600,6 +609,16 @@ impl Shell {
             let Some(kind_src) = bundle.kinds.get(leaf.0) else { return };
             TabKind::from_kind(kind_src)
         };
+        // Smali classes open in the editor now — the read-only
+        // viewer is retired. Route here before the kind-equality
+        // dedupe below since the editor variant carries an
+        // `artifact` field that the tree-side `LeafKind` doesn't
+        // know about.
+        if let TabKind::SmaliClass { class_jni } = &kind {
+            let class_jni = class_jni.clone();
+            self.open_smali_editor_for_class(&class_jni, cx);
+            return;
+        }
         // Listing leaves want a fresh tab on every click.
         if let TabKind::Listing { artifact, section } = &kind {
             let artifact = artifact.clone();

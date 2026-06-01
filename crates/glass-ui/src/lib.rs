@@ -1280,10 +1280,18 @@ impl TabKind {
                 mangled_name: mangled_name.clone(),
                 scroll_line: 0,
             },
-            // ScriptEditor / SmaliEditor are intentionally
-            // ephemeral — they don't round-trip through glass-db.
-            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {
-                return None
+            // ScriptEditor is ephemeral — doesn't round-trip.
+            TabKind::ScriptEditor { .. } => return None,
+            // SmaliEditor persists as a `SmaliClass` TabState so
+            // the schema (which predates the editor) stays
+            // compatible. Restored on reopen, the
+            // `migrate_smali_class_tabs_to_editor` pass swaps
+            // these back into `SmaliEditor` tabs.
+            TabKind::SmaliEditor { class_jni, .. } => {
+                glass_db::TabState::SmaliClass {
+                    class_jni: class_jni.clone(),
+                    scroll_line: 0,
+                }
             }
         })
     }
@@ -1962,37 +1970,14 @@ impl Render for Shell {
         // app.rs::spawn_device_poll.
         let header = header.child(device_picker::render_chip(self, fg, dim, cx));
 
-        // "Edit File" affordance — either the launch button (when
-        // no session is active and a smali tab is in front) or the
-        // live-watching chip (when a session is running). At most
-        // one is on screen at a time.
+        // The "Edit File" toolbar button (external editor launcher)
+        // is retired now that the in-app `SmaliEditor` is the
+        // default for smali — leaf clicks open it directly. We
+        // keep the live-watching chip in case `external_edit` is
+        // still set from an in-flight session (e.g. opened before
+        // the retirement); it self-dismisses on stop.
         let header = if let Some(state) = self.external_edit.as_ref() {
             header.child(external_editor::render_chip(state, fg, dim, cx))
-        } else if external_editor::can_open_editor(self) {
-            header.child(
-                div()
-                    .id("edit-file-btn")
-                    .px_3()
-                    .h(px(24.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .rounded_sm()
-                    .text_sm()
-                    .text_color(fg)
-                    .border_1()
-                    .border_color(self.theme.shell.border.rgba())
-                    .hover(|s| s.bg(self.theme.hovers.standard.rgba()))
-                    .cursor_pointer()
-                    .child(SharedString::from("Edit File"))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _ev, _w, cx| {
-                            this.open_active_smali_in_glass_editor(cx);
-                        }),
-                    ),
-            )
         } else {
             header
         };

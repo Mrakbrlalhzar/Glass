@@ -551,6 +551,82 @@ impl Shell {
         if !restored.is_empty() {
             self.expanded.open = restored;
         }
+        // Migrate legacy SmaliClass tabs (saved by older builds)
+        // to the new SmaliEditor — the read-only viewer is
+        // retired. We rebuild the editor body from the bundle
+        // so any pending_smali_scroll_line on the original tab
+        // becomes a caret-row in the new one.
+        self.migrate_smali_class_tabs_to_editor();
+    }
+
+    /// Walk `self.tabs` and convert any `TabKind::SmaliClass`
+    /// to `TabKind::SmaliEditor`, looking up the owning
+    /// artifact via the bundle. Tabs whose class is no longer
+    /// in the bundle (deleted between sessions) get dropped.
+    fn migrate_smali_class_tabs_to_editor(&mut self) {
+        let Some(bundle) = self.bundle().cloned() else { return };
+        let mut keep: Vec<bool> = Vec::with_capacity(self.tabs.len());
+        for tab in &mut self.tabs {
+            let TabKind::SmaliClass { class_jni } = &tab.kind else {
+                keep.push(true);
+                continue;
+            };
+            let class_jni = class_jni.clone();
+            let pending_line = tab.pending_smali_scroll_line;
+            let Some((artifact, current)) = bundle
+                .smali_classes
+                .iter()
+                .find_map(|((aid, jni), c)| {
+                    if jni == &class_jni {
+                        Some((aid.clone(), c.clone()))
+                    } else {
+                        None
+                    }
+                })
+            else {
+                keep.push(false);
+                continue;
+            };
+            let body_class = bundle
+                .smali_edits
+                .get(&artifact, &class_jni)
+                .map(|e| e.modified.clone())
+                .unwrap_or(current);
+            let body = body_class.to_smali();
+            let mut editor = crate::code_editor::CodeEditor::from_string(body)
+                .with_highlight(crate::code_editor::HighlightMode::Smali);
+            editor.reparse_smali();
+            if let Some(line) = pending_line {
+                let snap = editor.buffer.snapshot();
+                let max_row = snap.max_point().row;
+                let row = (line as u32).min(max_row);
+                let off = snap.point_to_offset(rope::Point::new(row, 0));
+                editor.move_cursor_to_offset(off, false);
+                editor.ensure_caret_visible();
+            }
+            tab.kind = TabKind::SmaliEditor { artifact, class_jni };
+            tab.code_editor = Some(editor);
+            tab.lines = None;
+            tab.pending_smali_scroll_line = None;
+            keep.push(true);
+        }
+        // Drop any tabs whose class is gone in this bundle.
+        let mut idx = 0;
+        self.tabs.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+        // Re-anchor active_tab if we removed tabs above it.
+        if let Some(active) = self.active_tab {
+            if active >= self.tabs.len() {
+                self.active_tab = if self.tabs.is_empty() {
+                    None
+                } else {
+                    Some(self.tabs.len() - 1)
+                };
+            }
+        }
     }
 
     pub(crate) fn bundle(&self) -> Option<&LoadedBundle> {
@@ -727,9 +803,10 @@ impl Shell {
                 let star = if dirty { "*" } else { "" };
                 SharedString::from(format!("{name}.js{star}"))
             }
-            // Smali editor: Java-style class name + .smali (so it
-            // visually parallels the .js form of ScriptEditor),
-            // plus `*` when dirty.
+            // Smali editor: simple class name (`Foo` rather than
+            // `com.example.Foo`) + `.smali`, plus `*` when
+            // dirty. Full package shows in the tooltip / Open
+            // Recent / Changes dialog so we don't lose it.
             TabKind::SmaliEditor { class_jni, .. } => {
                 let dirty = self
                     .tabs
@@ -738,8 +815,12 @@ impl Shell {
                     .map(|e| e.dirty)
                     .unwrap_or(false);
                 let star = if dirty { "*" } else { "" };
-                let display = crate::search::jni_to_dotted(class_jni);
-                SharedString::from(format!("{display}.smali{star}"))
+                let dotted = crate::search::jni_to_dotted(class_jni);
+                let short = dotted
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(dotted.as_str());
+                SharedString::from(format!("{short}.smali{star}"))
             }
         };
         // Count tabs of the same kind. Number only when ≥2 exist.

@@ -81,27 +81,43 @@ pub(crate) const REPARSE_IDLE_MS: u64 = 500;
 
 impl Shell {
     /// Open (or focus) a `SmaliEditor` tab for the currently-
-    /// active `SmaliClass` view. Used by the "Edit File" button
-    /// in the toolbar to launch the in-app editor instead of an
-    /// external one. No-op when the active tab isn't a smali view.
+    /// active `SmaliClass` view. Retained because some legacy
+    /// code paths still reference it; new callsites should use
+    /// `open_smali_editor_for_class` directly.
     pub(crate) fn open_active_smali_in_glass_editor(
         &mut self,
         cx: &mut Context<Self>,
     ) {
         let Some(active) = self.active_tab else { return };
         let class_jni = match self.tabs.get(active).map(|t| &t.kind) {
-            Some(TabKind::SmaliClass { class_jni }) => class_jni.clone(),
+            Some(TabKind::SmaliClass { class_jni })
+            | Some(TabKind::SmaliEditor { class_jni, .. }) => class_jni.clone(),
             _ => return,
         };
-        // Find the owning artifact + the current (possibly-
-        // staged) class body. Same lookup the external-editor
-        // path uses.
+        self.open_smali_editor_for_class(&class_jni, cx);
+    }
+
+    /// Open (or focus) a `SmaliEditor` tab for `class_jni`. Looks
+    /// up the owning artifact through the bundle's
+    /// `smali_classes` map and seeds the editor from the
+    /// staged-or-original class body.
+    ///
+    /// This is the default destination for clicking a smali
+    /// class leaf in the tree (the older `SmaliClass` viewer
+    /// has been retired). Safe to call when no bundle is
+    /// loaded or when `class_jni` isn't a known DEX class —
+    /// no-ops in those cases.
+    pub(crate) fn open_smali_editor_for_class(
+        &mut self,
+        class_jni: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(bundle) = self.bundle() else { return };
         let Some((artifact, current_class)) = bundle
             .smali_classes
             .iter()
             .find_map(|((aid, jni), c)| {
-                if jni == &class_jni {
+                if jni == class_jni {
                     Some((aid.clone(), c.clone()))
                 } else {
                     None
@@ -115,14 +131,14 @@ impl Shell {
         // pristine lifted source.
         let body_class = bundle
             .smali_edits
-            .get(&artifact, &class_jni)
+            .get(&artifact, class_jni)
             .map(|e| e.modified.clone())
             .unwrap_or(current_class);
         let body = body_class.to_smali();
 
         let kind = TabKind::SmaliEditor {
             artifact: artifact.clone(),
-            class_jni: class_jni.clone(),
+            class_jni: class_jni.to_string(),
         };
         if let Some(i) = self.tabs.iter().position(|t| t.kind == kind) {
             self.active_tab = Some(i);
@@ -132,18 +148,11 @@ impl Shell {
         let mut tab = crate::Tab::new(kind);
         let mut editor = crate::code_editor::CodeEditor::from_string(body)
             .with_highlight(crate::code_editor::HighlightMode::Smali);
-        // Seed the parsed model from the initial buffer — the
-        // class came in from a known-good parse upstream so this
-        // should always succeed.
         editor.reparse_smali();
         tab.code_editor = Some(editor);
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);
-        // Compute the initial changed_rows set so any pre-existing
-        // staged edit (the user opened the editor on a class with
-        // changes already staged from inline popovers, etc.) shows
-        // tinted rows from the first paint.
-        self.refresh_changed_rows(&artifact, &class_jni);
+        self.refresh_changed_rows(&artifact, class_jni);
         cx.notify();
     }
 
