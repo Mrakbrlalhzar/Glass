@@ -126,7 +126,22 @@ impl ServerHandler for GlassHandler {
     ) -> Result<CallToolResult, CallToolError> {
         let args = params.arguments.unwrap_or_default();
         let args_value = serde_json::Value::Object(args);
-        match dispatch::call(&params.name, &args_value, &self.state) {
+        // dispatch::call is sync and some verbs internally do
+        // `Runtime::block_on` (glass-device's iOS backend builds
+        // its own multi-thread runtime; the Frida actor blocks
+        // waiting on channel replies). Either is a panic when
+        // invoked directly from a tokio task, so we hop to a
+        // blocking thread.
+        let state = self.state.clone();
+        let name = params.name.clone();
+        let dispatch_result = tokio::task::spawn_blocking(move || {
+            dispatch::call(&name, &args_value, &state)
+        })
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(DispatchError::Other(format!("dispatch task panicked: {join_err}")))
+        });
+        match dispatch_result {
             Ok(json) => Ok(CallToolResult {
                 content: vec![TextContent::new(json, None, None).into()],
                 is_error: None,
