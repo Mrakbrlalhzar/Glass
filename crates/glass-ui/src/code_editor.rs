@@ -1508,14 +1508,17 @@ fn render_line_body(
         None
     };
 
-    // Build a list of coloured token spans (byte_start, byte_end,
-    // colour). Single Plain span when no highlighter is set.
-    let token_spans: Vec<(usize, usize, gpui::Rgba)> = match highlight {
+    // Build a list of coloured token spans
+    // (byte_start, byte_end, colour, is_link). `is_link` is set
+    // for tokens that cmd-click can follow (smali MethodName
+    // tokens) so the renderer can give them an underline-on-
+    // hover affordance.
+    let token_spans: Vec<(usize, usize, gpui::Rgba, bool)> = match highlight {
         HighlightMode::None => {
             if text.is_empty() {
                 Vec::new()
             } else {
-                vec![(0, line_len_bytes, fg)]
+                vec![(0, line_len_bytes, fg, false)]
             }
         }
         HighlightMode::Smali => {
@@ -1534,11 +1537,15 @@ fn render_line_body(
                     b: (kind_rgb & 0xff) as f32 / 255.0,
                     a: 1.0,
                 };
-                spans.push((at, at + len, colour));
+                let is_link = matches!(
+                    c.kind,
+                    glass_arch_arm::ChunkKind::MethodName
+                ) && c.target_text.is_some();
+                spans.push((at, at + len, colour, is_link));
                 at += len;
             }
             if spans.is_empty() && !text.is_empty() {
-                spans.push((0, line_len_bytes, fg));
+                spans.push((0, line_len_bytes, fg, false));
             }
             spans
         }
@@ -1558,7 +1565,12 @@ fn render_line_body(
 
     use gpui::prelude::*;
     let sel_range = row_sel.filter(|(s, e)| s < e);
-    for (mut start, end, colour) in token_spans {
+    // We need each link-span to have a stable element id so
+    // hover styling can attach; collisions are unlikely (row +
+    // start position is unique) but using both keeps the id
+    // deterministic.
+    let mut link_id_counter = 0usize;
+    for (mut start, end, colour, is_link) in token_spans {
         // For each token span, walk through the optional
         // selection boundaries inside it so a selection that
         // overlaps part of a token splits the token into
@@ -1589,7 +1601,26 @@ fn render_line_body(
                 if selected {
                     child = child.bg(selection_colour);
                 }
-                row_el = row_el.child(child);
+                if is_link {
+                    // Give every link-eligible span a unique
+                    // id so the hover-underline lands; the
+                    // editor body already takes the cmd-click
+                    // and dispatches via `try_follow_smali_link_at`,
+                    // so we don't add a per-span click handler —
+                    // the row-level handler is sufficient.
+                    let id = SharedString::from(format!(
+                        "code-link-{row}-{link_id_counter}",
+                    ));
+                    link_id_counter += 1;
+                    row_el = row_el.child(
+                        child
+                            .id(id)
+                            .cursor_pointer()
+                            .hover(|s| s.underline()),
+                    );
+                } else {
+                    row_el = row_el.child(child);
+                }
             }
             start = chunk_end;
         }

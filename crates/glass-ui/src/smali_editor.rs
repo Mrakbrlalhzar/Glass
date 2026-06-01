@@ -12,8 +12,66 @@
 use std::time::Duration;
 
 use gpui::Context;
+use smali::types::{SmaliClass, SmaliField, SmaliMethod};
 
 use crate::{Shell, TabKind};
+
+/// Reorder `parsed.methods` and `parsed.fields` so the i-th
+/// item matches the i-th item in `original` (keyed by name +
+/// JNI signature). Members that aren't in the original move
+/// to the end, preserving their relative order. Members in
+/// the original that have been removed from `parsed` are
+/// dropped from the result.
+///
+/// Why this exists: `SmaliClass::to_smali()` sorts methods +
+/// fields by (name, sig) on write, so the text the user sees
+/// is sorted — but the original lifted class's `methods` /
+/// `fields` Vecs are in DEX byte order. Without realignment,
+/// the changes-dialog's positional diff
+/// (`smali_edits::diff_members`) flags every member that
+/// happened to land in a different slot as "edited," even when
+/// only one was actually changed.
+fn align_members_to_original(original: &SmaliClass, parsed: &mut SmaliClass) {
+    parsed.methods =
+        align_vec(&original.methods, std::mem::take(&mut parsed.methods), |m| {
+            method_key(m)
+        });
+    parsed.fields =
+        align_vec(&original.fields, std::mem::take(&mut parsed.fields), |f| {
+            field_key(f)
+        });
+}
+
+fn method_key(m: &SmaliMethod) -> String {
+    format!("{}{}", m.name, m.signature.to_jni())
+}
+
+fn field_key(f: &SmaliField) -> String {
+    format!("{}:{}", f.name, f.signature.to_jni())
+}
+
+/// Generic alignment: produce a Vec whose i-th element is the
+/// item from `from` matching original[i]'s key. Items from
+/// `from` not in `original` go at the end in their existing
+/// order; original items missing from `from` are dropped
+/// (consistent with what a delete in the editor should look
+/// like).
+fn align_vec<T, F>(original: &[T], mut from: Vec<T>, key: F) -> Vec<T>
+where
+    F: Fn(&T) -> String,
+{
+    let mut out: Vec<T> = Vec::with_capacity(from.len());
+    for orig in original {
+        let target = key(orig);
+        if let Some(pos) = from.iter().position(|item| key(item) == target) {
+            out.push(from.remove(pos));
+        }
+    }
+    // Anything left in `from` is new — append in its existing
+    // (buffer) order.
+    out.extend(from);
+    out
+}
 
 /// How long after the last edit before the idle-reparse loop
 /// will reparse a smali buffer. Short enough that link-following
@@ -239,12 +297,21 @@ impl Shell {
         &mut self,
         artifact: &glass_db::ArtifactId,
         class_jni: &str,
-        parsed: smali::types::SmaliClass,
+        mut parsed: smali::types::SmaliClass,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(bundle) = self.bundle() else { return false };
         let key = (artifact.clone(), class_jni.to_string());
         let Some(original) = bundle.smali_classes.get(&key) else { return false };
+        // Align the parsed methods + fields with the original's
+        // ordering. The smali writer sorts by (name, sig) on
+        // output, so the buffer's text order may differ from
+        // the original's DEX-byte order. Without this, every
+        // re-ordered-on-output method looks "edited" to
+        // `diff_members` (which compares positionally), and
+        // one field edit balloons into hundreds of staged
+        // changes in the Changes dialog.
+        align_members_to_original(original, &mut parsed);
         // Render to smali text and compare — cheaper than a deep
         // equality on the structured classes (and matches what
         // export-patched will actually emit).
@@ -358,5 +425,41 @@ impl Shell {
             editor.mark_clean();
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn align_vec_reorders_to_match_original() {
+        // Strings stand in for SmaliMethod / SmaliField — the
+        // key function is what align_vec uses.
+        let original = vec!["alpha", "beta", "gamma"];
+        // Buffer produced these in writer-sorted order (already
+        // alphabetical here, but the test mimics a real
+        // mismatch shape with a reordered buffer).
+        let parsed = vec!["beta", "gamma", "alpha"];
+        let out = align_vec(&original, parsed, |s| s.to_string());
+        assert_eq!(out, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn align_vec_drops_removed_and_appends_new() {
+        let original = vec!["alpha", "beta"];
+        let parsed = vec!["beta", "delta"];
+        let out = align_vec(&original, parsed, |s| s.to_string());
+        // alpha removed (missing from parsed); beta kept in
+        // position 0; delta is new, appended at the end.
+        assert_eq!(out, vec!["beta", "delta"]);
+    }
+
+    #[test]
+    fn align_vec_preserves_new_member_order() {
+        let original = vec!["a"];
+        let parsed = vec!["a", "new1", "new2"];
+        let out = align_vec(&original, parsed, |s| s.to_string());
+        assert_eq!(out, vec!["a", "new1", "new2"]);
     }
 }
