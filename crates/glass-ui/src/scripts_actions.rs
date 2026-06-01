@@ -222,6 +222,61 @@ impl Shell {
         self.refresh_scripts(cx);
     }
 
+    /// Mutable handle to the active tab's code editor, if any.
+    /// Used by the canvas-overlay bounds capture and the mouse
+    /// click/drag dispatchers — saves callers from repeating
+    /// the "active tab → code_editor.as_mut()" lookup.
+    pub(crate) fn active_code_editor_mut(
+        &mut self,
+    ) -> Option<&mut crate::code_editor::CodeEditor> {
+        let active = self.active_tab?;
+        self.tabs.get_mut(active)?.code_editor.as_mut()
+    }
+
+    /// Left-button mouse-down inside the editor body. Move the
+    /// caret (or extend the selection on shift-click) and mark
+    /// the editor as in a drag — subsequent mouse-move events
+    /// while the button is held will extend the selection.
+    pub(crate) fn code_editor_mouse_down(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        let Some(off) = editor.offset_for_window_point(pos) else { return };
+        editor.begin_click_drag(off, extend);
+        cx.notify();
+    }
+
+    /// Mouse-move while the left button is held — extend the
+    /// selection to the new position. No-op when the editor
+    /// isn't in the drag state (e.g. the user clicked elsewhere
+    /// first and just happens to be passing over).
+    pub(crate) fn code_editor_mouse_drag(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        if !editor.dragging {
+            return;
+        }
+        let Some(off) = editor.offset_for_window_point(pos) else { return };
+        editor.move_cursor_to_offset(off, true);
+        cx.notify();
+    }
+
+    /// Mouse-up — end the drag. Selection (if any) stays put;
+    /// further keystrokes extend it via shift-arrows as usual.
+    pub(crate) fn code_editor_mouse_up(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        if editor.dragging {
+            editor.end_click_drag();
+            cx.notify();
+        }
+    }
+
     /// Route a key event to the code editor on the active
     /// `ScriptEditor` or `SmaliEditor` tab. Returns true when
     /// the key was consumed (so the dispatcher can stop further

@@ -75,6 +75,16 @@ pub(crate) struct CodeEditor {
     /// footer; cleared on the next successful save or when the
     /// buffer changes. None = no message to surface.
     save_error: Option<String>,
+    /// Window-coordinate bounds of the editor body (text area
+    /// only — gutter excluded). Captured every paint via the
+    /// `gpui::canvas` overlay; read at mouse-event time to
+    /// translate window → buffer coords. Origin (0,0) until the
+    /// first paint runs.
+    pub(crate) body_bounds: gpui::Bounds<gpui::Pixels>,
+    /// True between mouse-down and mouse-up inside the editor
+    /// body. When set, subsequent mouse-move events extend the
+    /// selection rather than just hovering.
+    pub(crate) dragging: bool,
 }
 
 impl CodeEditor {
@@ -97,6 +107,8 @@ impl CodeEditor {
             selection_anchor: None,
             desired_column: None,
             save_error: None,
+            body_bounds: gpui::Bounds::default(),
+            dragging: false,
         }
     }
 
@@ -398,6 +410,92 @@ impl CodeEditor {
         Some(s)
     }
 
+    /// Translate a window-coordinate point into a byte offset
+    /// inside the buffer. Returns `None` when the body hasn't
+    /// been laid out yet.
+    ///
+    /// Math: local_x — gutter — text_inset → column via
+    /// `GLYPH_WIDTH`; local_y → row via `LINE_HEIGHT` plus the
+    /// list's logical scroll top. Column clamps to the row's
+    /// actual length so a click past the end snaps to end-of-
+    /// line, and a click inside the gutter snaps to col 0 of the
+    /// corresponding row.
+    pub fn offset_for_window_point(
+        &self,
+        point: gpui::Point<gpui::Pixels>,
+    ) -> Option<usize> {
+        use gpui::Pixels;
+        let b = self.body_bounds;
+        if b.size.width <= Pixels::from(0.) || b.size.height <= Pixels::from(0.) {
+            return None;
+        }
+        // Clamp into the bounds rather than reject outright —
+        // a click 2px below the last line should still position
+        // the caret at end of file; a click on the gutter snaps
+        // to col 0 of the clicked row.
+        let local_x: f32 = (point.x - b.origin.x)
+            .clamp(Pixels::from(0.), b.size.width)
+            .into();
+        let local_y: f32 = (point.y - b.origin.y)
+            .clamp(Pixels::from(0.), b.size.height)
+            .into();
+
+        // Subtract the gutter + text padding (`pl_2` = 8px) so
+        // local_x is measured from the first character cell.
+        let text_x = (local_x - self.gutter_width_px() - TEXT_INSET_PX).max(0.0);
+
+        // Visible-row index → buffer-row index via the list's
+        // logical scroll top.
+        let top = self.list_state.logical_scroll_top();
+        let visible_row = (local_y / LINE_HEIGHT) as u32;
+        let row = top.item_ix as u32 + visible_row;
+
+        let snap = self.buffer.snapshot();
+        let max_row = snap.max_point().row;
+        let row = row.min(max_row);
+
+        // Round to nearest glyph rather than floor — feels more
+        // natural when the user clicks "between" characters.
+        let col = ((text_x / GLYPH_WIDTH) + 0.5) as u32;
+        let row_len = row_length_bytes(&snap, row);
+        let col = col.min(row_len);
+
+        Some(snap.point_to_offset(rope::Point::new(row, col)))
+    }
+
+    /// Move the caret to `offset`, optionally extending the
+    /// selection (shift-click) or starting a fresh one. Used by
+    /// click + drag handlers. Bytes outside the buffer are
+    /// clamped.
+    pub fn move_cursor_to_offset(&mut self, offset: usize, extend: bool) {
+        self.set_cursor(offset, extend);
+    }
+
+    /// Begin a click-drag: place the caret + anchor at `offset`.
+    /// Subsequent mouse-move events while `dragging` is true
+    /// call `move_cursor_to_offset(.., true)` to extend.
+    pub fn begin_click_drag(&mut self, offset: usize, extend: bool) {
+        if extend {
+            // Shift-click: start the selection from the existing
+            // caret rather than wherever the user is clicking.
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.cursor);
+            }
+            self.cursor = offset.min(self.len());
+            self.desired_column = None;
+        } else {
+            self.selection_anchor = None;
+            self.cursor = offset.min(self.len());
+            self.desired_column = None;
+        }
+        self.dragging = true;
+    }
+
+    /// End a click-drag (mouse-up).
+    pub fn end_click_drag(&mut self) {
+        self.dragging = false;
+    }
+
     /// Insert `text` at the caret (or replace the selection
     /// when one is active). Used by the paste flow. Returns
     /// true when the buffer changed.
@@ -601,6 +699,75 @@ pub fn render_code_editor(
     let scrollbar =
         crate::scrollbar::list_scrollbar(&editor.list_state, border, dim);
 
+    // Bounds-capture canvas — fills the body region, calls back
+    // into Shell with its own measured bounds so click handlers
+    // can map window coords → body-local.
+    let weak = cx.entity().downgrade();
+    let bounds_canvas = gpui::canvas(
+        {
+            let weak = weak.clone();
+            move |bounds, _window, cx| {
+                if let Some(entity) = weak.upgrade() {
+                    cx.update_entity(&entity, |shell, _cx| {
+                        if let Some(editor) = shell.active_code_editor_mut() {
+                            editor.body_bounds = bounds;
+                        }
+                    });
+                }
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+
+    // Inner body wrapper: relative so the canvas overlay can
+    // size to it, holds the click + drag handlers, and wraps
+    // the virtualised list.
+    let weak_md = weak.clone();
+    let weak_mm = weak.clone();
+    let weak_mu = weak.clone();
+    let body_wrapper = div()
+        .flex_1()
+        .relative()
+        .child(bounds_canvas)
+        .child(body.size_full())
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                if let Some(entity) = weak_md.upgrade() {
+                    let pos = ev.position;
+                    let extend = ev.modifiers.shift;
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.code_editor_mouse_down(pos, extend, cx);
+                    });
+                }
+            },
+        )
+        .on_mouse_move(move |ev: &gpui::MouseMoveEvent, _w, cx: &mut App| {
+            if ev.pressed_button != Some(gpui::MouseButton::Left) {
+                return;
+            }
+            if let Some(entity) = weak_mm.upgrade() {
+                let pos = ev.position;
+                cx.update_entity(&entity, |shell, cx| {
+                    shell.code_editor_mouse_drag(pos, cx);
+                });
+            }
+        })
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            move |_ev, _w, cx: &mut App| {
+                if let Some(entity) = weak_mu.upgrade() {
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.code_editor_mouse_up(cx);
+                    });
+                }
+            },
+        );
+
     div()
         .size_full()
         .bg(panel)
@@ -610,7 +777,7 @@ pub fn render_code_editor(
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(body.flex_1())
+                .child(body_wrapper)
                 .child({
                     // Footer chip: line count + dirty / save-state.
                     // When the editor has a save_error message
@@ -775,6 +942,12 @@ const GLYPH_WIDTH: f32 = 9.6;
 /// row height so disassembly, smali, and the editor all share a
 /// vertical rhythm.
 const LINE_HEIGHT: f32 = 22.0;
+
+/// Horizontal inset between the gutter and the first character
+/// of the line body. Matches `pl_2` (gpui's 0.5rem = 8px) on
+/// the body span — kept as a const so click hit-testing in
+/// `offset_for_window_point` stays in sync with the renderer.
+const TEXT_INSET_PX: f32 = 8.0;
 
 /// Editor monospace font. Same family the smali / listing views
 /// use so it feels consistent.
@@ -977,6 +1150,110 @@ mod tests {
         assert_eq!(e.selected_text().as_deref(), Some("beta"));
         assert!(e.paste_text("PASTED"));
         assert_eq!(e.text(), "alpha PASTED gamma");
+    }
+
+    #[test]
+    fn offset_for_window_point_maps_clicks() {
+        use gpui::{Bounds, Pixels, Point, Size};
+        let mut e = CodeEditor::from_string("alpha\nbeta\ngamma");
+        // Fake a body laid out at (100, 50), 400x100 px.
+        e.body_bounds = Bounds {
+            origin: Point {
+                x: Pixels::from(100.),
+                y: Pixels::from(50.),
+            },
+            size: Size {
+                width: Pixels::from(400.),
+                height: Pixels::from(100.),
+            },
+        };
+        let gutter = e.gutter_width_px();
+        // Click in the middle of "beta" (row 1). LINE_HEIGHT=22,
+        // so row 1's vertical centre is at y = 50 + 22 + 11 = 83.
+        // Aim at column 2 — text_x = 2 * GLYPH_WIDTH.
+        let click_x = 100.0 + gutter + TEXT_INSET_PX + 2.0 * GLYPH_WIDTH;
+        let click = Point {
+            x: Pixels::from(click_x),
+            y: Pixels::from(83.0),
+        };
+        let off = e.offset_for_window_point(click).unwrap();
+        let p = e.buffer.snapshot().offset_to_point(off);
+        assert_eq!((p.row, p.column), (1, 2));
+    }
+
+    #[test]
+    fn offset_for_window_point_clicks_past_end_snap_to_eol() {
+        use gpui::{Bounds, Pixels, Point, Size};
+        let mut e = CodeEditor::from_string("hi\nworld");
+        e.body_bounds = Bounds {
+            origin: Point {
+                x: Pixels::from(0.),
+                y: Pixels::from(0.),
+            },
+            size: Size {
+                width: Pixels::from(500.),
+                height: Pixels::from(100.),
+            },
+        };
+        let gutter = e.gutter_width_px();
+        // Click at row 0, but 200px past where the text ends —
+        // should clamp to col 2 (end of "hi").
+        let click = Point {
+            x: Pixels::from(gutter + TEXT_INSET_PX + 200.0),
+            y: Pixels::from(11.0),
+        };
+        let off = e.offset_for_window_point(click).unwrap();
+        let p = e.buffer.snapshot().offset_to_point(off);
+        assert_eq!((p.row, p.column), (0, 2));
+    }
+
+    #[test]
+    fn offset_for_window_point_gutter_click_lands_at_col_zero() {
+        use gpui::{Bounds, Pixels, Point, Size};
+        let mut e = CodeEditor::from_string("hello\nworld");
+        e.body_bounds = Bounds {
+            origin: Point {
+                x: Pixels::from(0.),
+                y: Pixels::from(0.),
+            },
+            size: Size {
+                width: Pixels::from(400.),
+                height: Pixels::from(100.),
+            },
+        };
+        // Click inside the gutter on row 1 (LINE_HEIGHT=22 → y=33).
+        let click = Point {
+            x: Pixels::from(3.0),
+            y: Pixels::from(33.0),
+        };
+        let off = e.offset_for_window_point(click).unwrap();
+        let p = e.buffer.snapshot().offset_to_point(off);
+        assert_eq!((p.row, p.column), (1, 0));
+    }
+
+    #[test]
+    fn begin_click_drag_starts_selection() {
+        let mut e = CodeEditor::from_string("abcdef");
+        // Click at offset 2.
+        e.begin_click_drag(2, false);
+        assert_eq!(e.cursor(), 2);
+        assert!(e.dragging);
+        // Drag to offset 5 — selection should be 2..5.
+        e.move_cursor_to_offset(5, true);
+        assert_eq!(e.selection_range(), (2, 5));
+        e.end_click_drag();
+        assert!(!e.dragging);
+    }
+
+    #[test]
+    fn shift_click_extends_existing_selection() {
+        let mut e = CodeEditor::from_string("abcdefgh");
+        // Place caret at 3 (no selection).
+        e.begin_click_drag(3, false);
+        e.end_click_drag();
+        // Shift-click at 6 — selection should be 3..6.
+        e.begin_click_drag(6, true);
+        assert_eq!(e.selection_range(), (3, 6));
     }
 
     #[test]
