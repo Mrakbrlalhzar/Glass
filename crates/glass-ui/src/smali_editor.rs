@@ -90,7 +90,7 @@ impl Shell {
     ) {
         let Some(active) = self.active_tab else { return };
         let class_jni = match self.tabs.get(active).map(|t| &t.kind) {
-            Some(TabKind::SmaliClass { class_jni })
+            Some(TabKind::SmaliEditor { class_jni, .. })
             | Some(TabKind::SmaliEditor { class_jni, .. }) => class_jni.clone(),
             _ => return,
         };

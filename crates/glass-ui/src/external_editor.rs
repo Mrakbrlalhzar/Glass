@@ -63,7 +63,7 @@ pub fn can_open_editor(shell: &Shell) -> bool {
     let Some(active) = shell.active_tab else { return false };
     matches!(
         shell.tabs.get(active).map(|t| &t.kind),
-        Some(crate::TabKind::SmaliClass { .. })
+        Some(crate::TabKind::SmaliEditor { .. })
     )
 }
 

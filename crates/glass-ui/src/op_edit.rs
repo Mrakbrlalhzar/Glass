@@ -31,7 +31,7 @@ impl Shell {
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
         let Some(tab) = self.tabs.get(active) else { return false };
-        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+        if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
             return false;
         }
         let Some(row) = tab.selected_row else { return false };
@@ -53,7 +53,7 @@ impl Shell {
         }
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return false;

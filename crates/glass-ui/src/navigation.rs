@@ -23,7 +23,7 @@
 use gpui::{px, Context, Pixels};
 
 use crate::shell_actions::SmaliMemberKind;
-use crate::{LeafId, Shell, Tab, TabKind};
+use crate::{LeafId, LeafKind, Shell, Tab, TabKind};
 
 impl Shell {
     /// Move the active listing tab's selection by `delta`
@@ -194,7 +194,7 @@ impl Shell {
                 Some(rows) => (rows.len(), false),
                 None => return,
             },
-            crate::TabKind::SmaliClass { .. } => match tab.lines.as_ref() {
+            crate::TabKind::SmaliEditor { .. } => match tab.lines.as_ref() {
                 Some(lines) => (lines.len(), false),
                 None => return,
             },
@@ -604,21 +604,21 @@ impl Shell {
     /// sense). Listing always opens fresh — see `open_listing_in_new_tab`.
     pub(crate) fn open_leaf(&mut self, leaf: LeafId, cx: &mut Context<Self>) {
         self.overflow_open = false;
+        // Smali classes need bundle access to look up the
+        // owning artifact, so `TabKind::from_kind` returns None
+        // for them and we route through the editor opener.
         let kind = {
             let Some(bundle) = self.bundle() else { return };
             let Some(kind_src) = bundle.kinds.get(leaf.0) else { return };
-            TabKind::from_kind(kind_src)
+            if let LeafKind::SmaliClass { class_jni } = kind_src {
+                let class_jni = class_jni.clone();
+                drop(bundle);
+                self.open_smali_editor_for_class(&class_jni, cx);
+                return;
+            }
+            let Some(kind) = TabKind::from_kind(kind_src) else { return };
+            kind
         };
-        // Smali classes open in the editor now — the read-only
-        // viewer is retired. Route here before the kind-equality
-        // dedupe below since the editor variant carries an
-        // `artifact` field that the tree-side `LeafKind` doesn't
-        // know about.
-        if let TabKind::SmaliClass { class_jni } = &kind {
-            let class_jni = class_jni.clone();
-            self.open_smali_editor_for_class(&class_jni, cx);
-            return;
-        }
         // Listing leaves want a fresh tab on every click.
         if let TabKind::Listing { artifact, section } = &kind {
             let artifact = artifact.clone();

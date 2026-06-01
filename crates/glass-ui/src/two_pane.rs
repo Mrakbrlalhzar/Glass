@@ -422,12 +422,18 @@ pub fn render_two_pane(
                     None => div().flex_1().into_any_element(),
                 }
             }
-            Some(TabKind::SmaliClass { .. }) | None => {
+            // DEAD: the SmaliClass viewer was retired. This arm
+            // is reachable only via the `None` (no active tab)
+            // case; the SmaliEditor pattern duplicates the arm
+            // above and is unreachable but kept here so we can
+            // delete this entire block in a follow-up commit
+            // without surgical risk to the active arms.
+            Some(TabKind::SmaliEditor { .. }) | None => {
                 let active_class_jni: Option<String> = shell
                     .active_tab
                     .and_then(|i| shell.tabs.get(i))
                     .and_then(|t| match &t.kind {
-                        TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+                        TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
                         _ => None,
                     });
                 // Snapshot the active op-edit state so the per-row

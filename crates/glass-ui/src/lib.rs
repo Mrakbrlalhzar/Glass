@@ -1176,9 +1176,6 @@ impl CfgViewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TabKind {
-    SmaliClass {
-        class_jni: String,
-    },
     Listing {
         artifact: glass_db::ArtifactId,
         section: String,
@@ -1217,10 +1214,12 @@ pub(crate) enum TabKind {
         name: String,
     },
     /// Smali class editor. Same widget as `ScriptEditor` but
-    /// scoped to a DEX class — saving runs the buffer through
-    /// the smali parser and, on success, stages an edit on the
-    /// bundle (so the export-patched flow picks it up). Also
-    /// ephemeral.
+    /// scoped to a DEX class — auto-stages buffer changes via
+    /// the smali parser into the bundle's `smali_edits` so the
+    /// export-patched flow picks them up. Persisted as a
+    /// `TabState::SmaliClass` (the schema predates the editor);
+    /// the restore path looks up the artifact and rehydrates
+    /// into this kind.
     SmaliEditor {
         artifact: glass_db::ArtifactId,
         class_jni: String,
@@ -1233,10 +1232,6 @@ impl TabKind {
     /// intentionally don't survive a reopen.
     fn to_state(&self) -> Option<glass_db::TabState> {
         Some(match self {
-            TabKind::SmaliClass { class_jni } => glass_db::TabState::SmaliClass {
-                class_jni: class_jni.clone(),
-                scroll_line: 0,
-            },
             TabKind::Listing { artifact, section } => glass_db::TabState::Listing {
                 artifact: artifact.clone(),
                 section: section.clone(),
@@ -1296,11 +1291,14 @@ impl TabKind {
         })
     }
 
-    fn from_kind(kind: &LeafKind) -> Self {
-        match kind {
-            LeafKind::SmaliClass { class_jni } => TabKind::SmaliClass {
-                class_jni: class_jni.clone(),
-            },
+    /// Tab-kind for a tree leaf. Smali classes are special:
+    /// they need the owning artifact (which `LeafKind` doesn't
+    /// carry), so this function returns `None` for them and the
+    /// caller routes to `open_smali_editor_for_class` instead.
+    /// See `Shell::open_leaf` for the dispatch.
+    fn from_kind(kind: &LeafKind) -> Option<Self> {
+        Some(match kind {
+            LeafKind::SmaliClass { .. } => return None,
             LeafKind::Listing { artifact, section } => TabKind::Listing {
                 artifact: artifact.clone(),
                 section: section.clone(),
@@ -1332,7 +1330,7 @@ impl TabKind {
                 artifact: artifact.clone(),
                 mangled_name: mangled_name.clone(),
             },
-        }
+        })
     }
 }
 

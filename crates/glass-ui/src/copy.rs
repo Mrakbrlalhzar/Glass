@@ -68,7 +68,7 @@ impl Shell {
         match &tab.kind {
             TabKind::Listing { .. } => copy_listing(tab),
             TabKind::Hex { .. } => copy_hex(tab),
-            TabKind::SmaliClass { .. } => copy_smali(tab),
+            TabKind::SmaliEditor { .. } => copy_smali(tab),
             TabKind::SectionMap { artifact } => copy_section_map(self, artifact),
             TabKind::Manifest => copy_manifest(self, tab),
             // CFG and DexCallGraph don't carry a per-node selection

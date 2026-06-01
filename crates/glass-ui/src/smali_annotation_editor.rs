@@ -428,7 +428,7 @@ impl Shell {
             });
         }
         for tab in &mut self.tabs {
-            if let TabKind::SmaliClass { class_jni: jni } = &tab.kind {
+            if let TabKind::SmaliEditor { class_jni: jni, .. } = &tab.kind {
                 if jni == &class_jni {
                     // Capture scroll position so we can restore the
                     // viewport after the line cache is rebuilt —

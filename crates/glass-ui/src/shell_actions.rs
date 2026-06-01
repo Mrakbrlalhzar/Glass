@@ -376,7 +376,7 @@ impl Shell {
                                 scroll_top,
                             });
                         }
-                        TabKind::SmaliClass { class_jni } => {
+                        TabKind::SmaliEditor { class_jni, .. } => {
                             return Some(glass_db::TabState::SmaliClass {
                                 class_jni: class_jni.clone(),
                                 scroll_line: top_row as u32,
@@ -471,11 +471,34 @@ impl Shell {
             // smali). Seed the new tab's pending_* field so the
             // first paint scrolls to where the user left off.
             let (kind, pending_addr, pending_line) = match state {
-                glass_db::TabState::SmaliClass { class_jni, scroll_line } => (
-                    TabKind::SmaliClass { class_jni: class_jni.clone() },
-                    None,
-                    if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
-                ),
+                glass_db::TabState::SmaliClass { class_jni, scroll_line } => {
+                    // Smali tabs persist as `SmaliClass` but at
+                    // runtime they're always `SmaliEditor` now.
+                    // Look up the owning artifact via the
+                    // bundle's smali_classes map; skip the tab
+                    // if the class no longer exists.
+                    let Some(artifact) = bundle
+                        .smali_classes
+                        .iter()
+                        .find_map(|((aid, jni), _)| {
+                            if jni == class_jni {
+                                Some(aid.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    else {
+                        continue;
+                    };
+                    (
+                        TabKind::SmaliEditor {
+                            artifact,
+                            class_jni: class_jni.clone(),
+                        },
+                        None,
+                        if *scroll_line == 0 { None } else { Some(*scroll_line as usize) },
+                    )
+                }
                 glass_db::TabState::Listing { artifact, section, scroll_top } => (
                     TabKind::Listing {
                         artifact: artifact.clone(),
@@ -537,6 +560,27 @@ impl Shell {
             let mut tab = Tab::new(kind);
             tab.pending_scroll_addr = pending_addr;
             tab.pending_smali_scroll_line = pending_line;
+            // SmaliEditor tabs need their CodeEditor seeded from
+            // the bundle's class body — the renderer reads from
+            // tab.code_editor, not from any external store.
+            if let TabKind::SmaliEditor { artifact, class_jni } = &tab.kind {
+                if let Some(class) = bundle.smali_class_for(artifact, class_jni) {
+                    let body = class.to_smali();
+                    let mut editor = crate::code_editor::CodeEditor::from_string(body)
+                        .with_highlight(crate::code_editor::HighlightMode::Smali);
+                    editor.reparse_smali();
+                    if let Some(line) = pending_line {
+                        let snap = editor.buffer.snapshot();
+                        let max_row = snap.max_point().row;
+                        let row = (line as u32).min(max_row);
+                        let off = snap.point_to_offset(rope::Point::new(row, 0));
+                        editor.move_cursor_to_offset(off, false);
+                        editor.ensure_caret_visible();
+                    }
+                    tab.code_editor = Some(editor);
+                    tab.pending_smali_scroll_line = None;
+                }
+            }
             self.tabs.push(tab);
         }
         if let Some(idx) = rec.active_tab {
@@ -550,82 +594,6 @@ impl Shell {
             rec.expanded_paths.into_iter().collect();
         if !restored.is_empty() {
             self.expanded.open = restored;
-        }
-        // Migrate legacy SmaliClass tabs (saved by older builds)
-        // to the new SmaliEditor — the read-only viewer is
-        // retired. We rebuild the editor body from the bundle
-        // so any pending_smali_scroll_line on the original tab
-        // becomes a caret-row in the new one.
-        self.migrate_smali_class_tabs_to_editor();
-    }
-
-    /// Walk `self.tabs` and convert any `TabKind::SmaliClass`
-    /// to `TabKind::SmaliEditor`, looking up the owning
-    /// artifact via the bundle. Tabs whose class is no longer
-    /// in the bundle (deleted between sessions) get dropped.
-    fn migrate_smali_class_tabs_to_editor(&mut self) {
-        let Some(bundle) = self.bundle().cloned() else { return };
-        let mut keep: Vec<bool> = Vec::with_capacity(self.tabs.len());
-        for tab in &mut self.tabs {
-            let TabKind::SmaliClass { class_jni } = &tab.kind else {
-                keep.push(true);
-                continue;
-            };
-            let class_jni = class_jni.clone();
-            let pending_line = tab.pending_smali_scroll_line;
-            let Some((artifact, current)) = bundle
-                .smali_classes
-                .iter()
-                .find_map(|((aid, jni), c)| {
-                    if jni == &class_jni {
-                        Some((aid.clone(), c.clone()))
-                    } else {
-                        None
-                    }
-                })
-            else {
-                keep.push(false);
-                continue;
-            };
-            let body_class = bundle
-                .smali_edits
-                .get(&artifact, &class_jni)
-                .map(|e| e.modified.clone())
-                .unwrap_or(current);
-            let body = body_class.to_smali();
-            let mut editor = crate::code_editor::CodeEditor::from_string(body)
-                .with_highlight(crate::code_editor::HighlightMode::Smali);
-            editor.reparse_smali();
-            if let Some(line) = pending_line {
-                let snap = editor.buffer.snapshot();
-                let max_row = snap.max_point().row;
-                let row = (line as u32).min(max_row);
-                let off = snap.point_to_offset(rope::Point::new(row, 0));
-                editor.move_cursor_to_offset(off, false);
-                editor.ensure_caret_visible();
-            }
-            tab.kind = TabKind::SmaliEditor { artifact, class_jni };
-            tab.code_editor = Some(editor);
-            tab.lines = None;
-            tab.pending_smali_scroll_line = None;
-            keep.push(true);
-        }
-        // Drop any tabs whose class is gone in this bundle.
-        let mut idx = 0;
-        self.tabs.retain(|_| {
-            let k = keep[idx];
-            idx += 1;
-            k
-        });
-        // Re-anchor active_tab if we removed tabs above it.
-        if let Some(active) = self.active_tab {
-            if active >= self.tabs.len() {
-                self.active_tab = if self.tabs.is_empty() {
-                    None
-                } else {
-                    Some(self.tabs.len() - 1)
-                };
-            }
         }
     }
 
@@ -757,7 +725,7 @@ impl Shell {
                     .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                     .unwrap_or_else(|| SharedString::from("overview"))
             }
-            TabKind::SmaliClass { class_jni } => self
+            TabKind::SmaliEditor { class_jni, .. } => self
                 .tab_leaf(index)
                 .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                 .unwrap_or_else(|| SharedString::from(class_jni.clone())),
@@ -1125,7 +1093,7 @@ impl Shell {
             // modified `SmaliClass` rather than the original
             // `bundle.bodies[leaf]` string. Renderer falls back to the
             // pre-rendered body for unedited classes.
-            TabKind::SmaliClass { class_jni } => {
+            TabKind::SmaliEditor { class_jni, .. } => {
                 let class_jni = class_jni.clone();
                 let Some(leaf) = self.tabs.get(active).and_then(|t| {
                     t.kind.to_state().and_then(|s| bundle.resolve(&s))
@@ -1587,7 +1555,7 @@ impl Shell {
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
         let Some(tab) = self.tabs.get(active) else { return false };
-        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+        if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
             return false;
         }
         let Some(row) = tab.selected_row else { return false };
@@ -1607,7 +1575,7 @@ impl Shell {
         let Some(bundle) = self.bundle() else { return };
         let Some(active) = self.active_tab else { return };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             // SmaliEditor tabs also drive the templated editors —
             // launched via the right-click "Edit in template…"
             // items in the code editor's context menu.
@@ -1697,7 +1665,7 @@ impl Shell {
         // next paint re-renders from the modified class.
         if let Some(active) = self.active_tab {
             if let Some(tab) = self.tabs.get_mut(active) {
-                if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+                if matches!(tab.kind, TabKind::SmaliEditor { .. }) {
                     tab.lines = None;
                 }
             }
@@ -1746,7 +1714,7 @@ impl Shell {
         // class body. Snapshot scroll first so the user lands
         // where they were once the lines are rebuilt.
         for tab in &mut self.tabs {
-            if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+            if matches!(tab.kind, TabKind::SmaliEditor { .. }) {
                 tab.pending_scroll_restore =
                     Some(tab.scroll.logical_scroll_top());
                 tab.lines = None;
@@ -1768,7 +1736,7 @@ impl Shell {
             b.smali_edits.remove(&artifact, &class_jni);
         }
         for tab in &mut self.tabs {
-            if let TabKind::SmaliClass { class_jni: jni } = &tab.kind {
+            if let TabKind::SmaliEditor { class_jni: jni, .. } = &tab.kind {
                 if jni == &class_jni {
                     tab.pending_scroll_restore =
                         Some(tab.scroll.logical_scroll_top());
@@ -1910,7 +1878,7 @@ impl Shell {
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
         let Some(tab) = self.tabs.get(active) else { return false };
-        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+        if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
             return false;
         }
         let Some(row) = tab.selected_row else { return false };
@@ -1938,7 +1906,7 @@ impl Shell {
         let Some(bundle) = self.bundle() else { return false };
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             // Allow opening the templated field editor from a
             // SmaliEditor tab too (via right-click "Edit field
             // in template…").
@@ -2040,7 +2008,7 @@ impl Shell {
         }
         if let Some(active) = self.active_tab {
             if let Some(tab) = self.tabs.get_mut(active) {
-                if matches!(tab.kind, TabKind::SmaliClass { .. }) {
+                if matches!(tab.kind, TabKind::SmaliEditor { .. }) {
                     tab.lines = None;
                 }
             }
@@ -2065,7 +2033,7 @@ impl Shell {
     ) -> bool {
         let Some(active) = self.active_tab else { return false };
         let Some(tab) = self.tabs.get(active) else { return false };
-        if !matches!(tab.kind, TabKind::SmaliClass { .. }) {
+        if !matches!(tab.kind, TabKind::SmaliEditor { .. }) {
             return false;
         }
         let Some(row) = tab.selected_row else { return false };
@@ -2089,7 +2057,7 @@ impl Shell {
         let Some(bundle) = self.bundle() else { return false };
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             // Right-click "Edit method in template…" in the
             // code editor.
             TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
@@ -2214,7 +2182,7 @@ impl Shell {
         }
         let Some(active) = self.active_tab else { return };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliClass { class_jni } => Some(class_jni.clone()),
+            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return;
