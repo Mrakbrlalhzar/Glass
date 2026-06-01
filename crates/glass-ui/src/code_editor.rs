@@ -276,6 +276,31 @@ impl CodeEditor {
         self.set_cursor(target, shift);
     }
 
+    /// Move the caret by `dir * page_rows` lines. `page_rows` is
+    /// supplied by the dispatcher from the renderer's body
+    /// height — we don't know it here. Honours `desired_column`
+    /// the same way Up/Down do.
+    pub fn move_by_page(&mut self, dir: i32, page_rows: u32, shift: bool) {
+        // Just repeated single-row motion — simple, and reuses
+        // the existing clamp + desired-column logic.
+        let steps = page_rows.max(1) as i32;
+        for _ in 0..steps {
+            self.move_vertical(dir, shift);
+        }
+    }
+
+    /// Scroll the viewport so the caret's row is visible. Call
+    /// after any motion or edit that could push the caret off
+    /// screen (arrows, PageUp/Dn, Home/End, Enter, etc.). The
+    /// list's own `scroll_to_reveal_item` does the math: no-op
+    /// when the row is already visible; clamps to top when
+    /// caret moved above the viewport, clamps to bottom when
+    /// below.
+    pub fn ensure_caret_visible(&self) {
+        let row = self.cursor_point().row as usize;
+        self.list_state.scroll_to_reveal_item(row);
+    }
+
     /// Select the entire buffer.
     fn select_all(&mut self) {
         let len = self.len();
@@ -324,6 +349,21 @@ impl CodeEditor {
     /// Handle a keystroke. Returns true when the buffer changed
     /// (so the caller can flush dirty state, repaint, etc.).
     pub fn handle_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        cmd: bool,
+        key_char: Option<&str>,
+    ) -> bool {
+        let result = self.handle_key_inner(key, shift, cmd, key_char);
+        // Any keystroke that could have moved the caret should
+        // scroll it back into view. Cheap — `scroll_to_reveal_item`
+        // is a no-op when the row is already visible.
+        self.ensure_caret_visible();
+        result
+    }
+
+    fn handle_key_inner(
         &mut self,
         key: &str,
         shift: bool,
@@ -1101,8 +1141,9 @@ const GLYPH_WIDTH: f32 = 9.6;
 
 /// Height of a single editor line. Matches the listing view's
 /// row height so disassembly, smali, and the editor all share a
-/// vertical rhythm.
-const LINE_HEIGHT: f32 = 22.0;
+/// vertical rhythm. `pub` so the Shell-side PgUp/PgDn dispatcher
+/// can convert pixel heights into row counts.
+pub(crate) const LINE_HEIGHT: f32 = 22.0;
 
 /// Horizontal inset between the gutter and the first character
 /// of the line body. Matches `pl_2` (gpui's 0.5rem = 8px) on

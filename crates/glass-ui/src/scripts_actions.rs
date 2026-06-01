@@ -253,6 +253,26 @@ impl Shell {
         cx.notify();
     }
 
+    /// Move the editor caret by one "page" — derived from the
+    /// captured body bounds (height in pixels ÷ LINE_HEIGHT)
+    /// minus a row of overlap so the user keeps context across
+    /// the jump. PgUp = dir -1, PgDn = +1.
+    pub(crate) fn code_editor_page_scroll(
+        &mut self,
+        dir: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        let body_h: f32 = editor.body_bounds.size.height.into();
+        // ~LINE_HEIGHT per row; leave one row of overlap so the
+        // user doesn't lose their place across the jump.
+        let rows = ((body_h / crate::code_editor::LINE_HEIGHT).floor() as u32)
+            .saturating_sub(1)
+            .max(1);
+        editor.move_by_page(dir, rows, false);
+        cx.notify();
+    }
+
     /// Mutable handle to the active tab's code editor, if any.
     /// Used by the canvas-overlay bounds capture and the mouse
     /// click/drag dispatchers — saves callers from repeating

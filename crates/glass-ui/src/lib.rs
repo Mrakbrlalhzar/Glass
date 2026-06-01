@@ -2325,9 +2325,17 @@ impl Render for Shell {
                 this.move_listing_selection(1, cx);
             }))
             .on_action(cx.listener(|this, _: &ListingPageUp, _w, cx| {
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_page_scroll(-1, cx);
+                    return;
+                }
                 this.listing_page_scroll(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &ListingPageDown, _w, cx| {
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_page_scroll(1, cx);
+                    return;
+                }
                 this.listing_page_scroll(1, cx);
             }))
             .on_action(cx.listener(|this, _: &HexCursorLeft, _w, cx| {
