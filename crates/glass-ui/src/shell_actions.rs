@@ -127,6 +127,7 @@ impl Shell {
             frida_probes: std::collections::HashMap::new(),
             injection_dialog: None,
             injection_progress: None,
+            frida_server_install: None,
             debug_dock: None,
             debug_dock_resize_anchor: None,
             traces_dialog_open: false,

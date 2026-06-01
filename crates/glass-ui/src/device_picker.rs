@@ -175,6 +175,9 @@ pub(crate) fn render_dropdown(
         }
         card = card.child(device_row(idx, info, shell, fg, dim, accent, cx));
     }
+    if let Some(action) = push_frida_server_action(shell, fg, dim, border, accent, cx) {
+        card = card.child(action);
+    }
     if let Some(action) = inject_gadget_action(shell, fg, dim, border, accent, cx) {
         card = card.child(action);
     }
@@ -294,6 +297,88 @@ fn device_row(
                 cx.notify();
             }),
         )
+}
+
+/// "Push frida-server" affordance — for rooted Android
+/// devices where the Frida probe reports the server unreachable.
+/// Downloads a matching frida-server build, pushes it to
+/// `/data/local/tmp`, and starts it via `su`. iOS devices and
+/// devices where Frida is already reachable don't see this
+/// option.
+fn push_frida_server_action(
+    shell: &Shell,
+    _fg: gpui::Rgba,
+    dim: gpui::Rgba,
+    border: gpui::Rgba,
+    accent: gpui::Rgba,
+    cx: &mut Context<Shell>,
+) -> Option<gpui::Stateful<gpui::Div>> {
+    let selected = shell.selected_device.as_ref()?;
+    // Android only — iOS root-server install needs a different
+    // pipeline (Cydia / sileo or a jailbreak helper) we don't
+    // automate yet.
+    if selected.platform != glass_device::DevicePlatform::Android {
+        return None;
+    }
+    let info = shell
+        .device_snapshot
+        .iter()
+        .find(|d| &d.id == selected)?
+        .clone();
+    let probe = shell.frida_probes.get(selected)?;
+    if !matches!(
+        probe.result,
+        Err(glass_frida::FridaError::ServerUnreachable)
+    ) {
+        return None;
+    }
+    // The install flow takes over the screen with its own
+    // overlay; while one is running don't offer to start
+    // another.
+    if shell.frida_server_install.is_some() {
+        return None;
+    }
+    let version = glass_frida::FRIDA_VERSION;
+    let secondary = if version == "unknown" {
+        "Frida disabled in this build — rebuild with --features frida".to_string()
+    } else {
+        format!(
+            "Downloads frida-server {version}, pushes to /data/local/tmp, starts via su.",
+        )
+    };
+    let info_for_click = info.clone();
+    Some(
+        div()
+            .id("push-frida-server-action")
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(border)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::current().modals.palette_hover.rgba()))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(accent)
+                    .child(SharedString::from("Push frida-server to this device…")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(dim)
+                    .child(SharedString::from(secondary)),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |shell, _ev, _w, cx| {
+                    shell.device_picker_open = false;
+                    shell.execute_frida_server_install(info_for_click.clone(), cx);
+                }),
+            ),
+    )
 }
 
 /// "Inject Frida gadget into this bundle" affordance — only

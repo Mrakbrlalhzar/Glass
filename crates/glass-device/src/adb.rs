@@ -417,6 +417,78 @@ impl AdbBackend {
     /// stdout+stderr is returned so the dialog can render the
     /// raw output (including the helpful Failure code on
     /// errors).
+    /// Read the device's primary CPU ABI (e.g. `arm64-v8a`).
+    /// Used to pick the right `frida-server` binary to push.
+    /// Errors propagate `adb shell` failures verbatim so the
+    /// dialog can surface them.
+    pub fn primary_abi(&self, serial: &str) -> Result<String, crate::DeviceError> {
+        let out = run_capture(
+            &self.binary,
+            &["-s", serial, "shell", "getprop", "ro.product.cpu.abi"],
+        )
+        .map_err(crate::DeviceError::Backend)?;
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Err(crate::DeviceError::Backend(
+                "empty ro.product.cpu.abi from device".into(),
+            ));
+        }
+        Ok(trimmed.to_string())
+    }
+
+    /// Push a local file to the device. Thin wrapper around
+    /// `adb push <local> <remote>`. Combined stdout+stderr so
+    /// the dialog can render adb's progress / error lines
+    /// verbatim.
+    pub fn push(
+        &self,
+        serial: &str,
+        local: &Path,
+        remote: &str,
+    ) -> Result<String, crate::DeviceError> {
+        let local_str = local.to_str().ok_or_else(|| {
+            crate::DeviceError::Backend(format!(
+                "non-UTF-8 local path: {}",
+                local.display(),
+            ))
+        })?;
+        run_capture_combined(
+            &self.binary,
+            &["-s", serial, "push", local_str, remote],
+        )
+        .map_err(crate::DeviceError::Backend)
+    }
+
+    /// Start `frida-server` on a rooted device, detached so it
+    /// survives the adb shell closing. Requires `su` on the
+    /// device (Magisk and most root toolchains expose it on
+    /// PATH). The server is started under the device's root uid
+    /// from `/data/local/tmp/frida-server` — the caller is
+    /// expected to have pushed the binary there first and
+    /// chmoded it 755.
+    ///
+    /// We don't wait for the server to come up; the caller
+    /// re-runs `FridaRuntime::probe` after a short pause to
+    /// confirm it's listening.
+    pub fn start_frida_server(
+        &self,
+        serial: &str,
+        remote_path: &str,
+    ) -> Result<String, crate::DeviceError> {
+        // `nohup ... &` keeps the process running after the
+        // shell exits; redirecting stdout+stderr is required
+        // because adb shell keeps the channel open as long as
+        // any descriptor is held.
+        let inner = format!(
+            "nohup {remote_path} >/dev/null 2>/dev/null </dev/null &",
+        );
+        run_capture_combined(
+            &self.binary,
+            &["-s", serial, "shell", "su", "-c", &inner],
+        )
+        .map_err(crate::DeviceError::Backend)
+    }
+
     pub fn install(
         &self,
         serial: &str,

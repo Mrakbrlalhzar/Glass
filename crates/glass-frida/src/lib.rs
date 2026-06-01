@@ -20,9 +20,15 @@ use glass_device::DeviceId;
 pub mod gadgets;
 pub mod injection;
 pub mod patch;
+pub mod server;
 pub mod session;
 pub mod sign;
 pub mod trace_js;
+pub use server::{
+    asset_name as frida_server_asset_name, asset_url as frida_server_asset_url,
+    stage_server, AndroidServerArch, ServerStageError, StageProgress,
+    FRIDA_VERSION,
+};
 pub use gadgets::{
     android_gadget_config_listen, for_android_abi, GadgetBinary,
     ANDROID_GADGET_CONFIG_FILENAME,

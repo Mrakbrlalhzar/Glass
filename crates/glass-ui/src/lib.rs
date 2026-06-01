@@ -59,6 +59,7 @@ mod edits;
 mod frida_dock;
 mod frida_hooks;
 mod frida_inject;
+mod frida_server_install;
 mod string_edit_popover;
 mod scrollbar;
 mod search;
@@ -1475,6 +1476,12 @@ pub(crate) struct Shell {
     /// running; flips to `Some(Done(_))` so the user can read
     /// the final status, then they click Dismiss to clear it.
     pub(crate) injection_progress: Option<InjectionProgress>,
+    /// Progress + log for an in-flight "push frida-server"
+    /// install on a rooted device. Same lifecycle as
+    /// `injection_progress`: `Some` while running, flips to
+    /// `Some(Done)` for the user to read, cleared by Dismiss.
+    pub(crate) frida_server_install:
+        Option<frida_server_install::FridaServerInstallProgress>,
     /// Bottom debug dock — `Some` after the user clicks
     /// Connect on the device picker for a Frida-reachable
     /// device with a loaded APK. Hosts Play / Stop controls
@@ -2049,6 +2056,15 @@ impl Render for Shell {
                 )
             });
 
+        let frida_server_install_overlay: Option<gpui::AnyElement> = self
+            .frida_server_install
+            .as_ref()
+            .map(|progress| {
+                frida_server_install::render_frida_server_install(
+                    progress, panel, border, fg, dim, accent, cx,
+                )
+            });
+
         let export_progress_overlay: Option<gpui::AnyElement> = if self.export_in_progress {
             Some(render_export_progress(panel, border, fg, dim))
         } else {
@@ -2563,6 +2579,9 @@ impl Render for Shell {
             root = root.child(o);
         }
         if let Some(o) = injection_progress_overlay {
+            root = root.child(o);
+        }
+        if let Some(o) = frida_server_install_overlay {
             root = root.child(o);
         }
         if let Some(o) = export_progress_overlay {

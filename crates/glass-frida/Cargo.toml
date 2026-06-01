@@ -29,6 +29,13 @@ tracing.workspace = true
 glass-device.workspace = true
 smali.workspace = true
 serde_json = "1"
+# Always-on: the GUI offers to download and push frida-server
+# even when the `frida` feature is off (the user can prep the
+# device before rebuilding with the feature). HTTP fetch +
+# pure-Rust xz decompression keeps the dependency set minimal.
+ureq = "2"
+lzma-rs = "0.3"
+dirs = "5"
 
 # Used by the session actor on the frida-feature path to
 # pull frida-sys symbols directly (script options, posting
