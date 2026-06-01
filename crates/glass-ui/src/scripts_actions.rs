@@ -222,6 +222,37 @@ impl Shell {
         self.refresh_scripts(cx);
     }
 
+    /// Returns true when the active tab is a code-editor kind
+    /// (script or smali). Used by the global arrow / Cmd-C
+    /// action handlers to short-circuit their default
+    /// behaviour and route the key into the editor instead.
+    pub(crate) fn active_tab_is_code_editor(&self) -> bool {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .is_some_and(|t| {
+                matches!(
+                    t.kind,
+                    crate::TabKind::ScriptEditor { .. }
+                        | crate::TabKind::SmaliEditor { .. }
+                )
+            })
+    }
+
+    /// Route a named key (no modifiers) into the active code
+    /// editor's `handle_key`. Used by the global `on_action`
+    /// handlers for arrows so the editor sees motion keys even
+    /// when something else has claimed them globally (the hex
+    /// view has `left`/`right`; the palette has `up`/`down`).
+    pub(crate) fn code_editor_handle_named_key(
+        &mut self,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_code_editor_mut() else { return };
+        editor.handle_key(key, false, false, None);
+        cx.notify();
+    }
+
     /// Mutable handle to the active tab's code editor, if any.
     /// Used by the canvas-overlay bounds capture and the mouse
     /// click/drag dispatchers — saves callers from repeating

@@ -83,10 +83,13 @@ impl Shell {
             // per-row copy formatter once the renderer learns
             // a notion of selectable units.
             TabKind::SwiftType { .. } => None,
-            // Script + Smali editors: copy/paste lives inside the
-            // CodeEditor widget itself (handled by the rope-backed
-            // selection model), not via this tab-level fallback.
-            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => None,
+            // Script + Smali editors: the rope-backed selection
+            // model is the source of truth — return its
+            // currently-selected text so the global Cmd-C action
+            // can place it on the clipboard.
+            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {
+                tab.code_editor.as_ref().and_then(|e| e.selected_text())
+            }
         }
     }
 }

@@ -2292,6 +2292,13 @@ impl Render for Shell {
                     op_editor::handle_named_key(this, "up", cx);
                     return;
                 }
+                // Code editor (script / smali) wants vertical
+                // motion to move the caret, not the palette /
+                // listing selection.
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_handle_named_key("up", cx);
+                    return;
+                }
                 if this.palette_open {
                     this.palette_move(-1, cx);
                     return;
@@ -2305,6 +2312,10 @@ impl Render for Shell {
                 }
                 if this.op_edit.is_some() {
                     op_editor::handle_named_key(this, "down", cx);
+                    return;
+                }
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_handle_named_key("down", cx);
                     return;
                 }
                 if this.palette_open {
@@ -2347,6 +2358,10 @@ impl Render for Shell {
                     op_editor::handle_named_key(this, "left", cx);
                     return;
                 }
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_handle_named_key("left", cx);
+                    return;
+                }
                 if this.disasm_edit.is_some()
                     || this.hex_edit.is_some()
                     || this.palette_open
@@ -2378,6 +2393,10 @@ impl Render for Shell {
                 }
                 if this.op_edit.is_some() {
                     op_editor::handle_named_key(this, "right", cx);
+                    return;
+                }
+                if this.active_tab_is_code_editor() {
+                    this.code_editor_handle_named_key("right", cx);
                     return;
                 }
                 if this.disasm_edit.is_some()

@@ -58,6 +58,11 @@ pub(crate) struct CodeEditor {
     /// Cached line count of the buffer's current snapshot. Used
     /// to size the list + the line-number gutter width.
     cached_row_count: usize,
+    /// Length in bytes of the longest line in the buffer.
+    /// Drives the horizontal scrollbar's extent (`max_h_offset`)
+    /// so the user can pan to the end of any line. Refreshed in
+    /// `refresh_cache` after every edit.
+    cached_max_line_bytes: u32,
     /// Caret offset, in bytes. `0..=buffer.len()`. Selection lives
     /// between `selection_anchor` (the side fixed when a drag /
     /// shift-extend started) and `cursor`; when they differ the
@@ -85,6 +90,10 @@ pub(crate) struct CodeEditor {
     /// body. When set, subsequent mouse-move events extend the
     /// selection rather than just hovering.
     pub(crate) dragging: bool,
+    /// Horizontal scroll offset, in pixels. The renderer
+    /// shifts each row's body by `-h_offset` so long lines pan
+    /// in / out of view. Updated by the scroll-wheel handler.
+    pub(crate) h_offset: gpui::Pixels,
 }
 
 impl CodeEditor {
@@ -97,19 +106,31 @@ impl CodeEditor {
             next_buffer_id(),
             text,
         );
-        let row_count = buffer.snapshot().row_count() as usize;
+        let snap = buffer.snapshot();
+        let row_count = snap.row_count() as usize;
+        let cached_max_line_bytes = compute_max_line_bytes(&snap);
         Self {
             buffer,
             list_state: ListState::new(row_count, ListAlignment::Top, px(2000.)),
             dirty: false,
             cached_row_count: row_count,
+            cached_max_line_bytes,
             cursor: 0,
             selection_anchor: None,
             desired_column: None,
             save_error: None,
             body_bounds: gpui::Bounds::default(),
             dragging: false,
+            h_offset: gpui::Pixels::from(0.),
         }
+    }
+
+    /// Pan the horizontal scroll by `dx`, clamped to [0, max].
+    /// Called from the renderer's scroll-wheel handler.
+    pub fn scroll_h_by(&mut self, dx: gpui::Pixels, max: gpui::Pixels) {
+        use gpui::Pixels;
+        let new_offset = (self.h_offset + dx).clamp(Pixels::from(0.), max);
+        self.h_offset = new_offset;
     }
 
     /// Total bytes in the buffer's current visible text. Used to
@@ -145,13 +166,21 @@ impl CodeEditor {
         }
     }
 
-    /// Snapshot the buffer once and refresh the cached line count.
-    /// Call after every mutation.
+    /// Snapshot the buffer once and refresh the cached line count
+    /// + max line width. Call after every mutation.
     fn refresh_cache(&mut self) {
-        self.cached_row_count = self.buffer.snapshot().row_count() as usize;
+        let snap = self.buffer.snapshot();
+        self.cached_row_count = snap.row_count() as usize;
+        self.cached_max_line_bytes = compute_max_line_bytes(&snap);
         // Resize the list to match. ListState doesn't grow itself.
         self.list_state =
             ListState::new(self.cached_row_count, ListAlignment::Top, px(2000.));
+    }
+
+    /// Total pixel width of the widest line — what the
+    /// horizontal scrollbar can pan over. Used by the renderer.
+    pub fn max_line_pixels(&self) -> f32 {
+        self.cached_max_line_bytes as f32 * GLYPH_WIDTH
     }
 
     /// Apply an edit: replace `range` with `new_text`. Advances
@@ -441,8 +470,12 @@ impl CodeEditor {
             .into();
 
         // Subtract the gutter + text padding (`pl_2` = 8px) so
-        // local_x is measured from the first character cell.
-        let text_x = (local_x - self.gutter_width_px() - TEXT_INSET_PX).max(0.0);
+        // local_x is measured from the first character cell, then
+        // add back the horizontal scroll so a click on the
+        // visible line maps to the absolute column.
+        let h: f32 = self.h_offset.into();
+        let text_x =
+            (local_x - self.gutter_width_px() - TEXT_INSET_PX).max(0.0) + h;
 
         // Visible-row index → buffer-row index via the list's
         // logical scroll top.
@@ -591,6 +624,24 @@ impl CodeEditor {
     }
 }
 
+/// Walk every row of the buffer and return the longest line's
+/// length in bytes. Used to size the horizontal scrollbar.
+///
+/// Cost: O(n_rows) point-to-offset lookups. Fine for the size
+/// of files we expect; if profiling ever shows it as a hot
+/// spot we can stream the rope instead.
+fn compute_max_line_bytes(snap: &text::BufferSnapshot) -> u32 {
+    let n_rows = snap.row_count();
+    let mut max = 0u32;
+    for row in 0..n_rows {
+        let len = row_length_bytes(snap, row);
+        if len > max {
+            max = len;
+        }
+    }
+    max
+}
+
 /// Length of the given row in **bytes**, excluding the trailing
 /// newline. Used for cursor clamping on vertical motion + line-end.
 fn row_length_bytes(snap: &text::BufferSnapshot, row: u32) -> u32 {
@@ -655,6 +706,8 @@ pub fn render_code_editor(
     let _ = cx;
     let theme = crate::theme::current();
     let gutter_w = px(editor.gutter_width_px());
+    let h_offset = editor.h_offset;
+    let max_line_pixels = editor.max_line_pixels();
     // Snapshot the buffer once per render; `list` holds the
     // closure for the lifetime of the visible-row callbacks, so
     // we own an `Arc<BufferSnapshot>` (the underlying rope is
@@ -732,6 +785,12 @@ pub fn render_code_editor(
                         .child(line_no_str),
                 )
                 .child(
+                    // Outer clips; inner content is positioned
+                    // absolutely and offset by `-h_offset` so
+                    // long lines pan. min_w(0) on a flex child
+                    // is what actually allows the row to be
+                    // narrower than its content (flex children
+                    // default to min-content-width).
                     div()
                         .flex_1()
                         .min_w(px(0.))
@@ -739,7 +798,16 @@ pub fn render_code_editor(
                         .h_full()
                         .text_base()
                         .font_family(EDITOR_FONT)
-                        .child(body_el),
+                        .relative()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(-h_offset)
+                                .h_full()
+                                .child(body_el),
+                        ),
                 )
                 .into_any()
         }
@@ -772,15 +840,22 @@ pub fn render_code_editor(
     .left_0()
     .size_full();
 
+    // Horizontal scroll extent — the user can pan up to the
+    // widest line's end. Clamped to ≥ 0 so very short files
+    // don't try to scroll past 0.
+    let max_h = gpui::Pixels::from(max_line_pixels.max(0.0));
+
     // Inner body wrapper: relative so the canvas overlay can
-    // size to it, holds the click + drag handlers, and wraps
-    // the virtualised list.
+    // size to it, holds the click + drag + scroll-wheel
+    // handlers, and wraps the virtualised list.
     let weak_md = weak.clone();
     let weak_mm = weak.clone();
     let weak_mu = weak.clone();
+    let weak_sw = weak.clone();
     let body_wrapper = div()
         .flex_1()
         .relative()
+        .overflow_hidden()
         .child(bounds_canvas)
         .child(body.size_full())
         .on_mouse_down(
@@ -815,7 +890,31 @@ pub fn render_code_editor(
                     });
                 }
             },
-        );
+        )
+        .on_scroll_wheel(move |ev: &gpui::ScrollWheelEvent, _w, cx: &mut App| {
+            // Horizontal scroll only — vertical is handled by
+            // the inner list. Trackpad delta is fine to forward
+            // directly; mouse-wheel scroll-h is rare.
+            let dx = ev.delta.pixel_delta(px(22.)).x;
+            if dx == gpui::Pixels::from(0.) {
+                return;
+            }
+            if let Some(entity) = weak_sw.upgrade() {
+                cx.update_entity(&entity, |shell, cx| {
+                    if let Some(editor) = shell.active_code_editor_mut() {
+                        editor.scroll_h_by(-dx, max_h);
+                        cx.notify();
+                    }
+                });
+            }
+        });
+
+    let h_scrollbar = crate::scrollbar::horizontal_scrollbar_offset(
+        editor.h_offset,
+        max_h,
+        border,
+        dim,
+    );
 
     div()
         .size_full()
@@ -827,6 +926,7 @@ pub fn render_code_editor(
                 .flex()
                 .flex_col()
                 .child(body_wrapper)
+                .child(h_scrollbar)
                 .child({
                     // Footer chip: line count + dirty / save-state.
                     // When the editor has a save_error message
@@ -1348,6 +1448,58 @@ mod tests {
         e.undo();
         assert!(e.dirty);
         assert!(e.cursor() <= e.text().len());
+    }
+
+    #[test]
+    fn max_line_pixels_grows_with_longest_line() {
+        let e = CodeEditor::from_string("hi\nhello world\nx");
+        // "hello world" is 11 bytes; width = 11 * GLYPH_WIDTH.
+        assert_eq!(e.max_line_pixels(), 11.0 * GLYPH_WIDTH);
+    }
+
+    #[test]
+    fn scroll_h_by_clamps() {
+        let mut e = CodeEditor::from_string("");
+        let max = gpui::Pixels::from(200.);
+        // Past the right end clamps to max.
+        e.scroll_h_by(gpui::Pixels::from(500.), max);
+        let h: f32 = e.h_offset.into();
+        assert_eq!(h, 200.);
+        // Past the left end clamps to 0.
+        e.scroll_h_by(gpui::Pixels::from(-1000.), max);
+        let h: f32 = e.h_offset.into();
+        assert_eq!(h, 0.);
+    }
+
+    #[test]
+    fn click_hit_test_accounts_for_h_offset() {
+        use gpui::{Bounds, Pixels, Point, Size};
+        let mut e = CodeEditor::from_string(&"x".repeat(200));
+        e.body_bounds = Bounds {
+            origin: Point {
+                x: Pixels::from(0.),
+                y: Pixels::from(0.),
+            },
+            size: Size {
+                width: Pixels::from(400.),
+                height: Pixels::from(100.),
+            },
+        };
+        // Pan right by 50 glyphs' worth.
+        let pan = 50.0 * GLYPH_WIDTH;
+        e.h_offset = Pixels::from(pan);
+        // Click in the middle of the visible area — say 10
+        // glyphs past the gutter+inset.
+        let gutter = e.gutter_width_px();
+        let click_x = gutter + TEXT_INSET_PX + 10.0 * GLYPH_WIDTH;
+        let click = Point {
+            x: Pixels::from(click_x),
+            y: Pixels::from(11.0),
+        };
+        let off = e.offset_for_window_point(click).unwrap();
+        let p = e.buffer.snapshot().offset_to_point(off);
+        // Visible col 10 + h_offset 50 → buffer col ≈ 60.
+        assert_eq!((p.row, p.column), (0, 60));
     }
 
     #[test]
