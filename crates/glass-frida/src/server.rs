@@ -60,7 +60,7 @@ impl AndroidServerArch {
 /// can stash one in its install-state model.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ServerStageError {
-    #[error("Frida support not built into this binary — rebuild with `--features frida`")]
+    #[error("Frida version unknown — build.rs failed to read FRIDA_VERSION from frida-sys's checkout")]
     VersionUnknown,
     #[error("device ABI {0:?} has no published frida-server binary")]
     UnsupportedAbi(String),
@@ -281,13 +281,12 @@ mod tests {
         assert!(url.ends_with("-android-arm64.xz"), "url = {url}");
     }
 
-    #[cfg(feature = "frida")]
     #[test]
-    fn version_is_resolved_when_feature_enabled() {
-        // With the `frida` feature on, build.rs must have read
-        // a real semver out of the frida-sys checkout. "unknown"
-        // here means the build script's fallback fired and we'd
-        // silently fail to download a server.
+    fn version_is_resolved_at_build_time() {
+        // build.rs must have read a real semver out of the
+        // frida-sys checkout. "unknown" here means the
+        // build script's fallback fired and we'd silently
+        // fail to download a server.
         assert_ne!(
             FRIDA_VERSION, "unknown",
             "build.rs failed to locate frida-sys FRIDA_VERSION",

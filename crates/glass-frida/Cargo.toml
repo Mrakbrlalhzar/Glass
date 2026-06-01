@@ -11,17 +11,6 @@ description = "Host-side Frida driver for Glass. Wraps the `frida` crate so the 
 [lints]
 workspace = true
 
-[features]
-# `frida` is opt-in because the underlying `frida-sys` bindings
-# link against the Frida devkit at build time. Enabling this
-# feature pulls in `frida/auto-download`, which downloads the
-# matching `frida-core-devkit` tarball from frida's GitHub
-# releases the first time the crate compiles. ~30MB per
-# platform, cached in `target/` after that. Default off so the
-# workspace builds without any network or extra toolchain.
-default = []
-frida = ["dep:frida", "dep:frida-sys"]
-
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
@@ -29,25 +18,20 @@ tracing.workspace = true
 glass-device.workspace = true
 smali.workspace = true
 serde_json = "1"
-# Always-on: the GUI offers to download and push frida-server
-# even when the `frida` feature is off (the user can prep the
-# device before rebuilding with the feature). HTTP fetch +
-# pure-Rust xz decompression keeps the dependency set minimal.
+# HTTP fetch + pure-Rust xz decompression — used by the
+# frida-server installer to download release tarballs.
 ureq = "2"
 lzma-rs = "0.3"
 dirs = "5"
 
-# Used by the session actor on the frida-feature path to
-# pull frida-sys symbols directly (script options, posting
-# messages, GLib main-context pumping). The `frida` crate's
-# safe wrappers don't expose enough surface for the actor
-# pattern, so we touch frida-sys here.
-
-# Behind the `frida` feature so the workspace builds without it.
-# `auto-download` saves the user from manually staging the
-# devkit; the frida-sys build.rs handles platform detection.
-frida = { version = "0.17", optional = true, features = ["auto-download"] }
-frida-sys = { version = "0.17", optional = true }
+# Frida bindings. `auto-download` saves the user from manually
+# staging the devkit; the frida-sys build.rs handles platform
+# detection and downloads the matching `frida-core-devkit`
+# tarball on first build (~30MB, cached in `target/` after).
+# Frida is an essential capability for Glass — no feature flag,
+# always linked.
+frida = { version = "0.17", features = ["auto-download"] }
+frida-sys = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

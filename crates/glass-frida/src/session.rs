@@ -258,43 +258,7 @@ impl Session {
 
 // ---- Actor thread ----------------------------------------------------------
 
-#[cfg(feature = "frida")]
-fn actor_main(cmd_rx: mpsc::Receiver<Command>, event_tx: mpsc::Sender<SessionEvent>) {
-    actor_main_with_frida(cmd_rx, event_tx)
-}
-
-#[cfg(not(feature = "frida"))]
-fn actor_main(cmd_rx: mpsc::Receiver<Command>, _event_tx: mpsc::Sender<SessionEvent>) {
-    // No-frida builds: just drain commands and reply with a
-    // clear error. Keeps the actor's command channel alive
-    // so callers don't panic.
-    while let Ok(cmd) = cmd_rx.recv() {
-        match cmd {
-            Command::AttachRemote { reply, .. } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::CreateScript { reply, .. } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::UnloadScript { reply, .. } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::PostMessage { reply, .. } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::Detach { reply } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::Resume { reply, .. } => {
-                let _ = reply.send(Err("glass-frida built without the `frida` feature".into()));
-            }
-            Command::Shutdown => break,
-        }
-    }
-}
-
-#[cfg(feature = "frida")]
-fn actor_main_with_frida(
+fn actor_main(
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<SessionEvent>,
 ) {
@@ -376,7 +340,6 @@ fn actor_main_with_frida(
     }
 }
 
-#[cfg(feature = "frida")]
 fn drain_commands_with_error(cmd_rx: mpsc::Receiver<Command>, msg: &str) {
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -410,12 +373,10 @@ fn drain_commands_with_error(cmd_rx: mpsc::Receiver<Command>, msg: &str) {
 // lifetimes we can't satisfy across actor iterations, so we
 // store raw pointers + own the drop ourselves.
 
-#[cfg(feature = "frida")]
 struct ManagerHolder {
     ptr: *mut frida_sys::_FridaDeviceManager,
 }
 
-#[cfg(feature = "frida")]
 impl ManagerHolder {
     fn new() -> Self {
         let ptr = unsafe { frida_sys::frida_device_manager_new() };
@@ -423,7 +384,6 @@ impl ManagerHolder {
     }
 }
 
-#[cfg(feature = "frida")]
 impl Drop for ManagerHolder {
     fn drop(&mut self) {
         unsafe {
@@ -437,13 +397,11 @@ impl Drop for ManagerHolder {
     }
 }
 
-#[cfg(feature = "frida")]
 struct SessionHolder {
     ptr: *mut frida_sys::_FridaSession,
     device_ptr: *mut frida_sys::_FridaDevice,
 }
 
-#[cfg(feature = "frida")]
 impl Drop for SessionHolder {
     fn drop(&mut self) {
         unsafe {
@@ -460,7 +418,6 @@ impl Drop for SessionHolder {
     }
 }
 
-#[cfg(feature = "frida")]
 struct ScriptHolder {
     ptr: *mut frida_sys::_FridaScript,
     /// Boxed callback context. Kept alive as long as the
@@ -469,7 +426,6 @@ struct ScriptHolder {
     _callback: Box<ScriptCallback>,
 }
 
-#[cfg(feature = "frida")]
 impl Drop for ScriptHolder {
     fn drop(&mut self) {
         unsafe {
@@ -483,7 +439,6 @@ impl Drop for ScriptHolder {
     }
 }
 
-#[cfg(feature = "frida")]
 struct ScriptCallback {
     script_id: ScriptId,
     tx: mpsc::Sender<SessionEvent>,
@@ -491,7 +446,6 @@ struct ScriptCallback {
 
 // ---- Command handling ----------------------------------------------------
 
-#[cfg(feature = "frida")]
 fn handle_command(
     cmd: Command,
     mgr: &ManagerHolder,
@@ -749,7 +703,6 @@ fn handle_command(
 // GLib `message` signal handler. Frida passes the JSON
 // message + optional binary data. We decode the JSON, route
 // it to the right event variant, and push onto the channel.
-#[cfg(feature = "frida")]
 unsafe extern "C" fn on_script_message(
     _script: *mut frida_sys::_FridaScript,
     message: *const i8,

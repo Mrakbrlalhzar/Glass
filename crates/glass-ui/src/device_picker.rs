@@ -65,9 +65,6 @@ pub(crate) fn render_chip(
                             None => label.to_string(),
                         }
                     }
-                    Err(glass_frida::FridaError::NotBuilt) => {
-                        "Frida disabled in this build".to_string()
-                    }
                     Err(glass_frida::FridaError::ServerUnreachable) => {
                         // Soften the tint to amber so the chip
                         // reads as "needs attention" rather
@@ -339,13 +336,9 @@ fn push_frida_server_action(
         return None;
     }
     let version = glass_frida::FRIDA_VERSION;
-    let secondary = if version == "unknown" {
-        "Frida disabled in this build — rebuild with --features frida".to_string()
-    } else {
-        format!(
-            "Downloads frida-server {version}, pushes to /data/local/tmp, starts via su.",
-        )
-    };
+    let secondary = format!(
+        "Downloads frida-server {version}, pushes to /data/local/tmp, starts via su.",
+    );
     let info_for_click = info.clone();
     Some(
         div()
@@ -525,11 +518,7 @@ fn footer(shell: &Shell, dim: gpui::Rgba, border: gpui::Rgba) -> gpui::Div {
         }
         Err(e) => format!("iOS: {e}"),
     };
-    let frida_line = if glass_frida::FridaRuntime::enabled() {
-        "Frida: built-in".to_string()
-    } else {
-        "Frida: support not built (rebuild with `--features frida`)".to_string()
-    };
+    let frida_line = "Frida: built-in".to_string();
     div()
         .px_3()
         .py_1p5()

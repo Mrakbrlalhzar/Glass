@@ -14,19 +14,14 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    // The version is only meaningful when we actually link
-    // against frida-sys (the `frida` feature). For featureless
-    // builds we emit "unknown" so the runtime can report a
-    // clear error rather than offering to download a phantom
-    // release.
-    let version = if env::var("CARGO_FEATURE_FRIDA").is_ok() {
-        read_frida_sys_version().unwrap_or_else(|e| {
-            println!("cargo:warning=glass-frida: could not read frida-sys FRIDA_VERSION: {e}");
-            "unknown".to_string()
-        })
-    } else {
+    // frida-sys is now unconditional, so the FRIDA_VERSION lookup
+    // is too. Emit "unknown" only as a defensive fallback when
+    // the lookup fails — that surfaces as a clear runtime error
+    // rather than a phantom-release download.
+    let version = read_frida_sys_version().unwrap_or_else(|e| {
+        println!("cargo:warning=glass-frida: could not read frida-sys FRIDA_VERSION: {e}");
         "unknown".to_string()
-    };
+    });
     println!("cargo:rustc-env=GLASS_FRIDA_VERSION={version}");
     println!("cargo:rerun-if-changed=build.rs");
 }

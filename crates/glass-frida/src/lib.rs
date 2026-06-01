@@ -1,17 +1,10 @@
 //! Host-side Frida driver.
 //!
-//! Wraps the `frida` crate so the rest of Glass doesn't have to
-//! deal with its build-time devkit requirement. When built
-//! without the `frida` Cargo feature (the default) every public
-//! method returns [`FridaError::NotBuilt`] — the GUI can still
-//! compile and tell the user "Frida support not enabled in this
-//! build" rather than failing to link.
-//!
-//! With `--features frida` the underlying `frida-sys` build
-//! script downloads the matching `frida-core-devkit` tarball
-//! from frida's GitHub releases (~30MB, cached after the first
-//! build) and links against it. Anyone with the feature enabled
-//! gets a working build without manually staging anything.
+//! Thin wrapper around the `frida` crate. Linked unconditionally
+//! — Frida is an essential capability for Glass, not opt-in.
+//! `frida-sys`'s build script downloads the matching
+//! `frida-core-devkit` tarball from frida's GitHub releases on
+//! first build (~30MB, cached in `target/` after).
 
 use std::sync::OnceLock;
 
@@ -47,8 +40,6 @@ pub use sign::{SignError, SignerTools};
 /// Cloneable error type surfaced through the GUI.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum FridaError {
-    #[error("Frida support not built into this binary (rebuild with `--features frida`)")]
-    NotBuilt,
     #[error("Frida runtime initialisation failed: {0}")]
     InitFailed(String),
     #[error("device not found in Frida's device list (serial {0})")]
@@ -106,7 +97,6 @@ pub enum FridaKind {
 /// stash the result in a `OnceLock` so subsequent callers get
 /// the same instance.
 pub struct FridaRuntime {
-    #[cfg(feature = "frida")]
     _inner: &'static frida::Frida,
 }
 
@@ -115,33 +105,18 @@ impl FridaRuntime {
     /// Safe to call from any thread; the underlying
     /// `Frida::obtain` is only invoked once.
     pub fn get() -> Result<&'static FridaRuntime, FridaError> {
-        #[cfg(feature = "frida")]
-        {
-            static FRIDA: OnceLock<frida::Frida> = OnceLock::new();
-            static RUNTIME: OnceLock<FridaRuntime> = OnceLock::new();
-            let rt = RUNTIME.get_or_init(|| {
-                // SAFETY: `Frida::obtain` is sound the first
-                // time it's called from a single thread of
-                // execution. The `OnceLock` guarantees the
-                // initialiser body runs exactly once; subsequent
-                // callers see the already-initialised instance.
-                let inner = FRIDA.get_or_init(|| unsafe { frida::Frida::obtain() });
-                FridaRuntime { _inner: inner }
-            });
-            Ok(rt)
-        }
-        #[cfg(not(feature = "frida"))]
-        {
-            let _ = OnceLock::<()>::new();
-            Err(FridaError::NotBuilt)
-        }
-    }
-
-    /// Whether the `frida` feature was compiled in. The GUI
-    /// uses this to decide whether to show "Frida support not
-    /// enabled" placeholders instead of attach controls.
-    pub fn enabled() -> bool {
-        cfg!(feature = "frida")
+        static FRIDA: OnceLock<frida::Frida> = OnceLock::new();
+        static RUNTIME: OnceLock<FridaRuntime> = OnceLock::new();
+        let rt = RUNTIME.get_or_init(|| {
+            // SAFETY: `Frida::obtain` is sound the first
+            // time it's called from a single thread of
+            // execution. The `OnceLock` guarantees the
+            // initialiser body runs exactly once; subsequent
+            // callers see the already-initialised instance.
+            let inner = FRIDA.get_or_init(|| unsafe { frida::Frida::obtain() });
+            FridaRuntime { _inner: inner }
+        });
+        Ok(rt)
     }
 
     /// Probe a device for a running frida-server.
@@ -157,32 +132,21 @@ impl FridaRuntime {
     ///     out or refuses. User needs to either start
     ///     frida-server (rooted devices) or inject the gadget
     ///     (stock devices). The chip surfaces a hint.
-    ///   * `Err(FridaError::NotBuilt)` — feature flag not set
-    ///     at build time. The chip shows "Frida disabled".
     ///
     /// Blocking; run on a background thread.
     pub fn probe(device: &DeviceId) -> Result<ProbeReport, FridaError> {
-        #[cfg(feature = "frida")]
-        {
-            // Wrap the whole inner call in catch_unwind too —
-            // frida-core can panic deep inside enumerate /
-            // attach paths when a device-side connection has
-            // died but its host-side state hasn't cleaned up
-            // yet. Treat any panic as "unreachable" rather
-            // than crashing the GUI thread.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::probe_inner(device)
-            }))
-            .unwrap_or(Err(FridaError::ServerUnreachable))
-        }
-        #[cfg(not(feature = "frida"))]
-        {
-            let _ = device;
-            Err(FridaError::NotBuilt)
-        }
+        // Wrap the whole inner call in catch_unwind too —
+        // frida-core can panic deep inside enumerate /
+        // attach paths when a device-side connection has
+        // died but its host-side state hasn't cleaned up
+        // yet. Treat any panic as "unreachable" rather
+        // than crashing the GUI thread.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::probe_inner(device)
+        }))
+        .unwrap_or(Err(FridaError::ServerUnreachable))
     }
 
-    #[cfg(feature = "frida")]
     fn probe_inner(device: &DeviceId) -> Result<ProbeReport, FridaError> {
         let rt = Self::get()?;
         let mgr = frida::DeviceManager::obtain(rt._inner);
