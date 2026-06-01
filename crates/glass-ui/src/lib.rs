@@ -60,6 +60,7 @@ mod frida_dock;
 mod frida_hooks;
 mod frida_inject;
 mod frida_server_install;
+mod code_editor;
 mod scripts_actions;
 mod scripts_panel;
 mod string_edit_popover;
@@ -1076,6 +1077,9 @@ pub(crate) struct Tab {
     pub(crate) cfg: Option<CfgViewState>,
     /// DEX call-graph view state.
     pub(crate) dex_callgraph: Option<DexCallGraphState>,
+    /// Script-editor state. `Some` only for tabs with
+    /// `TabKind::ScriptEditor`.
+    pub(crate) code_editor: Option<code_editor::CodeEditor>,
 }
 
 /// Per-tab state for a CFG view. Holds the camera (pan + zoom in
@@ -1139,12 +1143,23 @@ pub(crate) enum TabKind {
         artifact: glass_db::ArtifactId,
         mangled_name: String,
     },
+    /// Frida-script editor. Backed by `Tab::code_editor` (rope-
+    /// backed buffer + virtualized renderer). Ephemeral — not
+    /// round-tripped through glass-db; reopening a bundle drops
+    /// any open script editors.
+    ScriptEditor {
+        /// Script name (with no `.js` suffix). Matches the row
+        /// in `scripts_panel`.
+        name: String,
+    },
 }
 
 impl TabKind {
-    /// Persistable form — round-trips through `glass-db`.
-    fn to_state(&self) -> glass_db::TabState {
-        match self {
+    /// Persistable form — round-trips through `glass-db`. Returns
+    /// `None` for ephemeral kinds (`ScriptEditor`) that
+    /// intentionally don't survive a reopen.
+    fn to_state(&self) -> Option<glass_db::TabState> {
+        Some(match self {
             TabKind::SmaliClass { class_jni } => glass_db::TabState::SmaliClass {
                 class_jni: class_jni.clone(),
                 scroll_line: 0,
@@ -1192,7 +1207,9 @@ impl TabKind {
                 mangled_name: mangled_name.clone(),
                 scroll_line: 0,
             },
-        }
+            // ScriptEditor is intentionally ephemeral.
+            TabKind::ScriptEditor { .. } => return None,
+        })
     }
 
     fn from_kind(kind: &LeafKind) -> Self {
@@ -1257,6 +1274,7 @@ impl Tab {
             hex_rows: None,
             cfg,
             dex_callgraph,
+            code_editor: None,
         }
     }
 

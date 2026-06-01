@@ -95,16 +95,36 @@ impl Shell {
         None
     }
 
-    /// Open (or focus) the editor tab for `name`. Phase 2 stub:
-    /// the editor tab type lands in step 2d; for now log so the
-    /// click is observable while the rest of the UI compiles.
+    /// Open (or focus) the editor tab for `name`. Loads the
+    /// on-disk `.js` body into a fresh `CodeEditor` if no tab
+    /// for this script is open yet; otherwise just activates the
+    /// existing one.
     pub(crate) fn open_script_editor(
         &mut self,
         name: &str,
         cx: &mut Context<Self>,
     ) {
-        let _ = cx;
-        tracing::info!("open_script_editor: TODO {name:?}");
+        let kind = crate::TabKind::ScriptEditor { name: name.to_string() };
+        // Focus the existing tab if one is open. ScriptEditor is
+        // PartialEq via the derived impl on TabKind, so name-equality
+        // matches.
+        if let Some(i) = self.tabs.iter().position(|t| t.kind == kind) {
+            self.active_tab = Some(i);
+            cx.notify();
+            return;
+        }
+        // Load the body from disk. An orphaned metadata row (file
+        // missing) opens to an empty buffer; the user can type fresh
+        // content and save normally.
+        let dir = crate::scripts_panel::scripts_dir();
+        let path = dir.join(format!("{name}.js"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+
+        let mut tab = crate::Tab::new(kind);
+        tab.code_editor = Some(crate::code_editor::CodeEditor::from_string(body));
+        self.tabs.push(tab);
+        self.active_tab = Some(self.tabs.len() - 1);
+        cx.notify();
     }
 
     /// Right-click on a script row. Phase 2f wires the actual

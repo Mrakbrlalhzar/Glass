@@ -302,30 +302,36 @@ impl Shell {
             open_tabs: self
                 .tabs
                 .iter()
-                .map(|t| {
+                .filter_map(|t| {
+                    // Ephemeral tabs (ScriptEditor) opt out of
+                    // persistence by returning None from to_state;
+                    // `filter_map` drops them silently here.
+                    if matches!(&t.kind, TabKind::ScriptEditor { .. }) {
+                        return None;
+                    }
                     if let (TabKind::Cfg { artifact, entry_addr }, Some(view)) =
                         (&t.kind, t.cfg.as_ref())
                     {
-                        return glass_db::TabState::Cfg {
+                        return Some(glass_db::TabState::Cfg {
                             artifact: artifact.clone(),
                             entry_addr: *entry_addr,
                             pan_x: view.pan_x(),
                             pan_y: view.pan_y(),
                             zoom: view.zoom(),
-                        };
+                        });
                     }
                     if let (
                         TabKind::DexCallGraph { class_jni, method_decl },
                         Some(view),
                     ) = (&t.kind, t.dex_callgraph.as_ref())
                     {
-                        return glass_db::TabState::DexCallGraph {
+                        return Some(glass_db::TabState::DexCallGraph {
                             class_jni: class_jni.clone(),
                             method_decl: method_decl.clone(),
                             pan_x: view.pan_x(),
                             pan_y: view.pan_y(),
                             zoom: view.zoom(),
-                        };
+                        });
                     }
                     // Listing / Hex / Smali: capture the scroll
                     // position so reopening returns to where the
@@ -345,11 +351,11 @@ impl Shell {
                                     })
                                 })
                                 .unwrap_or(0);
-                            return glass_db::TabState::Listing {
+                            return Some(glass_db::TabState::Listing {
                                 artifact: artifact.clone(),
                                 section: section.clone(),
                                 scroll_top,
-                            };
+                            });
                         }
                         TabKind::Hex { artifact, section } => {
                             let scroll_top = t
@@ -364,31 +370,31 @@ impl Shell {
                                     })
                                 })
                                 .unwrap_or(0);
-                            return glass_db::TabState::Hex {
+                            return Some(glass_db::TabState::Hex {
                                 artifact: artifact.clone(),
                                 section: section.clone(),
                                 scroll_top,
-                            };
+                            });
                         }
                         TabKind::SmaliClass { class_jni } => {
-                            return glass_db::TabState::SmaliClass {
+                            return Some(glass_db::TabState::SmaliClass {
                                 class_jni: class_jni.clone(),
                                 scroll_line: top_row as u32,
-                            };
+                            });
                         }
                         TabKind::ObjCClass { artifact, class_name } => {
-                            return glass_db::TabState::ObjCClass {
+                            return Some(glass_db::TabState::ObjCClass {
                                 artifact: artifact.clone(),
                                 class_name: class_name.clone(),
                                 scroll_line: top_row as u32,
-                            };
+                            });
                         }
                         TabKind::SwiftType { artifact, mangled_name } => {
-                            return glass_db::TabState::SwiftType {
+                            return Some(glass_db::TabState::SwiftType {
                                 artifact: artifact.clone(),
                                 mangled_name: mangled_name.clone(),
                                 scroll_line: top_row as u32,
-                            };
+                            });
                         }
                         _ => {}
                     }
@@ -519,13 +525,19 @@ impl Shell {
                 // silently dropped until their runtime lands.
                 _ => continue,
             };
-            // Only restore tabs whose target still exists in this bundle.
-            if bundle.resolve(&kind.to_state()).is_some() {
-                let mut tab = Tab::new(kind);
-                tab.pending_scroll_addr = pending_addr;
-                tab.pending_smali_scroll_line = pending_line;
-                self.tabs.push(tab);
+            // Only restore tabs whose target still exists in this
+            // bundle. Restore paths never produce ScriptEditor
+            // (those don't round-trip), so to_state is always Some
+            // here in practice — but the explicit check keeps the
+            // intent obvious.
+            let Some(state) = kind.to_state() else { continue };
+            if bundle.resolve(&state).is_none() {
+                continue;
             }
+            let mut tab = Tab::new(kind);
+            tab.pending_scroll_addr = pending_addr;
+            tab.pending_smali_scroll_line = pending_line;
+            self.tabs.push(tab);
         }
         if let Some(idx) = rec.active_tab {
             if idx < self.tabs.len() {
@@ -636,7 +648,10 @@ impl Shell {
     pub(crate) fn tab_leaf(&self, index: usize) -> Option<LeafId> {
         let bundle = self.bundle()?;
         let tab = self.tabs.get(index)?;
-        bundle.resolve(&tab.kind.to_state())
+        // ScriptEditor tabs return None — they have no leaf id;
+        // map them to None here.
+        let state = tab.kind.to_state()?;
+        bundle.resolve(&state)
     }
 
     pub(crate) fn active_leaf(&self) -> Option<LeafId> {
@@ -698,6 +713,20 @@ impl Shell {
                 .tab_leaf(index)
                 .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                 .unwrap_or_else(|| SharedString::from(mangled_name.clone())),
+            // Script editor: tab title is the script name + `.js`
+            // suffix (no leaf id since these tabs aren't bundle-
+            // backed). Append `*` when the buffer is dirty so the
+            // user sees unsaved-state in the tab bar.
+            TabKind::ScriptEditor { name } => {
+                let dirty = self
+                    .tabs
+                    .get(index)
+                    .and_then(|t| t.code_editor.as_ref())
+                    .map(|e| e.dirty)
+                    .unwrap_or(false);
+                let star = if dirty { "*" } else { "" };
+                SharedString::from(format!("{name}.js{star}"))
+            }
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1004,7 +1033,7 @@ impl Shell {
             TabKind::SmaliClass { class_jni } => {
                 let class_jni = class_jni.clone();
                 let Some(leaf) = self.tabs.get(active).and_then(|t| {
-                    bundle.resolve(&t.kind.to_state())
+                    t.kind.to_state().and_then(|s| bundle.resolve(&s))
                 }) else {
                     return;
                 };
@@ -1105,6 +1134,10 @@ impl Shell {
                     tab.lines = Some(Arc::new(Vec::new()));
                 }
             }
+            // Script editor: the CodeEditor owns its own ListState
+            // (one row per line). It's seeded at open_script_editor
+            // time, so there's nothing to do here.
+            TabKind::ScriptEditor { .. } => {}
         }
     }
 

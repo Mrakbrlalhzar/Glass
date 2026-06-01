@@ -407,6 +407,21 @@ pub fn render_two_pane(
                     (None, None) => div().flex_1().into_any_element(),
                 }
             }
+            Some(TabKind::ScriptEditor { .. }) => {
+                let editor = shell
+                    .active_tab
+                    .and_then(|i| shell.tabs.get(i))
+                    .and_then(|t| t.code_editor.as_ref());
+                match editor {
+                    Some(e) => crate::code_editor::render_code_editor(
+                        e, panel, border, fg, dim, cx,
+                    ),
+                    // Tab was opened without an editor seeded —
+                    // shouldn't happen via `open_script_editor`, but
+                    // render an empty placeholder rather than panic.
+                    None => div().flex_1().into_any_element(),
+                }
+            }
             Some(TabKind::SmaliClass { .. }) | None => {
                 let active_class_jni: Option<String> = shell
                     .active_tab

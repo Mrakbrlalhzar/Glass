@@ -83,6 +83,10 @@ impl Shell {
             // per-row copy formatter once the renderer learns
             // a notion of selectable units.
             TabKind::SwiftType { .. } => None,
+            // Script editor: copy/paste lives inside the
+            // CodeEditor widget itself (handled by the rope-backed
+            // selection model), not via this tab-level fallback.
+            TabKind::ScriptEditor { .. } => None,
         }
     }
 }
