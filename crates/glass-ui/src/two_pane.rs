@@ -1313,11 +1313,11 @@ pub fn render_two_pane(
         };
 
         // Splitter handle between the left nav and right body.
-        // 5px-wide hit target with a ResizeLeftRight cursor;
-        // doesn't render a visible bar of its own (the left
-        // pane's right border already separates them visually).
-        // Drag updates `shell.left_pane_width`; release persists
-        // to `WindowSettings`.
+        // 5px-wide hit target with a ResizeLeftRight cursor; the
+        // left pane's right border carries the visible line.
+        // mouse-down anchors the drag; move + up are listened on
+        // the outer container below so the pointer can leave
+        // this 5px zone mid-drag without breaking the gesture.
         let splitter = div()
             .id("left-pane-splitter")
             .w(px(5.))
@@ -1329,20 +1329,8 @@ pub fn render_two_pane(
                 cx.listener(|shell, ev: &gpui::MouseDownEvent, _w, cx| {
                     shell.start_left_pane_resize(ev.position.x, cx);
                 }),
-            )
-            .on_mouse_move(cx.listener(
-                |shell, ev: &gpui::MouseMoveEvent, _w, cx| {
-                    if ev.pressed_button.is_some() {
-                        shell.update_left_pane_resize(ev.position.x, cx);
-                    }
-                },
-            ))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|shell, _ev, _w, cx| {
-                    shell.finish_left_pane_resize(cx);
-                }),
             );
+        let dragging = shell.left_pane_resize_anchor.is_some();
         let mut outer = div()
             .flex_1()
             .flex()
@@ -1350,7 +1338,34 @@ pub fn render_two_pane(
             .overflow_hidden()
             .child(left)
             .child(splitter)
-            .child(right);
+            .child(right)
+            // Track mouse moves window-wide while the splitter
+            // drag is in progress. Pointer can travel anywhere
+            // (faster than 5px / event) without losing the
+            // gesture; move + up stay routed to Shell.
+            .on_mouse_move(cx.listener(
+                |shell, ev: &gpui::MouseMoveEvent, _w, cx| {
+                    if shell.left_pane_resize_anchor.is_some()
+                        && ev.pressed_button == Some(gpui::MouseButton::Left)
+                    {
+                        shell.update_left_pane_resize(ev.position.x, cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|shell, _ev, _w, cx| {
+                    if shell.left_pane_resize_anchor.is_some() {
+                        shell.finish_left_pane_resize(cx);
+                    }
+                }),
+            );
+        // While dragging, force the resize cursor over the whole
+        // body so it doesn't flicker back to the default when the
+        // pointer crosses over the right pane.
+        if dragging {
+            outer = outer.cursor(gpui::CursorStyle::ResizeLeftRight);
+        }
         if let Some(p) = pane {
             outer = outer.child(p);
         }
