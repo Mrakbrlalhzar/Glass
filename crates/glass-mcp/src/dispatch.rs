@@ -886,14 +886,22 @@ fn stalker_coverage(
         .get("duration_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(1000);
-    let tid = args.get("tid").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let tids: Vec<u32> = args
+        .get("tids")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .unwrap_or_default();
     let symbolise = args
         .get("symbolise")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
     let session = clone_frida(state)?;
-    let source = glass_frida::render_coverage_script(tid, &modules, duration_ms);
+    let source = glass_frida::render_coverage_script(&tids, &modules, duration_ms);
     let id = session.alloc_script_id();
     session
         .create_script(id, "stalker-coverage", source)

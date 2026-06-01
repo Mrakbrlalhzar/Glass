@@ -1093,11 +1093,11 @@ pub fn catalog() -> SkillCatalog {
             },
             Skill {
                 name: "stalker-coverage",
-                description: "One-shot Frida Stalker basic-block coverage. Loads a coverage script into the attached session, follows the given thread for `duration_ms`, then returns the per-block hit table. `modules` whitelists which modules to record (empty = all reachable; almost always pass at least one .so name). When a bundle is open and `symbolise` is true (default), rows get an `artifact` + `symbol{name,address}` field via `bundle.symbol_at`. The row shape is `[{module, offset, hits, artifact?, symbol?}]`.",
+                description: "One-shot Frida Stalker basic-block coverage. Loads a coverage script into the attached session, follows the listed threads for `duration_ms`, then returns the per-block hit table. `modules` whitelists which modules to record (empty = all reachable; almost always pass at least one .so name). `tids` lists threads to follow (empty default = main thread only, which is TID == pid on Android); pass background TIDs from `device-shell ps -T -p <pid>` to catch binder / networking / image-decode threads. When a bundle is open and `symbolise` is true (default), rows get an `artifact` + `symbol{name,address}` field via `bundle.symbol_at`. The row shape is `[{module, offset, hits, artifact?, symbol?}]`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "tid": {"type":"integer","description":"thread id to follow; defaults to the script's own thread"},
+                        "tids": {"type":"array","items":{"type":"integer"},"description":"thread ids to follow; empty = main thread only"},
                         "modules": {"type":"array","items":{"type":"string"},"description":"module-name whitelist (basenames like libfoo.so)"},
                         "duration_ms": {"type":"integer","description":"how long to record (default 1000)"},
                         "symbolise": {"type":"boolean","description":"resolve offsets against the open bundle (default true)"}
@@ -1106,12 +1106,12 @@ pub fn catalog() -> SkillCatalog {
                 output_shape: json!({
                     "type": "object",
                     "properties": {
-                        "tid": {"type":["integer","null"]},
+                        "followed_tids": {"type":"array"},
                         "row_count": {"type":"integer"},
                         "rows": {"type":"array"}
                     }
                 }),
-                example: "stalker-coverage {\"modules\":[\"libsqliteX.so\"],\"duration_ms\":2000}",
+                example: "stalker-coverage {\"modules\":[\"libsqliteX.so\"],\"tids\":[12345,12346],\"duration_ms\":2000}",
             },
             Skill {
                 name: "frida-resume",

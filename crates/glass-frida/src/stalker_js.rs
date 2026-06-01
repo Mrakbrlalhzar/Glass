@@ -10,10 +10,11 @@ use std::fmt::Write as _;
 
 /// Render a basic-block coverage script.
 ///
-/// * `tid`         — thread to follow. `None` means "the thread
-///   the script runs on", which is the right default for a
-///   spawned-paused-then-resumed app (frida runs scripts on
-///   the main thread).
+/// * `tids`        — explicit list of thread ids to follow.
+///   Empty list ⇒ default behaviour: follow the target's main
+///   thread (Linux/Android: TID == pid). Pass `[tid1, tid2]`
+///   to instrument background threads (binder, networking,
+///   image decoding) that the main-thread default misses.
 /// * `modules`     — whitelist of module names. Blocks outside
 ///   these modules are still counted by Stalker but discarded
 ///   in the JS-side filter so the host never sees them. Empty
@@ -22,26 +23,25 @@ use std::fmt::Write as _;
 /// * `duration_ms` — how long to follow before stopping and
 ///   flushing the table back.
 ///
-/// The script `send`s exactly one message: `{ kind:
-/// "stalker-coverage", tid, rows: [{module, offset, hits}] }`.
+/// The script `send`s a `stalker-coverage-init` message
+/// immediately reporting which threads actually got followed
+/// (Stalker.follow can refuse on some threads), then one final
+/// `stalker-coverage` message with the per-block hit table.
 /// `offset` is the byte offset from the module's runtime base
 /// — which equals the file vaddr for ET_DYN binaries (every
 /// .so), so it can be fed straight into `bundle.symbol_at`.
 pub fn render_coverage_script(
-    tid: Option<u32>,
+    tids: &[u32],
     modules: &[String],
     duration_ms: u64,
 ) -> String {
     let modules_js = render_string_array(modules);
-    let tid_js = match tid {
-        Some(t) => t.to_string(),
-        None => "null".to_string(),
-    };
+    let tids_js = render_u32_array(tids);
     let mut s = String::with_capacity(2048);
     let _ = writeln!(s, "(function () {{");
     let _ = writeln!(s, "  const WANT = {modules_js};");
     let _ = writeln!(s, "  const DURATION = {duration_ms};");
-    let _ = writeln!(s, "  const TID_ARG = {tid_js};");
+    let _ = writeln!(s, "  const TIDS_ARG = {tids_js};");
     s.push_str(COVERAGE_BODY);
     let _ = writeln!(s, "}})();");
     s
@@ -51,6 +51,11 @@ pub fn render_coverage_script(
 fn render_string_array(names: &[String]) -> String {
     // serde handles escaping; the result is valid JS too.
     serde_json::to_string(names).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// JSON-array-of-numbers literal, safe to splice into JS.
+fn render_u32_array(values: &[u32]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
 const COVERAGE_BODY: &str = r#"
@@ -73,17 +78,21 @@ const COVERAGE_BODY: &str = r#"
 
   // Resolve threads to follow.
   //
-  //   * Explicit `tid` argument: follow exactly that.
+  //   * Explicit list: follow exactly those.
   //   * Otherwise: follow the target's main thread
   //     (Linux/Android: main TID == pid). Following every
   //     thread we enumerate instruments frida-core's own
   //     worker pool and the kernel's binder threads —
   //     instrumenting everything blocks the script's event
   //     loop so `setTimeout` never fires.
+  //
+  // Either way we filter out the script's own thread; Stalker
+  // on it captures frida-core internals only and risks
+  // deadlocking the event loop.
   const myTid = Process.getCurrentThreadId();
   let followTids;
-  if (TID_ARG !== null) {
-    followTids = [TID_ARG];
+  if (TIDS_ARG.length > 0) {
+    followTids = TIDS_ARG.filter(function (t) { return t !== myTid; });
   } else {
     const mainTid = Process.id;
     followTids = (mainTid !== myTid) ? [mainTid] : [];
@@ -165,23 +174,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_with_modules_and_tid() {
+    fn renders_with_modules_and_tids() {
         let js = render_coverage_script(
-            Some(12345),
+            &[12345, 67890],
             &["libfoo.so".into(), "libbar.so".into()],
             500,
         );
         assert!(js.contains("[\"libfoo.so\",\"libbar.so\"]"));
         assert!(js.contains("const DURATION = 500;"));
-        assert!(js.contains("const TID_ARG = 12345;"));
+        assert!(js.contains("const TIDS_ARG = [12345,67890];"));
         assert!(js.contains("Stalker.follow"));
     }
 
     #[test]
     fn renders_with_defaults() {
-        let js = render_coverage_script(None, &[], 1000);
+        let js = render_coverage_script(&[], &[], 1000);
         assert!(js.contains("const WANT = [];"));
-        assert!(js.contains("const TID_ARG = null;"));
+        assert!(js.contains("const TIDS_ARG = [];"));
         assert!(js.contains("const DURATION = 1000;"));
     }
 
@@ -189,7 +198,7 @@ mod tests {
     fn escapes_module_names() {
         // A module name with a quote is malformed in practice
         // but we still want safe escaping rather than broken JS.
-        let js = render_coverage_script(None, &["evil\".so".into()], 100);
+        let js = render_coverage_script(&[], &["evil\".so".into()], 100);
         // serde escapes it: "evil\".so" -> "evil\\\".so"
         assert!(js.contains("evil\\\""));
     }

@@ -393,8 +393,8 @@ enum Cmd {
     },
     /// (MCP-only) One-shot Stalker basic-block coverage.
     StalkerCoverage {
-        #[arg(long)]
-        tid: Option<u32>,
+        #[arg(long, value_delimiter = ',')]
+        tids: Vec<u32>,
         #[arg(long, value_delimiter = ',')]
         modules: Vec<String>,
         #[arg(long, default_value_t = 1000)]
