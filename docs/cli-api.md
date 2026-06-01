@@ -254,6 +254,64 @@ bare name (first match) or `name(descriptor)` for unambiguous lookup.
 glass method-calls ./app.apk --class com.example.Foo --method 'bar(Ljava/lang/String;)V'
 ```
 
+## Frida scripts
+
+A small per-user library of Frida JS scripts. Bodies are plain `.js`
+files in `~/Library/Application Support/Glass/scripts/` (or the
+platform equivalent); descriptions / tags / timestamps live in
+glass-db. A per-bundle "enabled" flag (also in glass-db) drives which
+scripts the GUI auto-loads when it attaches a Frida session.
+
+### `scripts [--bundle <path>]`
+
+List every script in the library. With `--bundle`, each row's
+`enabled_for_bundle` reflects the toggle state for that bundle.
+
+```sh
+glass scripts --bundle ./app.apk --text
+```
+
+### `script-read <name>`
+
+Read one script's body + metadata. The `.js` suffix is optional.
+
+```sh
+glass script-read anti-root
+```
+
+### `script-write <name> [--body STR | --body-file PATH] [--description STR] [--tag T]...`
+
+Create or overwrite a script. `--description` and `--tag` are
+optional; omitting them leaves the existing metadata alone.
+
+```sh
+glass script-write anti-root --body-file ./anti-root.js \
+  --description "Bypasses Magisk detection" --tag anti-root --tag tls
+```
+
+### `script-delete <name>`
+
+Remove the `.js` file, the metadata row, and every per-bundle
+enabled-row that referenced it. Idempotent.
+
+### `script-enable <bundle> <name>` / `script-disable <bundle> <name>`
+
+Toggle a script's enabled state for one bundle. The GUI's Frida
+session auto-loads enabled scripts on attach.
+
+```sh
+glass script-enable ./app.apk anti-root
+glass script-disable ./app.apk anti-root
+```
+
+### `enabled-scripts <bundle>`
+
+List the script names currently enabled for the given bundle.
+
+```sh
+glass enabled-scripts ./app.apk
+```
+
 ## Cross-references
 
 The xref verbs build their indices inline for each query — the CLI

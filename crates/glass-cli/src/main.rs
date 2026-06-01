@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod output;
+mod scripts_verbs;
 mod verbs;
 
 use output::Format;
@@ -97,6 +98,35 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             *raw,
             format,
         )),
+        Cmd::Scripts { bundle } => {
+            Some(scripts_verbs::scripts(bundle.clone(), format))
+        }
+        Cmd::ScriptRead { name } => {
+            Some(scripts_verbs::script_read(name.clone(), format))
+        }
+        Cmd::ScriptWrite { name, body, body_file, description, tags } => {
+            let tags_opt = if tags.is_empty() { None } else { Some(tags.clone()) };
+            Some(scripts_verbs::script_write(
+                name.clone(),
+                body.clone(),
+                body_file.clone(),
+                description.clone(),
+                tags_opt,
+                format,
+            ))
+        }
+        Cmd::ScriptDelete { name } => {
+            Some(scripts_verbs::script_delete(name.clone(), format))
+        }
+        Cmd::ScriptEnable { bundle, name } => Some(
+            scripts_verbs::script_enable(bundle.clone(), name.clone(), format),
+        ),
+        Cmd::ScriptDisable { bundle, name } => Some(
+            scripts_verbs::script_disable(bundle.clone(), name.clone(), format),
+        ),
+        Cmd::EnabledScripts { bundle } => {
+            Some(scripts_verbs::enabled_scripts(bundle.clone(), format))
+        }
         Cmd::Smali { path, class } => {
             Some(verbs::smali(path.clone(), class.clone(), format))
         }
@@ -381,6 +411,55 @@ enum Cmd {
         /// on field types / superclass).
         #[arg(long)]
         raw: bool,
+    },
+    /// List the Frida scripts in the user's library. With
+    /// `--bundle`, marks which are enabled for that bundle.
+    Scripts {
+        /// Optional bundle path; when given, each row carries an
+        /// `enabled_for_bundle` flag for that bundle.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Print one script's body + metadata.
+    ScriptRead {
+        /// Script name (with or without `.js`).
+        name: String,
+    },
+    /// Create or overwrite a script.
+    ScriptWrite {
+        /// Script name (with or without `.js`).
+        name: String,
+        /// Inline script body. Mutually exclusive with --body-file.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the body from this path.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<PathBuf>,
+        /// Replace the description. Omit to leave it unchanged.
+        #[arg(long)]
+        description: Option<String>,
+        /// Replace the tag set. Pass `--tag` multiple times.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+    /// Delete a script (both the `.js` file and its metadata) and
+    /// every per-bundle enabled row that referenced it.
+    ScriptDelete {
+        name: String,
+    },
+    /// Mark a script as enabled for the given bundle. Idempotent.
+    ScriptEnable {
+        bundle: PathBuf,
+        name: String,
+    },
+    /// Mark a script as disabled for the given bundle. Idempotent.
+    ScriptDisable {
+        bundle: PathBuf,
+        name: String,
+    },
+    /// List the script names currently enabled for the given bundle.
+    EnabledScripts {
+        bundle: PathBuf,
     },
     /// Print the full smali body of a class.
     Smali {
@@ -803,6 +882,13 @@ fn main() -> Result<()> {
         | Cmd::Classes { .. }
         | Cmd::Types { .. }
         | Cmd::Type { .. }
+        | Cmd::Scripts { .. }
+        | Cmd::ScriptRead { .. }
+        | Cmd::ScriptWrite { .. }
+        | Cmd::ScriptDelete { .. }
+        | Cmd::ScriptEnable { .. }
+        | Cmd::ScriptDisable { .. }
+        | Cmd::EnabledScripts { .. }
         | Cmd::Smali { .. }
         | Cmd::SmaliSet { .. }
         | Cmd::Methods { .. }

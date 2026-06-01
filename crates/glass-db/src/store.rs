@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ids::{ArtifactId, BundleId};
-use crate::schema::{Annotation, AnnotationKey, ArtifactRecord, BundleRecord, SCHEMA_VERSION};
+use crate::schema::{
+    Annotation, AnnotationKey, ArtifactRecord, BundleRecord, ScriptMeta, SCHEMA_VERSION,
+};
 
 // Keys are the 32-byte hashes; values are JSON blobs. Annotations use a
 // composite key (artifact || serialized AnnotationKey) so we can scan
@@ -22,6 +24,13 @@ use crate::schema::{Annotation, AnnotationKey, ArtifactRecord, BundleRecord, SCH
 const BUNDLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bundles");
 const ARTIFACTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("artifacts");
 const ANNOTATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("annotations");
+// Frida script metadata, keyed by script name (no `.js`).
+// Global — not bound to any bundle.
+const SCRIPT_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("script_meta");
+// Per-bundle enabled flag. Composite key = bundle_id (32 bytes) ||
+// script name. Value is the byte `1`. Absence ⇒ disabled.
+const SCRIPT_ENABLED: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("script_enabled");
 
 pub(crate) struct Store {
     db: RedbDb,
@@ -37,6 +46,8 @@ impl Store {
             let _ = tx.open_table(BUNDLES)?;
             let _ = tx.open_table(ARTIFACTS)?;
             let _ = tx.open_table(ANNOTATIONS)?;
+            let _ = tx.open_table(SCRIPT_META)?;
+            let _ = tx.open_table(SCRIPT_ENABLED)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -119,6 +130,130 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    // ---- Frida scripts ------------------------------------------------------
+
+    /// All script metadata records, keyed by name. Names not on
+    /// disk are still returned — callers reconcile against the
+    /// script directory and report orphan rows separately.
+    pub fn read_all_script_meta(&self) -> Result<HashMap<String, ScriptMeta>> {
+        use redb::ReadableTable;
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SCRIPT_META)?;
+        let mut out = HashMap::new();
+        for entry in table.iter()? {
+            let (k, v) = entry?;
+            let Ok(name) = std::str::from_utf8(k.value()) else { continue };
+            if let Some(meta) = decode_versioned::<ScriptMeta>(v.value()) {
+                out.insert(name.to_string(), meta);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn read_script_meta(&self, name: &str) -> Result<Option<ScriptMeta>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SCRIPT_META)?;
+        let Some(blob) = table.get(name.as_bytes())? else {
+            return Ok(None);
+        };
+        Ok(decode_versioned(blob.value()))
+    }
+
+    pub fn write_script_meta(&self, name: &str, meta: &ScriptMeta) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(SCRIPT_META)?;
+            let blob = encode(meta)?;
+            t.insert(name.as_bytes(), blob.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove a script's metadata + every per-bundle enabled row
+    /// referring to it. Idempotent.
+    pub fn delete_script(&self, name: &str) -> Result<()> {
+        use redb::ReadableTable;
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(SCRIPT_META)?;
+            t.remove(name.as_bytes())?;
+        }
+        {
+            let mut t = tx.open_table(SCRIPT_ENABLED)?;
+            // Composite key suffix is `name`; with bundle ids being
+            // 32 bytes we scan and collect matches first, then
+            // remove. The table is small (one row per
+            // (bundle, enabled-script) pair) so a full scan is
+            // cheap.
+            let mut to_remove = Vec::new();
+            for entry in t.iter()? {
+                let (k, _v) = entry?;
+                let key = k.value();
+                if key.len() > 32 && &key[32..] == name.as_bytes() {
+                    to_remove.push(key.to_vec());
+                }
+            }
+            for k in to_remove {
+                t.remove(k.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Names enabled for the given bundle, sorted.
+    pub fn read_enabled_scripts(
+        &self,
+        bundle: &BundleId,
+    ) -> Result<Vec<String>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SCRIPT_ENABLED)?;
+        let prefix = bundle.as_bytes().as_slice();
+        let mut end = prefix.to_vec();
+        for byte in end.iter_mut().rev() {
+            if *byte != 0xff {
+                *byte += 1;
+                break;
+            }
+            *byte = 0;
+        }
+        let mut out = Vec::new();
+        for entry in table.range(prefix..end.as_slice())? {
+            let (k, _v) = entry?;
+            let key = k.value();
+            if key.len() < 32 || !key.starts_with(prefix) {
+                continue;
+            }
+            if let Ok(name) = std::str::from_utf8(&key[32..]) {
+                out.push(name.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    pub fn set_script_enabled(
+        &self,
+        bundle: &BundleId,
+        name: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut key = bundle.as_bytes().to_vec();
+        key.extend_from_slice(name.as_bytes());
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(SCRIPT_ENABLED)?;
+            if enabled {
+                t.insert(key.as_slice(), &[1u8][..])?;
+            } else {
+                t.remove(key.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- writes -------------------------------------------------------------

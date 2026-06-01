@@ -334,6 +334,121 @@ pub fn catalog() -> SkillCatalog {
                 example: "glass type ./blackjack.ipa --artifact blackjack --name blackjack.ContentView",
             },
 
+            // ---- Frida script library --------------------------------
+            Skill {
+                name: "scripts",
+                description: "List the user's Frida script library (the `.js` files under Glass's scripts directory, with their stored description / tags / timestamps). With `path`, the listing is scoped to a bundle so each entry's `enabled_for_bundle` flag reflects which scripts are toggled on for that bundle.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": path_arg()
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "directory": {"type":"string"},
+                        "total": {"type":"integer"},
+                        "scripts": {"type":"array"},
+                        "bundle_id": {"type":["string","null"]}
+                    }
+                }),
+                example: "glass scripts --bundle ./app.apk",
+            },
+            Skill {
+                name: "script-read",
+                description: "Read the body + metadata of one Frida script in the user's library.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string", "description": "Script name (with or without `.js`)." }
+                    }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type":"string"},
+                        "body": {"type":"string"},
+                        "description": {"type":"string"},
+                        "tags": {"type":"array"}
+                    }
+                }),
+                example: "glass script-read anti-root",
+            },
+            Skill {
+                name: "script-write",
+                description: "Create or overwrite a script. `description` and `tags` are optional; omitting them leaves the existing metadata alone. Pass `tags: []` to clear them explicitly.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["name","body"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "body": { "type": "string", "description": "Full Frida JS body." },
+                        "description": { "type": "string" },
+                        "tags": { "type": "array", "items": {"type":"string"} }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass script-write anti-root --body-file ./anti-root.js --description \"Bypasses Magisk detection\"",
+            },
+            Skill {
+                name: "script-delete",
+                description: "Delete a script — removes the `.js` file, its metadata, and every per-bundle enabled row that referenced it. Idempotent: missing scripts return successfully with `removed_*: false`.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": { "name": { "type": "string" } }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass script-delete anti-root",
+            },
+            Skill {
+                name: "script-enable",
+                description: "Mark a script as enabled for the given bundle. Idempotent — re-enabling is a no-op. The GUI's Frida session auto-loads enabled scripts when it attaches.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path","name"],
+                    "properties": {
+                        "path": path_arg(),
+                        "name": { "type": "string" }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass script-enable ./app.apk anti-root",
+            },
+            Skill {
+                name: "script-disable",
+                description: "Mark a script as disabled for the given bundle. Idempotent.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path","name"],
+                    "properties": {
+                        "path": path_arg(),
+                        "name": { "type": "string" }
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass script-disable ./app.apk anti-root",
+            },
+            Skill {
+                name: "enabled-scripts",
+                description: "List the script names currently enabled for the given bundle.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": { "path": path_arg() }
+                }),
+                output_shape: json!({
+                    "type": "object",
+                    "properties": {
+                        "bundle_id": {"type":"string"},
+                        "names": {"type":"array"}
+                    }
+                }),
+                example: "glass enabled-scripts ./app.apk",
+            },
+
             Skill {
                 name: "smali",
                 description: "Full smali source for one class.",

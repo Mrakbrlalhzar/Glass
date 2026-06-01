@@ -33,6 +33,7 @@ mod insn_pattern;
 mod insn_variants;
 mod patch_file;
 mod inspect;
+mod scripts;
 mod search;
 mod skills;
 mod strings;
@@ -197,6 +198,11 @@ pub use types::{
     ObjcCategoryDetail, ObjcClassDetail, ObjcIvarEntry, ObjcMethodEntry,
     ObjcPropertyEntry, SwiftFieldEntry, SwiftTypeDetail, SwiftVtableEntryDetail,
     TypeDetail, TypeEntry, TypeKind, TypesResult,
+};
+pub use scripts::{
+    delete_script, enabled_scripts, read_script, scripts, scripts_for_bundle,
+    set_script_enabled, write_script, EnabledScriptsResult, ScriptDeleteResult,
+    ScriptEnableResult, ScriptInfo, ScriptReadResult, ScriptWriteResult, ScriptsResult,
 };
 pub use search::{SearchHit, SearchResult};
 pub use skills::{catalog as skill_catalog, Skill, SkillCatalog};

@@ -22,8 +22,8 @@ mod store;
 
 pub use ids::{ArtifactId, BundleId};
 pub use schema::{
-    Annotation, AnnotationKey, ArtifactRecord, BookmarkRecord, BundleRecord, SymbolFilter,
-    TabState,
+    Annotation, AnnotationKey, ArtifactRecord, BookmarkRecord, BundleRecord, ScriptMeta,
+    SymbolFilter, TabState,
 };
 
 use std::path::PathBuf;
@@ -185,6 +185,75 @@ impl Database {
             .insert((artifact, key), None);
     }
 
+    // ---- Frida script metadata ---------------------------------------------
+    //
+    // Scripts are infrequent UI events (write, delete, toggle), so we
+    // commit synchronously rather than going through the debounced
+    // dirty set. Keeps the call sites simple — no "did my enable get
+    // flushed yet" race when the UI shells out to the actor.
+
+    /// All script metadata, keyed by name. Returns an empty map when
+    /// no scripts have been registered yet (or in fresh mode).
+    pub fn all_script_meta(&self) -> std::collections::HashMap<String, schema::ScriptMeta> {
+        if self.inner.fresh {
+            return std::collections::HashMap::new();
+        }
+        let store = self.inner.store.lock();
+        let Some(s) = store.as_ref() else {
+            return std::collections::HashMap::new();
+        };
+        s.read_all_script_meta().unwrap_or_default()
+    }
+
+    pub fn script_meta(&self, name: &str) -> Option<schema::ScriptMeta> {
+        if self.inner.fresh {
+            return None;
+        }
+        let store = self.inner.store.lock();
+        let s = store.as_ref()?;
+        s.read_script_meta(name).ok().flatten()
+    }
+
+    pub fn save_script_meta(
+        &self,
+        name: &str,
+        meta: &schema::ScriptMeta,
+    ) -> Result<()> {
+        let store = self.inner.store.lock();
+        let Some(s) = store.as_ref() else { return Ok(()) };
+        s.write_script_meta(name, meta)
+    }
+
+    /// Remove the script's metadata + every per-bundle enabled row
+    /// that mentions it. Caller is responsible for deleting the
+    /// on-disk file.
+    pub fn delete_script(&self, name: &str) -> Result<()> {
+        let store = self.inner.store.lock();
+        let Some(s) = store.as_ref() else { return Ok(()) };
+        s.delete_script(name)
+    }
+
+    /// Names enabled for the given bundle, sorted.
+    pub fn enabled_scripts(&self, bundle: &BundleId) -> Vec<String> {
+        if self.inner.fresh {
+            return Vec::new();
+        }
+        let store = self.inner.store.lock();
+        let Some(s) = store.as_ref() else { return Vec::new() };
+        s.read_enabled_scripts(bundle).unwrap_or_default()
+    }
+
+    pub fn set_script_enabled(
+        &self,
+        bundle: &BundleId,
+        name: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let store = self.inner.store.lock();
+        let Some(s) = store.as_ref() else { return Ok(()) };
+        s.set_script_enabled(bundle, name, enabled)
+    }
+
     /// Flush all pending writes. Cheap when nothing is dirty.
     /// Callers should call this no more than once every ~500ms.
     pub fn flush(&self) -> Result<()> {
@@ -228,6 +297,16 @@ impl Database {
 pub fn default_db_path() -> Result<PathBuf> {
     let base = dirs::data_dir().context("no platform data dir (HOME unset?)")?;
     Ok(base.join("Glass").join("glass.redb"))
+}
+
+/// Filesystem directory holding the user's Frida script library.
+/// One `.js` file per script. Created lazily — call this and then
+/// `std::fs::create_dir_all` on the result; we don't auto-create
+/// here because the read-only paths in glass-api don't want the
+/// side effect.
+pub fn scripts_dir() -> Result<PathBuf> {
+    let base = dirs::data_dir().context("no platform data dir (HOME unset?)")?;
+    Ok(base.join("Glass").join("scripts"))
 }
 
 // ---- window-size persistence -----------------------------------------------

@@ -24,6 +24,26 @@ use crate::ids::ArtifactId;
 /// upgrades them to `OpIndex` on first open.
 pub const SCHEMA_VERSION: u32 = 3;
 
+/// Metadata for one Frida script. The script body itself lives on
+/// disk under `<script_dir>/<name>.js`; this record holds only the
+/// human-edited bits (description, tags) plus timestamps. Keyed
+/// by script name (the filename without `.js`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScriptMeta {
+    /// Free-form one-liner. Shown in the picker / scripts panel.
+    #[serde(default)]
+    pub description: String,
+    /// Lightweight tags for filtering (`anti-root`, `tls`, `crypto`).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Unix seconds. 0 when unknown.
+    #[serde(default)]
+    pub created_unix: u64,
+    /// Unix seconds. 0 when unknown.
+    #[serde(default)]
+    pub modified_unix: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleRecord {
     pub schema_version: u32,

@@ -136,6 +136,55 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<String> {
                 .unwrap_or(false);
             json_of(&bundle.type_detail(&artifact, &name, raw)?)?
         }
+        "scripts" => {
+            // Optional `path` scopes to a bundle so each row carries
+            // `enabled_for_bundle`. Without it the listing is global.
+            match opt_str(args, "path") {
+                Some(p) => json_of(&glass_api::scripts_for_bundle(&p)?)?,
+                None => json_of(&glass_api::scripts()?)?,
+            }
+        }
+        "script-read" => {
+            let name = require_str(args, "name")?;
+            json_of(&glass_api::read_script(&name)?)?
+        }
+        "script-write" => {
+            let name = require_str(args, "name")?;
+            let body = require_str(args, "body")?;
+            let description = opt_str(args, "description");
+            let tags = args
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                });
+            json_of(&glass_api::write_script(
+                &name,
+                &body,
+                description.as_deref(),
+                tags,
+            )?)?
+        }
+        "script-delete" => {
+            let name = require_str(args, "name")?;
+            json_of(&glass_api::delete_script(&name)?)?
+        }
+        "script-enable" => {
+            let path = require_path(args)?;
+            let name = require_str(args, "name")?;
+            json_of(&glass_api::set_script_enabled(&path, &name, true)?)?
+        }
+        "script-disable" => {
+            let path = require_path(args)?;
+            let name = require_str(args, "name")?;
+            json_of(&glass_api::set_script_enabled(&path, &name, false)?)?
+        }
+        "enabled-scripts" => {
+            let path = require_path(args)?;
+            json_of(&glass_api::enabled_scripts(&path)?)?
+        }
         "smali" => {
             let bundle = open(args)?;
             let class = require_str(args, "class")?;
