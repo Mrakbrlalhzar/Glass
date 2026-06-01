@@ -152,6 +152,59 @@ impl DeviceManager {
         out
     }
 
+    /// Find PIDs on an Android device whose process name matches
+    /// `name`. Empty vec when nothing matches; `Err` only when
+    /// adb itself failed. Used by the MCP `device-pidof` verb so
+    /// an LLM can resolve a package name to the PID that
+    /// `frida-attach` needs.
+    pub fn android_pidof(
+        &self,
+        serial: &str,
+        name: &str,
+    ) -> Result<Vec<u32>, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.pidof(serial, name),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Launch the main activity of `package` on an Android
+    /// `serial`. Returns combined stdout+stderr from `monkey`.
+    pub fn android_launch(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> Result<String, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.start_main_activity(serial, package),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Force-stop every process belonging to `package`.
+    pub fn android_force_stop(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> Result<String, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.force_stop(serial, package),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Run an arbitrary `adb shell` command and return stdout.
+    pub fn android_shell(
+        &self,
+        serial: &str,
+        args: &[&str],
+    ) -> Result<String, DeviceError> {
+        match &self.adb {
+            Ok(b) => b.shell(serial, args),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
     pub fn backend_status(&self) -> BackendStatus {
         BackendStatus {
             adb: self

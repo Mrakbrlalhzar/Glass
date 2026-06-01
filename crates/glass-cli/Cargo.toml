@@ -22,6 +22,7 @@ armv8-encode.workspace = true
 glass-arch-dex.workspace = true
 glass-mobile.workspace = true
 glass-db.workspace = true
+glass-device.workspace = true
 glass-ui.workspace = true
 glass-mcp.workspace = true
 

@@ -1414,6 +1414,130 @@ pub fn patch_schema(format: Format) -> Result<()> {
     })
 }
 
+// ---- Device verbs --------------------------------------------------
+
+pub fn device_list(format: Format) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let devices: Vec<serde_json::Value> = mgr
+            .list()
+            .into_iter()
+            .map(|d| {
+                serde_json::json!({
+                    "platform": d.id.platform.label(),
+                    "serial": d.id.serial,
+                    "model": d.model,
+                    "os_version": d.os_version,
+                    "state": format!("{:?}", d.state),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "devices": devices }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let devs = data.get("devices").and_then(|v| v.as_array());
+        match devs {
+            Some(d) if !d.is_empty() => {
+                for dev in d {
+                    let s = |k: &str| -> String {
+                        dev.get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string()
+                    };
+                    writeln!(
+                        out,
+                        "{:<10} {:<20} {:<20} {:<12} {}",
+                        s("platform"),
+                        s("serial"),
+                        s("model"),
+                        s("os_version"),
+                        s("state"),
+                    )?;
+                }
+                Ok(())
+            }
+            _ => writeln!(out, "(no devices)"),
+        }
+    })
+}
+
+pub fn device_pidof(serial: String, name: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let pids = mgr
+            .android_pidof(&serial, &name)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({ "pids": pids }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let pids = data
+            .get("pids")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if pids.is_empty() {
+            writeln!(out, "(no matching pids)")
+        } else {
+            for p in pids {
+                writeln!(out, "{p}")?;
+            }
+            Ok(())
+        }
+    })
+}
+
+pub fn device_launch(serial: String, package: String, format: Format) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let out = mgr
+            .android_launch(&serial, &package)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({ "output": out }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let s = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        write!(out, "{s}")
+    })
+}
+
+pub fn device_force_stop(
+    serial: String,
+    package: String,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let out = mgr
+            .android_force_stop(&serial, &package)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({ "output": out }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let s = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        write!(out, "{s}")
+    })
+}
+
+pub fn device_shell(
+    serial: String,
+    args: Vec<String>,
+    format: Format,
+) -> Result<()> {
+    let envelope = output::measured(|| -> Result<serde_json::Value> {
+        let mgr = glass_device::DeviceManager::new();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = mgr
+            .android_shell(&serial, &refs)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::json!({ "stdout": out }))
+    })?;
+    output::emit(envelope, format, |data, out| {
+        let s = data.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        write!(out, "{s}")
+    })
+}
+
 /// Parse a hex byte string like `"20 00 80 52"` (whitespace
 /// optional) into a Vec<u8>. Used by the `patch --bytes` path.
 fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {

@@ -52,6 +52,23 @@ fn automation_dispatch(cmd: &Cmd, format: Format) -> Option<Result<()>> {
             "frida-* verbs are MCP-only — Frida sessions can't survive the CLI's \
              one-shot lifecycle. Run `glass mcp` and use them through an MCP client.",
         ))),
+        Cmd::DeviceList => Some(verbs::device_list(format)),
+        Cmd::DevicePidof { serial, name } => {
+            Some(verbs::device_pidof(serial.clone(), name.clone(), format))
+        }
+        Cmd::DeviceLaunch { serial, package } => Some(verbs::device_launch(
+            serial.clone(),
+            package.clone(),
+            format,
+        )),
+        Cmd::DeviceForceStop { serial, package } => Some(verbs::device_force_stop(
+            serial.clone(),
+            package.clone(),
+            format,
+        )),
+        Cmd::DeviceShell { serial, args } => {
+            Some(verbs::device_shell(serial.clone(), args.clone(), format))
+        }
         Cmd::Inspect { path } => Some(verbs::inspect(path.clone(), format)),
         Cmd::Artifacts { path } => Some(verbs::artifacts(path.clone(), format)),
         Cmd::Sections { path, artifact } => {
@@ -352,6 +369,37 @@ enum Cmd {
     FridaResume {
         #[arg(long)]
         pid: u32,
+    },
+
+    /// List reachable devices (Android via adb, iOS via libimobiledevice).
+    DeviceList,
+    /// Resolve a process / package name to live PIDs on an Android device.
+    DevicePidof {
+        #[arg(long)]
+        serial: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Launch an Android app by package name.
+    DeviceLaunch {
+        #[arg(long)]
+        serial: String,
+        #[arg(long)]
+        package: String,
+    },
+    /// Force-stop every process belonging to an Android package.
+    DeviceForceStop {
+        #[arg(long)]
+        serial: String,
+        #[arg(long)]
+        package: String,
+    },
+    /// Run an arbitrary `adb shell` command on a device.
+    DeviceShell {
+        #[arg(long)]
+        serial: String,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 
     // ----- Automation verbs (structured JSON output) -----------------
@@ -946,6 +994,11 @@ fn main() -> Result<()> {
         | Cmd::FridaPostMessage { .. }
         | Cmd::FridaPollEvents
         | Cmd::FridaResume { .. }
+        | Cmd::DeviceList
+        | Cmd::DevicePidof { .. }
+        | Cmd::DeviceLaunch { .. }
+        | Cmd::DeviceForceStop { .. }
+        | Cmd::DeviceShell { .. }
         | Cmd::Inspect { .. }
         | Cmd::Artifacts { .. }
         | Cmd::Sections { .. }

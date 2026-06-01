@@ -853,6 +853,74 @@ pub fn catalog() -> SkillCatalog {
                 example: "glass patch-schema",
             },
 
+            // ---- Devices ---------------------------------------------
+            Skill {
+                name: "device-list",
+                description: "Snapshot every reachable device — Android via adb, iOS via libimobiledevice. Returns `{devices: [{platform, serial, model?, os_version?, state}]}`. `state` is one of `Authorised`/`Unauthorised`/`Offline`.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass device-list",
+            },
+            Skill {
+                name: "device-pidof",
+                description: "Resolve a process / package name to live PIDs on an Android device. Returns `{pids: [...]}` — empty when nothing matches. Feed the first PID into `frida-attach`.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","name"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "name": {"type":"string","description":"process name or package name"}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass device-pidof --serial <s> --name com.example.app",
+            },
+            Skill {
+                name: "device-launch",
+                description: "Launch an Android app by package name via `monkey -p <pkg> -c LAUNCHER 1`. The launcher activity is resolved on-device. Returns combined stdout+stderr.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","package"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "package": {"type":"string"}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass device-launch --serial <s> --package com.example.app",
+            },
+            Skill {
+                name: "device-force-stop",
+                description: "Force-stop every process belonging to an Android package (`am force-stop`).",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","package"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "package": {"type":"string"}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "glass device-force-stop --serial <s> --package com.example.app",
+            },
+            Skill {
+                name: "device-shell",
+                description: "Run an arbitrary `adb shell` command. `args` is the argv passed after `adb -s <serial> shell …`. Returns stdout.",
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["serial","args"],
+                    "properties": {
+                        "serial": {"type":"string"},
+                        "args": {"type":"array","items":{"type":"string"}}
+                    }
+                }),
+                output_shape: json!({ "type": "object" }),
+                example: "device-shell {\"serial\":\"...\",\"args\":[\"getprop\",\"ro.build.version.release\"]}",
+            },
+
             // ---- Frida session lifecycle (MCP-only) ------------------
             // Frida sessions can only exist inside a stateful MCP server;
             // the CLI stubs print "MCP-only" and exit non-zero.

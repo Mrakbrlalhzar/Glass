@@ -235,6 +235,41 @@ impl AdbBackend {
         Ok(false)
     }
 
+    /// Resolve `name` to the PIDs currently running it. Wraps
+    /// `adb shell pidof <name>` and parses the whitespace-
+    /// separated pid list. Returns an empty vec when nothing
+    /// matches; `Err` only on adb-level failures (binary
+    /// missing, device offline). MCP `device-pidof` uses this
+    /// to feed a PID into `frida-attach`.
+    pub fn pidof(
+        &self,
+        serial: &str,
+        name: &str,
+    ) -> Result<Vec<u32>, crate::DeviceError> {
+        let output = std::process::Command::new(&self.binary)
+            .args(["-s", serial, "shell", "pidof", name])
+            .output()
+            .map_err(|e| {
+                crate::DeviceError::Backend(format!("spawning adb: {e}"))
+            })?;
+        if !output.status.success() {
+            // `pidof` exits non-zero with empty stdout when no
+            // process matches — treat as "no pids", not error.
+            if output.stdout.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Err(crate::DeviceError::Backend(format!(
+                "adb shell pidof exited {:?}",
+                output.status.code()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .split_whitespace()
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect())
+    }
+
     /// Launch the main activity of `package` on `serial`.
     /// Uses `monkey -p <pkg> -c LAUNCHER 1` so the caller
     /// doesn't have to know the activity name — `monkey`

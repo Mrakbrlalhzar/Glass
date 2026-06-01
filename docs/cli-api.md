@@ -77,6 +77,29 @@ non-zero:
 
 Run `glass mcp` and invoke them through an MCP client.
 
+## Devices
+
+### `device-list`
+Snapshot every reachable device — Android via `adb`, iOS via
+libimobiledevice. Returns `{devices: [{platform, serial, model?,
+os_version?, state}]}`. `state` is one of `Authorised`,
+`Unauthorised`, `Offline`.
+
+### `device-pidof --serial <s> --name <name>`
+Resolve a process / package name to live PIDs on an Android
+device. Feed the first PID into `frida-attach` (MCP).
+
+### `device-launch --serial <s> --package <pkg>`
+Launch an Android app via `monkey -p <pkg> -c LAUNCHER 1`.
+
+### `device-force-stop --serial <s> --package <pkg>`
+`am force-stop <pkg>` — kills every process belonging to the
+package.
+
+### `device-shell --serial <s> -- <argv...>`
+Run an arbitrary `adb shell` command. Arguments after `--` are
+passed straight through.
+
 ## Bundle inspection
 
 ### `inspect <path>` — top-level summary

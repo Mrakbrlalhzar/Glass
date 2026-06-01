@@ -644,6 +644,81 @@ pub(crate) fn call(
                 .collect();
             json!({ "events": rendered })
         }
+        // ---- Devices ------------------------------------------------
+        "device-list" => {
+            // Snapshot all reachable devices (Android via adb,
+            // iOS via libimobiledevice).
+            let mgr = glass_device::DeviceManager::new();
+            let devices: Vec<Value> = mgr
+                .list()
+                .into_iter()
+                .map(|d| {
+                    json!({
+                        "platform": d.id.platform.label(),
+                        "serial": d.id.serial,
+                        "model": d.model,
+                        "os_version": d.os_version,
+                        "state": format!("{:?}", d.state),
+                    })
+                })
+                .collect();
+            json!({ "devices": devices })
+        }
+        "device-pidof" => {
+            // Resolve a process name (or package name) to PIDs
+            // on an Android device. Use the first PID as
+            // `frida-attach`'s `pid` arg.
+            let serial = require_str(args, "serial")?;
+            let name = require_str(args, "name")?;
+            let mgr = glass_device::DeviceManager::new();
+            let pids = mgr
+                .android_pidof(&serial, &name)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "pids": pids })
+        }
+        "device-launch" => {
+            // Launch an Android app by package name (`monkey
+            // -p <pkg>`). Returns combined stdout+stderr.
+            let serial = require_str(args, "serial")?;
+            let package = require_str(args, "package")?;
+            let mgr = glass_device::DeviceManager::new();
+            let out = mgr
+                .android_launch(&serial, &package)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "output": out })
+        }
+        "device-force-stop" => {
+            // Force-stop every process belonging to an Android
+            // package (`am force-stop <pkg>`).
+            let serial = require_str(args, "serial")?;
+            let package = require_str(args, "package")?;
+            let mgr = glass_device::DeviceManager::new();
+            let out = mgr
+                .android_force_stop(&serial, &package)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "output": out })
+        }
+        "device-shell" => {
+            // Run an arbitrary `adb shell` command. `args` is
+            // the array passed after `adb -s <serial> shell …`.
+            let serial = require_str(args, "serial")?;
+            let cmd_args: Vec<String> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| DispatchError::Other(
+                    "missing required string-array arg \"args\"".into(),
+                ))?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            let refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
+            let mgr = glass_device::DeviceManager::new();
+            let out = mgr
+                .android_shell(&serial, &refs)
+                .map_err(|e| DispatchError::Other(e.to_string()))?;
+            json!({ "stdout": out })
+        }
+
         "frida-resume" => {
             // Unblock a gadget loaded with `on_load: wait`. Cheap
             // no-op once already resumed.
