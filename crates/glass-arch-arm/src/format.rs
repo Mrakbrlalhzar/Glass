@@ -36,6 +36,11 @@ pub enum ChunkKind {
     /// e.g. `doIt(II)V` in `Lcom/Foo;->doIt(II)V`. The full ref is
     /// stored on the chunk's `target_text` for navigation lookup.
     MethodName,
+    /// A field name + signature within a smali field reference.
+    /// e.g. `count:I` in `Lcom/Foo;->count:I`. The full ref is
+    /// stored on the chunk's `target_text` for the "References
+    /// to field" navigation lookup.
+    FieldName,
 }
 
 #[derive(Clone, Debug)]

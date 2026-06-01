@@ -69,9 +69,9 @@ pub fn chunk_colour(kind: ChunkKind) -> u32 {
         K::Comment => COLOUR_COMMENT(),
         K::Type => COLOUR_TYPE(),
         K::String => COLOUR_STRING(),
-        // MethodName: colourwise this is a plain identifier. The
-        // renderer wraps it in a clickable affordance separately
-        // when the method ref resolves.
-        K::MethodName => COLOUR_PLAIN(),
+        // MethodName / FieldName: colourwise these are plain
+        // identifiers. The renderer wraps them in a clickable
+        // affordance separately when the ref resolves.
+        K::MethodName | K::FieldName => COLOUR_PLAIN(),
     }
 }

@@ -1696,13 +1696,15 @@ fn render_line_body(
                     a: 1.0,
                 };
                 // Link-eligible tokens:
-                //   * MethodName with a target_text (the
-                //     tokeniser fills this for any `Class;->name(sig)ret`).
+                //   * MethodName / FieldName with a target_text
+                //     (the tokeniser fills these for any
+                //     `Class;->name(sig)ret` or `Class;->name:Sig`).
                 //   * Type tokens that contain a class JNI
                 //     (`L...;`) — primitives like `I` are not
                 //     links.
                 let is_link = match c.kind {
-                    glass_arch_arm::ChunkKind::MethodName => {
+                    glass_arch_arm::ChunkKind::MethodName
+                    | glass_arch_arm::ChunkKind::FieldName => {
                         c.target_text.is_some()
                     }
                     glass_arch_arm::ChunkKind::Type => {

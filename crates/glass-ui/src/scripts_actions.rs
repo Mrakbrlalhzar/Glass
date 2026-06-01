@@ -41,6 +41,10 @@ pub(crate) enum SmaliLinkTarget {
     /// `Lcom/Foo;` reference — navigates by opening the smali
     /// class leaf.
     Class { class_jni: String },
+    /// `Class;->name:Sig` reference — opens the "References to
+    /// field" scoped palette (no single navigation target,
+    /// since field reads + writes can be anywhere).
+    Field { field_ref: String },
 }
 
 /// Walk the tokens of `line_text` and return the link target
@@ -61,6 +65,13 @@ pub(crate) fn smali_link_target_at_col(
                     if let Some(t) = tok.target_text {
                         return Some(SmaliLinkTarget::Method {
                             target_text: t,
+                        });
+                    }
+                }
+                glass_arch_arm::ChunkKind::FieldName => {
+                    if let Some(t) = tok.target_text {
+                        return Some(SmaliLinkTarget::Field {
+                            field_ref: t,
                         });
                     }
                 }
@@ -459,6 +470,21 @@ impl Shell {
                 self.open_leaf(leaf, cx);
                 true
             }
+            SmaliLinkTarget::Field { field_ref } => {
+                // Fields have no single declaration to jump to —
+                // open the scoped "References to field" palette
+                // instead. Same behaviour as the existing
+                // `RefsToField` context-menu item.
+                let label = gpui::SharedString::from(
+                    field_ref
+                        .rsplit("->")
+                        .next()
+                        .unwrap_or(&field_ref)
+                        .to_string(),
+                );
+                self.open_refs_to_field(field_ref, label, cx);
+                true
+            }
         }
     }
 
@@ -705,6 +731,21 @@ impl Shell {
                                 label,
                             });
                         }
+                    }
+                    SmaliLinkTarget::Field { field_ref } => {
+                        // Fields resolve to a scoped xref palette
+                        // rather than a target tab — reuse the
+                        // existing `RefsToField` menu item shape so
+                        // the same dispatcher handles it.
+                        let display = field_ref
+                            .rsplit("->")
+                            .next()
+                            .unwrap_or(&field_ref)
+                            .to_string();
+                        items.push(ContextMenuItem::RefsToField {
+                            field_ref,
+                            label: gpui::SharedString::from(display),
+                        });
                     }
                 }
             }

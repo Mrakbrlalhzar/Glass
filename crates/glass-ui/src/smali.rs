@@ -138,6 +138,48 @@ pub fn tokenize_smali_line(line: &str) -> Vec<Chunk> {
                     i = k;
                     continue;
                 }
+                // Field reference: `Class;->name:Sig`. Shape after
+                // the `->` is `name` (already consumed above) then
+                // a colon, then the type signature (a primitive
+                // letter, an `L...;` class ref, or one or more `[`
+                // prefixes wrapping either).
+                if name_end > name_start && k < bytes.len() && bytes[k] == b':' {
+                    let mut k2 = k + 1;
+                    // Type signature: one or more `[`, then either
+                    // `L<class>;` or a primitive letter.
+                    while k2 < bytes.len() && bytes[k2] == b'[' {
+                        k2 += 1;
+                    }
+                    if k2 < bytes.len() {
+                        if bytes[k2] == b'L' {
+                            k2 += 1;
+                            while k2 < bytes.len() && bytes[k2] != b';' {
+                                k2 += 1;
+                            }
+                            if k2 < bytes.len() {
+                                k2 += 1;
+                            }
+                        } else if b"VZBSCIJFD".contains(&bytes[k2]) {
+                            k2 += 1;
+                        } else {
+                            // Couldn't make sense of the sig — bail
+                            // and fall through to plain rendering.
+                            let _ = arrow_start;
+                            continue;
+                        }
+                    }
+                    push(&mut out, "->".to_string(), ChunkKind::Punct);
+                    let field_body = line[name_start..k2].to_string();
+                    let full_ref = format!("{type_text}->{field_body}");
+                    out.push(Chunk {
+                        text: field_body,
+                        kind: ChunkKind::FieldName,
+                        target: None,
+                        target_text: Some(full_ref),
+                    });
+                    i = k2;
+                    continue;
+                }
                 let _ = arrow_start;
             }
             continue;
@@ -315,5 +357,52 @@ fn classify_smali_word(word: &str, prev_text: Option<&str>) -> ChunkKind {
             let _ = prev_text;
             K::Plain
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glass_arch_arm::ChunkKind;
+
+    #[test]
+    fn tokenises_method_reference() {
+        let toks = tokenize_smali_line("    invoke-virtual {p0, v1}, Lcom/Foo;->bar(I)V");
+        // The last MethodName chunk should carry the full ref.
+        let m = toks
+            .iter()
+            .find(|c| c.kind == ChunkKind::MethodName)
+            .expect("method chunk");
+        assert_eq!(m.text, "bar(I)V");
+        assert_eq!(
+            m.target_text.as_deref(),
+            Some("Lcom/Foo;->bar(I)V"),
+        );
+    }
+
+    #[test]
+    fn tokenises_field_reference() {
+        let toks = tokenize_smali_line("    iget v0, p0, Lcom/Foo;->count:I");
+        let f = toks
+            .iter()
+            .find(|c| c.kind == ChunkKind::FieldName)
+            .expect("field chunk");
+        assert_eq!(f.text, "count:I");
+        assert_eq!(
+            f.target_text.as_deref(),
+            Some("Lcom/Foo;->count:I"),
+        );
+    }
+
+    #[test]
+    fn tokenises_field_with_class_signature() {
+        let toks = tokenize_smali_line(
+            "    sput-object v1, Lcom/Foo;->LISTENER:Lcom/Bar/Listener;",
+        );
+        let f = toks
+            .iter()
+            .find(|c| c.kind == ChunkKind::FieldName)
+            .expect("field chunk");
+        assert_eq!(f.text, "LISTENER:Lcom/Bar/Listener;");
     }
 }
