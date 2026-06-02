@@ -1336,14 +1336,18 @@ pub fn render_coverage_tab(
                 .whitespace_nowrap()
                 .child(SharedString::from(header_text)),
         )
-        .child(
+        // Status span — only rendered when there's something
+        // to say (i.e. not while Idle). `.children` with an
+        // Option iterator drops the element entirely when None
+        // so it doesn't take any width in the flex row.
+        .children((!record_state_text.is_empty()).then(|| {
             div()
                 .text_color(dim)
                 .text_xs()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(SharedString::from(record_state_text)),
-        )
+                .child(SharedString::from(record_state_text))
+        }))
         .children(
             // Duration presets — three quick-pick buttons.
             // Each click sets `coverage_duration_ms` so the
