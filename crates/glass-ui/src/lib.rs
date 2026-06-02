@@ -1444,13 +1444,13 @@ pub(crate) struct Shell {
     /// canvas's viewport bounds (refreshed each frame by the
     /// measure-canvas hook).
     pub(crate) coverage_camera: crate::coverage_view::CoverageCamera,
-    /// Cached world-space mosaic layout. `(artifact, layout)` —
-    /// re-layout only when the active artifact changes (today
-    /// always the largest native artifact; v1 makes this user-
-    /// switchable). `Arc` so the per-frame render path doesn't
-    /// clone the tile vec.
+    /// Cached world-space mosaic layout for the global view.
+    /// The string key identifies the bundle (bundle_id when
+    /// present, display_label as a fallback) so reopening a
+    /// different bundle invalidates the cache. `Arc` so the
+    /// per-frame render path doesn't clone the tile vec.
     pub(crate) coverage_layout: Option<(
-        glass_db::ArtifactId,
+        String,
         Arc<crate::coverage_view::MosaicLayout>,
     )>,
     /// Index of the section the user is hovering on the bar — drives the

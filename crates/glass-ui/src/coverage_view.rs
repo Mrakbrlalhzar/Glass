@@ -206,32 +206,231 @@ struct ScreenTile {
 #[derive(Clone, Debug)]
 pub struct MosaicLayout {
     pub tiles: Vec<WorldTile>,
+    pub islands: Vec<Island>,
     pub world_w: f32,
     pub world_h: f32,
+}
+
+/// One island in the global view — one per native artifact.
+/// Contains the artifact's label and its bounding rect in
+/// world space (used to draw the header strip and the
+/// outer border).
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // `artifact` will drive click-to-zoom-into-island
+pub struct Island {
+    pub artifact: glass_db::ArtifactId,
+    pub label: SharedString,
+    pub kind: IslandKind,
+    pub wx: f32,
+    pub wy: f32,
+    pub ww: f32,
+    pub wh: f32,
+    /// Header strip height in world units (scales with the
+    /// camera). The header carries the island label and a
+    /// kind-tinted background so similar ABIs read as one
+    /// neighbourhood at a glance.
+    pub header_h: f32,
+}
+
+/// What kind of code an island contains. Drives the header
+/// tint so the user can tell ABI groups apart visually.
+/// DEX is reserved for when we add Java-side coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Dex reserved for once we have Java-side coverage
+pub enum IslandKind {
+    NativeArm64,
+    NativeArm,
+    NativeX86_64,
+    NativeX86,
+    NativeOther,
+    Dex,
+}
+
+impl IslandKind {
+    /// From an artifact path label like `lib/arm64-v8a/libfoo.so`.
+    pub fn from_label(label: &str) -> Self {
+        if label.contains("arm64-v8a") || label.contains("aarch64") {
+            Self::NativeArm64
+        } else if label.contains("armeabi") || label.contains("/arm/") {
+            Self::NativeArm
+        } else if label.contains("x86_64") || label.contains("/x86_64/") {
+            Self::NativeX86_64
+        } else if label.contains("x86") || label.contains("i686") {
+            Self::NativeX86
+        } else {
+            Self::NativeOther
+        }
+    }
+
+    /// Header background tint. Picked to be muted enough that
+    /// the hot/cold tile colours still read on top.
+    pub fn header_colour(self) -> u32 {
+        match self {
+            Self::NativeArm64 => 0x2a3a4f, // muted teal-blue
+            Self::NativeArm => 0x2f3a47,  // slightly cooler
+            Self::NativeX86_64 => 0x3f3a2a, // muted amber
+            Self::NativeX86 => 0x47402f,  // amber, dimmer
+            Self::NativeOther => 0x383838, // neutral grey
+            Self::Dex => 0x3a2f47,         // muted purple (reserved)
+        }
+    }
+
+    /// Short label for the header chip — "arm64", "arm", etc.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::NativeArm64 => "arm64",
+            Self::NativeArm => "arm",
+            Self::NativeX86_64 => "x86_64",
+            Self::NativeX86 => "x86",
+            Self::NativeOther => "native",
+            Self::Dex => "dex",
+        }
+    }
 }
 
 impl MosaicLayout {
     pub fn empty() -> Self {
         Self {
             tiles: Vec::new(),
+            islands: Vec::new(),
             world_w: 0.,
             world_h: 0.,
         }
     }
 }
 
-/// Build the world-space mosaic for one native artifact. The
-/// target world width is fixed at `world_w`; the height comes
-/// out of the strip layout so the area encodes total bytes.
-pub fn build_mosaic(
+/// Build the global mosaic — one island per native artifact,
+/// laid out by a squarified outer treemap (sized by total
+/// `.text` bytes). Inside each island, an address-ordered
+/// strip-treemap of the artifact's functions.
+///
+/// Empty bundle (no native code) → empty layout.
+pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
+    // Gather candidate artifacts: anything with native
+    // function symbols. The label is the artifact's APK path
+    // (`lib/arm64-v8a/libfoo.so`) so the user can tell ABIs
+    // apart.
+    let mut candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> =
+        Vec::new();
+    for (aid, sm) in bundle.symbol_maps.iter() {
+        let total_bytes: u64 = sm
+            .iter()
+            .filter(|s| matches!(s.kind, glass_arch_arm::SymbolKind::Function))
+            .filter(|s| s.size > 0)
+            .map(|s| s.size)
+            .sum();
+        if total_bytes == 0 {
+            continue;
+        }
+        let label = bundle
+            .native_artifact_labels
+            .get(aid)
+            .cloned()
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(aid.to_string()));
+        candidates.push((aid.clone(), total_bytes, label));
+    }
+    if candidates.is_empty() {
+        return MosaicLayout::empty();
+    }
+
+    // Outer treemap. World rect target: fixed 1200-wide
+    // landscape, height comes out of the layout. Per-island
+    // area is proportional to that island's bytes.
+    let outer_world_w = 1200.0_f64;
+    let outer_aspect = 4.0_f64 / 3.0;
+    let outer_target_h = outer_world_w / outer_aspect;
+    let outer_area = outer_world_w * outer_target_h;
+    let total_bytes: u64 = candidates.iter().map(|(_, b, _)| *b).sum();
+    if total_bytes == 0 {
+        return MosaicLayout::empty();
+    }
+
+    // For the outer level we *do* size-sort: islands have no
+    // intrinsic ordering, so picking the best aspect ratios
+    // wins. Sort desc by bytes.
+    let mut outer_inputs: Vec<(usize, f64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, (_, b, _))| {
+            let area = (*b as f64) / (total_bytes as f64) * outer_area;
+            (i, area)
+        })
+        .collect();
+    outer_inputs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let outer_rects = squarified_outer(
+        outer_inputs.iter().map(|(_, a)| *a).collect(),
+        outer_world_w,
+    );
+    // Outer height = max y+h across rects.
+    let mut max_h = 0.0_f64;
+    for r in &outer_rects {
+        let bottom = r.y + r.h;
+        if bottom > max_h {
+            max_h = bottom;
+        }
+    }
+    let outer_world_h = max_h;
+
+    // Now build each island's inner mosaic. The island's
+    // inner rect is the outer rect minus a header strip and
+    // a small margin.
+    let header_h_world = 24.0_f64; // ~24 world units = 24 px @ zoom 1
+    let margin_world = 4.0_f64;
+
+    let mut all_tiles: Vec<WorldTile> = Vec::new();
+    let mut islands: Vec<Island> = Vec::new();
+    for (i, (orig_idx, _area)) in outer_inputs.iter().enumerate() {
+        let r = &outer_rects[i];
+        let (aid, _bytes, label) = &candidates[*orig_idx];
+        let inner_x = r.x + margin_world;
+        let inner_y = r.y + header_h_world + margin_world;
+        let inner_w = (r.w - 2.0 * margin_world).max(8.0);
+        let inner_h = (r.h - header_h_world - 2.0 * margin_world).max(8.0);
+
+        let inner_tiles = build_artifact_tiles(bundle, aid, inner_w, inner_h);
+        // Translate each tile from inner-local coords to
+        // world coords.
+        for mut t in inner_tiles {
+            t.wx += inner_x as f32;
+            t.wy += inner_y as f32;
+            all_tiles.push(t);
+        }
+        let kind = IslandKind::from_label(label.as_ref());
+        islands.push(Island {
+            artifact: aid.clone(),
+            label: label.clone(),
+            kind,
+            wx: r.x as f32,
+            wy: r.y as f32,
+            ww: r.w as f32,
+            wh: r.h as f32,
+            header_h: header_h_world as f32,
+        });
+    }
+
+    MosaicLayout {
+        tiles: all_tiles,
+        islands,
+        world_w: outer_world_w as f32,
+        world_h: outer_world_h as f32,
+    }
+}
+
+/// Build just the tiles for one artifact's inner mosaic,
+/// filling a `target_w × target_h` rect with the tile origin
+/// at (0,0). Caller translates into the island's world
+/// position.
+fn build_artifact_tiles(
     bundle: &LoadedBundle,
     artifact: &glass_db::ArtifactId,
-    world_w: f32,
-) -> MosaicLayout {
+    target_w: f64,
+    target_h: f64,
+) -> Vec<WorldTile> {
     let Some(symbol_map) = bundle.symbol_maps.get(artifact) else {
-        return MosaicLayout::empty();
+        return Vec::new();
     };
-
     let mut inputs: Vec<LayoutInput> = symbol_map
         .iter()
         .filter(|s| matches!(s.kind, glass_arch_arm::SymbolKind::Function))
@@ -248,40 +447,89 @@ pub fn build_mosaic(
             }
         })
         .collect();
-    if inputs.is_empty() || world_w <= 0. {
-        return MosaicLayout::empty();
+    if inputs.is_empty() || target_w <= 0. || target_h <= 0. {
+        return Vec::new();
     }
     inputs.sort_by_key(|i| i.addr);
 
-    // Pick a target world aspect ratio so the mosaic doesn't
-    // look like a long thin strip. We bias slightly wider than
-    // tall (most viewports are landscape). The actual height
-    // falls out from the strip layout once we set the per-byte
-    // area scale to satisfy world_w × world_h ≈ total_bytes.
     let total_bytes: u64 = inputs.iter().map(|i| i.size).sum();
     if total_bytes == 0 {
-        return MosaicLayout::empty();
+        return Vec::new();
     }
-    let target_aspect = 4.0_f64 / 3.0;
-    let target_h = (world_w as f64) / target_aspect;
-    let target_area = (world_w as f64) * target_h;
+    let target_area = target_w * target_h;
     let area_per_byte = target_area / (total_bytes as f64);
-    // Minimum tile area in world units: 4 (=2×2 world units).
-    // At default zoom that's 2×2 px — clickable enough once
-    // the user zooms in, invisible-ish when zoomed out.
     let min_area = 4.0_f64;
-
     let areas: Vec<f64> = inputs
         .iter()
         .map(|i| ((i.size as f64) * area_per_byte).max(min_area))
         .collect();
 
-    let (tiles, world_h) = strip_layout(&inputs, &areas, world_w as f64);
-    MosaicLayout {
-        tiles,
-        world_w,
-        world_h: world_h as f32,
+    let (tiles, _h) = strip_layout(&inputs, &areas, target_w);
+    tiles
+}
+
+/// One rectangle returned by the outer-island treemap.
+#[derive(Clone, Debug)]
+struct OuterRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+/// Squarified treemap of the outer islands. Inputs are areas
+/// (sorted desc by caller); output is a packed set of rects
+/// fitting a width-`canvas_w` strip whose total height comes
+/// out of the layout. Classic squarified algo: greedily build
+/// row strips that minimise the worst aspect ratio.
+fn squarified_outer(areas: Vec<f64>, canvas_w: f64) -> Vec<OuterRect> {
+    let mut out: Vec<OuterRect> = Vec::with_capacity(areas.len());
+    let mut cursor_y = 0.0_f64;
+    let mut i = 0;
+    while i < areas.len() {
+        // Find the best strip: keep adding tiles while worst
+        // aspect ratio improves.
+        let mut best_k = 1;
+        let mut best_score = f64::INFINITY;
+        let mut running = 0.0;
+        for k in 0..areas.len() - i {
+            running += areas[i + k];
+            let h = running / canvas_w;
+            if h <= 0. {
+                continue;
+            }
+            let smallest = areas[i..=i + k]
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let smallest_w = smallest / h;
+            let aspect = (h / smallest_w).max(smallest_w / h);
+            if aspect < best_score {
+                best_score = aspect;
+                best_k = k + 1;
+            } else {
+                // Aspect got worse — stop extending.
+                break;
+            }
+        }
+        let row_areas = &areas[i..i + best_k];
+        let row_sum: f64 = row_areas.iter().sum();
+        let h = (row_sum / canvas_w).max(8.0);
+        let mut cursor_x = 0.0_f64;
+        for a in row_areas {
+            let w = a / h;
+            out.push(OuterRect {
+                x: cursor_x,
+                y: cursor_y,
+                w,
+                h,
+            });
+            cursor_x += w;
+        }
+        cursor_y += h;
+        i += best_k;
     }
+    out
 }
 
 /// Input row for the layout algorithm.
@@ -422,6 +670,44 @@ fn lerp_rgb(a: u32, b: u32, t: f32) -> u32 {
     (chan(16) << 16) | (chan(8) << 8) | chan(0)
 }
 
+/// Project a world rectangle to screen-pixel coords. Returns
+/// `None` if the rect is fully outside the viewport. Used for
+/// islands; tiles project through `project_tile` which carries
+/// extra per-tile fields.
+fn project_rect(
+    wx: f32,
+    wy: f32,
+    ww: f32,
+    wh: f32,
+    camera: &CoverageCamera,
+) -> Option<ScreenRect> {
+    let bounds = camera.viewport_bounds;
+    let vw = bounds.size.width.as_f32();
+    let vh = bounds.size.height.as_f32();
+    if vw <= 0. || vh <= 0. {
+        return None;
+    }
+    let centre_x = vw / 2.;
+    let centre_y = vh / 2.;
+    let unit = camera.unit();
+    let sx = centre_x + (wx - camera.pan_x) * unit;
+    let sy = centre_y + (wy - camera.pan_y) * unit;
+    let sw = ww * unit;
+    let sh = wh * unit;
+    if sx + sw < 0. || sx > vw || sy + sh < 0. || sy > vh {
+        return None;
+    }
+    Some(ScreenRect { x: sx, y: sy, w: sw, h: sh })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScreenRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
 /// Transform a world tile to screen coords using the camera.
 /// Returns `None` if the tile is fully outside the viewport.
 fn project_tile(world: &WorldTile, camera: &CoverageCamera) -> Option<ScreenTile> {
@@ -454,7 +740,8 @@ fn project_tile(world: &WorldTile, camera: &CoverageCamera) -> Option<ScreenTile
     })
 }
 
-/// Render the CoverageMap tab body.
+/// Render the CoverageMap tab body — global view with one
+/// island per native artifact.
 pub fn render_coverage_tab(
     shell: &mut Shell,
     bundle: LoadedBundle,
@@ -463,18 +750,12 @@ pub fn render_coverage_tab(
     dim: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
-    let artifact = pick_default_artifact(&bundle);
-    let artifact_label = artifact
-        .as_ref()
-        .and_then(|a| bundle.native_artifact_labels.get(a))
-        .cloned()
-        .unwrap_or_else(|| "(no native artifact)".to_string());
+    let any_native = !bundle.native_artifact_labels.is_empty();
 
-    let header_text = match &artifact {
-        Some(_) => format!(
-            "Coverage Map — {artifact_label}  (drag to pan, ⌘/Ctrl-scroll to zoom)"
-        ),
-        None => "Coverage Map — no native artifacts in this bundle".to_string(),
+    let header_text = if any_native {
+        "Coverage Map — drag to pan, ⌘/Ctrl-scroll to zoom"
+    } else {
+        "Coverage Map — no native code in this bundle"
     };
 
     let header = div()
@@ -483,20 +764,22 @@ pub fn render_coverage_tab(
         .border_b_1()
         .border_color(border)
         .text_color(fg)
-        .child(SharedString::from(header_text));
+        .child(SharedString::from(header_text.to_string()));
 
-    let body: gpui::AnyElement = match artifact {
-        Some(aid) => render_canvas(shell, bundle, aid, border, dim, cx),
-        None => div()
+    let body: gpui::AnyElement = if any_native {
+        render_canvas(shell, bundle, border, dim, fg, cx)
+    } else {
+        div()
             .flex_1()
             .flex()
             .items_center()
             .justify_center()
             .text_color(dim)
             .child(
-                "This bundle has no native code. Coverage requires native instrumentation.",
+                "No native code. Coverage requires native instrumentation; \
+                 DEX/Java-side coverage is on the roadmap.",
             )
-            .into_any_element(),
+            .into_any_element()
     };
 
     div()
@@ -509,50 +792,33 @@ pub fn render_coverage_tab(
         .into_any_element()
 }
 
-fn pick_default_artifact(bundle: &LoadedBundle) -> Option<glass_db::ArtifactId> {
-    let mut best: Option<(glass_db::ArtifactId, u64)> = None;
-    for (aid, sections) in bundle.native_sections.iter() {
-        let text_bytes: u64 = sections
-            .iter()
-            .filter(|s| matches!(s.kind, crate::NativeSectionKind::Text))
-            .map(|s| s.size)
-            .sum();
-        if text_bytes == 0 {
-            continue;
-        }
-        match &best {
-            None => best = Some((aid.clone(), text_bytes)),
-            Some((_, prev)) if text_bytes > *prev => {
-                best = Some((aid.clone(), text_bytes));
-            }
-            _ => {}
-        }
-    }
-    best.map(|(a, _)| a)
-}
-
-/// Build (or fetch the cached) world layout for the artifact,
-/// project it through the camera, and render the resulting
-/// screen tiles plus the pan/zoom event handlers.
+/// Build (or fetch the cached) global layout, project each
+/// tile + island header through the camera, and render the
+/// resulting screen elements plus the pan/zoom event handlers.
 fn render_canvas(
     shell: &mut Shell,
     bundle: LoadedBundle,
-    artifact: glass_db::ArtifactId,
     border: gpui::Rgba,
     dim: gpui::Rgba,
+    fg: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
-    // Layout once and stash on Shell. Re-layout if the cached
-    // artifact differs (user might switch artifacts later via
-    // a dropdown).
+    // Layout once per bundle, stash on Shell. Key the cache
+    // by `bundle_id` (or `display_label` as a fallback) so a
+    // reopen invalidates it.
+    let cache_key = bundle
+        .bundle_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| bundle.display_label.clone());
     let needs_relayout = shell
         .coverage_layout
         .as_ref()
-        .map(|(aid, _)| aid != &artifact)
+        .map(|(k, _)| k != &cache_key)
         .unwrap_or(true);
     if needs_relayout {
-        let layout = build_mosaic(&bundle, &artifact, 1200.0);
-        shell.coverage_layout = Some((artifact.clone(), Arc::new(layout)));
+        let layout = build_mosaic_global(&bundle);
+        shell.coverage_layout = Some((cache_key, Arc::new(layout)));
     }
     let layout = shell
         .coverage_layout
@@ -616,6 +882,72 @@ fn render_canvas(
     .top_0()
     .left_0()
     .size_full();
+
+    // Island layer: bounding rect + header strip per island.
+    // Drawn under the tile layer so tiles sit on top of the
+    // header tint.
+    let mut island_layer = div().absolute().top_0().left_0().size_full();
+    for isl in &layout.islands {
+        let Some(rect) = project_rect(
+            isl.wx,
+            isl.wy,
+            isl.ww,
+            isl.wh,
+            &camera,
+        ) else {
+            continue;
+        };
+        if rect.w < 4. || rect.h < 4. {
+            continue;
+        }
+        // Outer border for the island.
+        let outer = div()
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.w))
+            .h(px(rect.h))
+            .border_1()
+            .border_color(border)
+            .bg(rgb(isl.kind.header_colour()));
+        island_layer = island_layer.child(outer);
+
+        // Header strip. Skip when zoomed out so far that
+        // the header would dominate the island.
+        let unit = camera.unit();
+        let header_screen_h = isl.header_h * unit;
+        if header_screen_h >= 10. && rect.w >= 40. {
+            let hdr_h = header_screen_h.min(rect.h * 0.4);
+            let label_visible = rect.w >= 80. && hdr_h >= 12.;
+            let label_text = SharedString::from(format!(
+                "{}  ·  {}",
+                isl.kind.short_label(),
+                isl.label,
+            ));
+            let mut hdr = div()
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.w))
+                .h(px(hdr_h))
+                .bg(rgb(isl.kind.header_colour()))
+                .border_b_1()
+                .border_color(border);
+            if label_visible {
+                hdr = hdr.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(0xeeeeee))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(label_text),
+                );
+            }
+            island_layer = island_layer.child(hdr);
+        }
+    }
 
     // Tile layer.
     let mut tile_layer = div().absolute().top_0().left_0().size_full();
@@ -700,6 +1032,7 @@ fn render_canvas(
         .relative()
         .overflow_hidden()
         .child(measure)
+        .child(island_layer)
         .child(tile_layer)
         .on_scroll_wheel(move |ev: &gpui::ScrollWheelEvent, _w, cx: &mut App| {
             let Some(entity) = wheel_weak.upgrade() else { return };
