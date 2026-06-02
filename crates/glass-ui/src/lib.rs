@@ -31,6 +31,7 @@ mod cfg_block;
 mod cfg_render;
 mod coverage_actions;
 mod coverage_view;
+mod plist_edits;
 mod colour_picker;
 mod context_menu;
 mod context_menus;
