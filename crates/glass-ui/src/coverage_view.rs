@@ -339,8 +339,12 @@ impl IslandKind {
 /// Island background tones. Muted enough that tile colours
 /// read on top, distinct enough to tell native vs DEX apart
 /// at a glance. DEX gets a slight purple tilt.
-const ISLAND_BG_NATIVE: u32 = 0x2a2e35;
-const ISLAND_BG_DEX: u32 = 0x322a39;
+// Native = warm rusty-brown, DEX = cool forest-green. Both
+// muted enough to keep the eventual coverage hot/cold ramp
+// readable on top, but far enough apart on the colour wheel
+// that the native-vs-DEX distinction is immediate.
+const ISLAND_BG_NATIVE: u32 = 0x3a2a26;
+const ISLAND_BG_DEX: u32 = 0x263a2a;
 
 fn island_bg(kind: IslandKind) -> u32 {
     match kind {
