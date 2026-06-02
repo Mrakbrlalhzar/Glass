@@ -171,7 +171,7 @@ pub fn render_two_pane(
             }
             Some(TabKind::CoverageMap) => {
                 crate::coverage_view::render_coverage_tab(
-                    shell, bundle.clone(), border, fg, dim, cx,
+                    shell, bundle.clone(), panel, border, fg, dim, cx,
                 )
                 .into_any_element()
             }

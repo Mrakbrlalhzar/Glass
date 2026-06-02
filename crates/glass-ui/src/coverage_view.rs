@@ -1116,6 +1116,7 @@ fn project_tile(world: &WorldTile, camera: &CoverageCamera) -> Option<ScreenTile
 pub fn render_coverage_tab(
     shell: &mut Shell,
     bundle: LoadedBundle,
+    panel: gpui::Rgba,
     border: gpui::Rgba,
     fg: gpui::Rgba,
     dim: gpui::Rgba,
@@ -1162,7 +1163,7 @@ pub fn render_coverage_tab(
         .child(SharedString::from(header_text));
 
     let body: gpui::AnyElement = if any_code {
-        render_canvas(shell, bundle, border, dim, fg, cx)
+        render_canvas(shell, bundle, panel, border, dim, fg, cx)
     } else {
         div()
             .flex_1()
@@ -1190,6 +1191,7 @@ pub fn render_coverage_tab(
 fn render_canvas(
     shell: &mut Shell,
     bundle: LoadedBundle,
+    panel: gpui::Rgba,
     border: gpui::Rgba,
     dim: gpui::Rgba,
     fg: gpui::Rgba,
@@ -1292,7 +1294,9 @@ fn render_canvas(
         if rect.w < 4. || rect.h < 4. {
             continue;
         }
-        // Outer border for the island.
+        // Outer border for the island. Background = panel
+        // colour so the gaps between tiles show through as
+        // water; the tiles themselves carry the kind tint.
         let outer = div()
             .absolute()
             .left(px(rect.x))
@@ -1301,7 +1305,7 @@ fn render_canvas(
             .h(px(rect.h))
             .border_1()
             .border_color(border)
-            .bg(rgb(island_bg(isl.kind)));
+            .bg(panel);
         island_layer = island_layer.child(outer);
 
         // Header strip. Skip when zoomed out so far that
@@ -1354,7 +1358,11 @@ fn render_canvas(
         if s.w < 0.5 || s.h < 0.5 {
             continue;
         }
-        let bg = tile_colour(None, 1);
+        // Tiles carry the island's kind tint so each island
+        // reads as a region of its colour. Native tiles =
+        // warm brown; DEX class tiles = forest green
+        // (handled in the DEX branch below).
+        let bg = ISLAND_BG_NATIVE;
         let label = if s.w >= 60. && s.h >= 14. {
             Some(s.display_name.clone())
         } else {
@@ -1450,7 +1458,7 @@ fn render_canvas(
                     if cs.w < 0.5 || cs.h < 0.5 {
                         continue;
                     }
-                    let bg = tile_colour(None, 1);
+                    let bg = ISLAND_BG_DEX;
                     let label = if cs.w >= 50. && cs.h >= 14. {
                         Some(class.display_name.clone())
                     } else {
@@ -1517,6 +1525,9 @@ fn render_canvas(
                     } else {
                         pkg.name.clone()
                     };
+                    // Chip = panel-colour pill so it reads as
+                    // a label badge over the green tiles
+                    // underneath.
                     let chip = div()
                         .absolute()
                         .left(px(pkg_screen.x + 2.))
@@ -1524,13 +1535,13 @@ fn render_canvas(
                         .px_1()
                         .text_xs()
                         .text_color(rgb(0xcccccc))
-                        .bg(rgb(0x2a2a35))
+                        .bg(panel)
                         .child(pkg_label);
                     tile_layer = tile_layer.child(chip);
                 }
             } else {
                 // Zoomed-out branch: one tile per package.
-                let bg = tile_colour(None, 1);
+                let bg = ISLAND_BG_DEX;
                 let label = if pkg_screen.w >= 60. && pkg_screen.h >= 14. {
                     let pkg_label = if pkg.name.is_empty() {
                         SharedString::from("(default)")
