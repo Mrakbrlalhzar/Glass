@@ -1259,27 +1259,16 @@ pub fn render_coverage_tab(
     // header text. First paint on a fresh bundle has no
     // cached layout yet → use a generic header.
     let header_text = if !any_code {
-        "Coverage Map — bundle has no native or DEX code".to_string()
+        "Coverage Map — no native or DEX code".to_string()
     } else {
-        let abi_summary = shell.coverage_layout.as_ref().and_then(|(_, l)| {
-            l.chosen_abi.map(|k| {
-                if l.hidden_artifact_count > 0 {
-                    format!(
-                        "ABI: {} (hiding {} other-ABI artifact{})",
-                        k.short_label(),
-                        l.hidden_artifact_count,
-                        if l.hidden_artifact_count == 1 { "" } else { "s" },
-                    )
-                } else {
-                    format!("ABI: {}", k.short_label())
-                }
-            })
-        });
+        let abi_summary = shell
+            .coverage_layout
+            .as_ref()
+            .and_then(|(_, l)| l.chosen_abi)
+            .map(|k| format!("ABI {}", k.short_label()));
         match abi_summary {
-            Some(s) => format!(
-                "Coverage Map — {s} — drag to pan, ⌘/Ctrl-scroll to zoom"
-            ),
-            None => "Coverage Map — drag to pan, ⌘/Ctrl-scroll to zoom".to_string(),
+            Some(s) => format!("Coverage Map — {s}"),
+            None => "Coverage Map".to_string(),
         }
     };
 
@@ -1342,12 +1331,17 @@ pub fn render_coverage_tab(
         .child(
             div()
                 .flex_1()
+                .text_xs()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .child(SharedString::from(header_text)),
         )
         .child(
             div()
                 .text_color(dim)
                 .text_xs()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .child(SharedString::from(record_state_text)),
         )
         .children(
