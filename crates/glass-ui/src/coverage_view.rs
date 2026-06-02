@@ -243,15 +243,17 @@ pub struct Island {
     pub ww: f32,
     pub wh: f32,
     /// Header strip height in world units (scales with the
-    /// camera). The header carries the island label and a
-    /// kind-tinted background so similar ABIs read as one
-    /// neighbourhood at a glance.
+    /// camera). The header carries just the island label —
+    /// since we filter to a single ABI per bundle, every
+    /// island in view is the same kind and tinting them
+    /// would only add noise. Once DEX islands land the
+    /// header background will distinguish native from DEX.
     pub header_h: f32,
 }
 
-/// What kind of code an island contains. Drives the header
-/// tint so the user can tell ABI groups apart visually.
-/// DEX is reserved for when we add Java-side coverage.
+/// What kind of code an island contains. Used today for the
+/// ABI-filter priority order; once DEX islands land, also
+/// for the header tint that distinguishes native vs DEX.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)] // Dex reserved for once we have Java-side coverage
 pub enum IslandKind {
@@ -279,19 +281,6 @@ impl IslandKind {
         }
     }
 
-    /// Header background tint. Picked to be muted enough that
-    /// the hot/cold tile colours still read on top.
-    pub fn header_colour(self) -> u32 {
-        match self {
-            Self::NativeArm64 => 0x2a3a4f, // muted teal-blue
-            Self::NativeArm => 0x2f3a47,  // slightly cooler
-            Self::NativeX86_64 => 0x3f3a2a, // muted amber
-            Self::NativeX86 => 0x47402f,  // amber, dimmer
-            Self::NativeOther => 0x383838, // neutral grey
-            Self::Dex => 0x3a2f47,         // muted purple (reserved)
-        }
-    }
-
     /// Short label for the header chip — "arm64", "arm", etc.
     pub fn short_label(self) -> &'static str {
         match self {
@@ -304,6 +293,11 @@ impl IslandKind {
         }
     }
 }
+
+/// Single shared header / island-background tone. Muted so
+/// tile colours (and, once coverage lands, the hot/cold ramp)
+/// read on top without clashing.
+const ISLAND_BG: u32 = 0x2a2e35;
 
 impl MosaicLayout {
     pub fn empty() -> Self {
@@ -991,7 +985,7 @@ fn render_canvas(
             .h(px(rect.h))
             .border_1()
             .border_color(border)
-            .bg(rgb(isl.kind.header_colour()));
+            .bg(rgb(ISLAND_BG));
         island_layer = island_layer.child(outer);
 
         // Header strip. Skip when zoomed out so far that
@@ -1012,7 +1006,7 @@ fn render_canvas(
                 .top(px(rect.y))
                 .w(px(rect.w))
                 .h(px(hdr_h))
-                .bg(rgb(isl.kind.header_colour()))
+                .bg(rgb(ISLAND_BG))
                 .border_b_1()
                 .border_color(border);
             if label_visible {
