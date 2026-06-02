@@ -29,6 +29,7 @@ mod annotations_pane;
 mod app;
 mod cfg_block;
 mod cfg_render;
+mod coverage_view;
 mod colour_picker;
 mod context_menu;
 mod context_menus;
@@ -139,6 +140,7 @@ actions!(
         CloseWindow,
         Quit,
         About,
+        OpenCoverageMap,
         // Up to 10 recent-bundle slots. Each is a zero-sized action
         // wired to a separate handler that opens index N from the
         // recent list. Avoids needing serde-deriving payload actions
@@ -246,6 +248,12 @@ pub struct LoadedBundle {
     /// Per-native-artifact section info, keyed by ArtifactId.
     /// Empty for DEX-only artifacts.
     pub native_sections: Arc<std::collections::HashMap<glass_db::ArtifactId, Vec<SectionInfo>>>,
+    /// Per-native-artifact label as it appears in the APK
+    /// (`lib/arm64-v8a/libfoo.so`). Used by the coverage view
+    /// to title each treemap section and to map Frida's
+    /// basename-only module names back to an ArtifactId.
+    /// Empty for DEX-only artifacts.
+    pub native_artifact_labels: Arc<std::collections::HashMap<glass_db::ArtifactId, String>>,
     /// Per-native-artifact merged symbol map (symtab + DWARF + .eh_frame).
     pub symbol_maps: Arc<std::collections::HashMap<glass_db::ArtifactId, glass_arch_arm::SymbolMap>>,
     /// Text sections we can disassemble on demand. One entry per
@@ -1232,6 +1240,10 @@ pub(crate) enum TabKind {
         artifact: glass_db::ArtifactId,
         class_jni: String,
     },
+    /// Address-ordered treemap of an artifact's functions.
+    /// Singleton (one tab at a time across the whole shell);
+    /// auto-picks the largest native artifact for v0.
+    CoverageMap,
 }
 
 impl TabKind {
@@ -1285,6 +1297,8 @@ impl TabKind {
             },
             // ScriptEditor is ephemeral — doesn't round-trip.
             TabKind::ScriptEditor { .. } => return None,
+            // CoverageMap is a tool view; doesn't persist.
+            TabKind::CoverageMap => return None,
             // SmaliEditor persists as a `SmaliClass` TabState so
             // the schema (which predates the editor) stays
             // compatible. Restored on reopen, the
@@ -1425,6 +1439,12 @@ pub(crate) struct Shell {
     /// the canvas hook. Used to translate mouse positions into a section
     /// index for the hover cursor.
     pub(crate) section_bar_bounds: Bounds<Pixels>,
+    /// Pixel bounds of the coverage-map mosaic canvas in
+    /// window coordinates, captured by a `canvas` prepaint
+    /// hook each frame. Used by the mosaic renderer to size
+    /// itself to the available area. Zero on the first frame
+    /// after the tab opens; the second frame fills in.
+    pub(crate) coverage_canvas_bounds: Bounds<Pixels>,
     /// Index of the section the user is hovering on the bar — drives the
     /// vertical cursor line and the row highlight in the table.
     pub(crate) hovered_section: Option<usize>,
@@ -2481,6 +2501,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &ToggleChangesDialog, _w, cx| {
                 this.toggle_changes_dialog(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenCoverageMap, _w, cx| {
+                this.open_coverage_map(cx);
             }))
             .on_action(cx.listener(|this, _: &ClassDeclCommit, _w, cx| {
                 this.commit_class_decl_edit(cx);

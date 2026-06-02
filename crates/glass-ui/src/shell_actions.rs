@@ -61,6 +61,7 @@ impl Shell {
             overflow_open: false,
             db,
             section_bar_bounds: Bounds::default(),
+            coverage_canvas_bounds: Bounds::default(),
             hovered_section: None,
             bar_cursor_addr: None,
             bar_cursor_x: None,
@@ -214,6 +215,20 @@ impl Shell {
             + (cur.size.width - bounds.size.width).abs();
         if diff > px(0.5) {
             self.section_bar_bounds = bounds;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_coverage_canvas_bounds(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let cur = self.coverage_canvas_bounds;
+        let diff = (cur.size.width - bounds.size.width).abs()
+            + (cur.size.height - bounds.size.height).abs();
+        if diff > px(0.5) {
+            self.coverage_canvas_bounds = bounds;
             cx.notify();
         }
     }
@@ -857,6 +872,7 @@ impl Shell {
                     .unwrap_or(dotted.as_str());
                 SharedString::from(format!("{short}{star}"))
             }
+            TabKind::CoverageMap => SharedString::from("Coverage Map"),
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1268,6 +1284,9 @@ impl Shell {
             // ListState (one row per line). It's seeded at open
             // time, so there's nothing to do here.
             TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {}
+            // Coverage map renders directly from `LoadedBundle`
+            // each frame — no line/scroll setup needed.
+            TabKind::CoverageMap => {}
         }
     }
 

@@ -87,6 +87,10 @@ fn snapshot_apk_with_progress(
         glass_db::ArtifactId,
         Vec<SectionInfo>,
     > = std::collections::HashMap::new();
+    let mut native_artifact_labels: std::collections::HashMap<
+        glass_db::ArtifactId,
+        String,
+    > = std::collections::HashMap::new();
     let mut symbol_maps: std::collections::HashMap<
         glass_db::ArtifactId,
         glass_arch_arm::SymbolMap,
@@ -112,6 +116,7 @@ fn snapshot_apk_with_progress(
         .collect();
     for (lib, aid) in apk.native_libs.iter().zip(lib_artifact_ids.iter()) {
         let aid = aid.clone();
+        native_artifact_labels.insert(aid.clone(), lib.name.clone());
         native_sections.insert(aid.clone(), build_section_info(&lib.binary.container));
         symbol_maps.insert(
             aid.clone(),
@@ -387,6 +392,7 @@ fn snapshot_apk_with_progress(
         artifact_ids: Arc::new(artifact_ids),
         display_label,
         native_sections: Arc::new(native_sections),
+        native_artifact_labels: Arc::new(native_artifact_labels),
         symbol_maps: Arc::new(symbol_maps),
         text_sections: Arc::new(text_sections),
         data_sections: Arc::new(data_sections),
@@ -421,6 +427,10 @@ fn snapshot_ipa_with_progress(
     let mut native_sections: std::collections::HashMap<
         glass_db::ArtifactId,
         Vec<SectionInfo>,
+    > = std::collections::HashMap::new();
+    let mut native_artifact_labels: std::collections::HashMap<
+        glass_db::ArtifactId,
+        String,
     > = std::collections::HashMap::new();
     let mut symbol_maps: std::collections::HashMap<
         glass_db::ArtifactId,
@@ -472,6 +482,7 @@ fn snapshot_ipa_with_progress(
                                  origin: String|
      -> (glass_db::ArtifactId, Node) {
         let aid = glass_db::ArtifactId::from_bytes(bytes);
+        native_artifact_labels.insert(aid.clone(), display_name.clone());
         native_sections.insert(aid.clone(), build_section_info(container));
         symbol_maps.insert(aid.clone(), glass_arch_arm::SymbolMap::build(container));
 
@@ -768,6 +779,7 @@ fn snapshot_ipa_with_progress(
         artifact_ids: Arc::new(artifact_ids),
         display_label,
         native_sections: Arc::new(native_sections),
+        native_artifact_labels: Arc::new(native_artifact_labels),
         symbol_maps: Arc::new(symbol_maps),
         text_sections: Arc::new(text_sections),
         data_sections: Arc::new(data_sections),
@@ -969,6 +981,11 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         .unwrap_or("binary")
         .to_string();
     let aid = glass_db::ArtifactId::from_bytes(&bin.bytes);
+    let mut native_artifact_labels: std::collections::HashMap<
+        glass_db::ArtifactId,
+        String,
+    > = std::collections::HashMap::new();
+    native_artifact_labels.insert(aid.clone(), display_label.clone());
     let mut native_sections = std::collections::HashMap::new();
     native_sections.insert(aid.clone(), build_section_info(&bin.container));
     let mut symbol_maps = std::collections::HashMap::new();
@@ -1165,6 +1182,7 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         artifact_ids: Arc::new(vec![aid]),
         display_label,
         native_sections: Arc::new(native_sections),
+        native_artifact_labels: Arc::new(native_artifact_labels),
         symbol_maps: Arc::new(symbol_maps),
         text_sections: Arc::new(text_sections),
         data_sections: Arc::new(data_sections),

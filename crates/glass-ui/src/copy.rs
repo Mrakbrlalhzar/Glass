@@ -90,6 +90,9 @@ impl Shell {
             TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {
                 tab.code_editor.as_ref().and_then(|e| e.selected_text())
             }
+            // Coverage map has no row-level selection model
+            // yet. Cmd-C in the tab is a no-op.
+            TabKind::CoverageMap => None,
         }
     }
 }

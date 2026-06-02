@@ -658,6 +658,26 @@ impl Shell {
         }
     }
 
+    /// Open the Coverage Map tab (or focus the existing one).
+    /// CoverageMap is a singleton — only one across the shell
+    /// at a time.
+    pub(crate) fn open_coverage_map(&mut self, cx: &mut Context<Self>) {
+        self.overflow_open = false;
+        let idx = match self
+            .tabs
+            .iter()
+            .position(|t| matches!(t.kind, TabKind::CoverageMap))
+        {
+            Some(i) => i,
+            None => {
+                self.tabs.push(Tab::new(TabKind::CoverageMap));
+                self.tabs.len() - 1
+            }
+        };
+        self.active_tab = Some(idx);
+        cx.notify();
+    }
+
     pub(crate) fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;

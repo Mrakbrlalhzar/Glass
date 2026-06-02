@@ -169,6 +169,12 @@ pub fn render_two_pane(
             Some(TabKind::SwiftType { .. }) => {
                 crate::swift_view::render_swift_tab(shell, bundle.clone(), cx, border, dim, accent)
             }
+            Some(TabKind::CoverageMap) => {
+                crate::coverage_view::render_coverage_tab(
+                    shell, bundle.clone(), border, fg, dim, cx,
+                )
+                .into_any_element()
+            }
             Some(TabKind::SectionMap { artifact }) => shell
                 .render_section_map(&bundle, &artifact, panel, border, fg, dim, cx)
                 .into_any_element(),
