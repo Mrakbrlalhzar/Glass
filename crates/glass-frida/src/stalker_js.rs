@@ -61,6 +61,47 @@ fn render_u32_array(values: &[u32]) -> String {
 const COVERAGE_BODY: &str = r#"
   const want = (name) => WANT.length === 0 || WANT.indexOf(name) !== -1;
 
+  // Exclude system libraries from Stalker instrumentation.
+  // Instrumenting libc/libart/etc. forces every syscall and
+  // every Java↔native transition through the transform
+  // callback, which on a render-loop NDK app (60 Hz vsync)
+  // is enough overhead to ANR or crash the target.
+  //
+  // We still *collect* hits in these modules — they just
+  // aren't rewritten, so any block executing inside them
+  // runs at native speed. Coverage shows the entry/exit
+  // points but not the internal flow, which is exactly
+  // what you want when reverse-engineering: the app's own
+  // code, not libc's.
+  const STALKER_EXCLUDE_PATTERNS = [
+    /^libc\.so$/,
+    /^libm\.so$/,
+    /^libdl\.so$/,
+    /^libdl_android\.so$/,
+    /^libc\+\+\.so$/,
+    /^libc\+\+_shared\.so$/,
+    /^libart\.so$/,
+    /^libartbase\.so$/,
+    /^libartpalette\.so$/,
+    /^libandroid_runtime\.so$/,
+    /^libbinder\.so$/,
+    /^libbase\.so$/,
+    /^liblog\.so$/,
+    /^libutils\.so$/,
+    /^libcutils\.so$/,
+    /^linker(64)?$/,
+    /^ld-android\.so$/,
+    /^frida-agent-/,
+    /^libfrida-/,
+  ];
+  Process.enumerateModules().forEach(function (m) {
+    if (STALKER_EXCLUDE_PATTERNS.some(function (re) { return re.test(m.name); })) {
+      try {
+        Stalker.exclude({ base: m.base, size: m.size });
+      } catch (e) { /* best-effort */ }
+    }
+  });
+
   // One range entry per kept module; checked in a tight loop
   // on every block so we keep it flat instead of building a
   // map. With 50–100 modules this is plenty fast.
