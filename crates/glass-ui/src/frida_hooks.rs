@@ -537,6 +537,7 @@ impl Shell {
         if bundle.edits.is_empty()
             && bundle.smali_edits.is_empty()
             && bundle.pending_additions.is_empty()
+            && bundle.plist_edits.is_empty()
         {
             return;
         }
@@ -567,6 +568,18 @@ impl Shell {
         // bundle's map up front so the post-prompt continuation
         // doesn't need a borrow on Shell.
         let additions: glass_api::ApkAdditions = bundle.pending_additions.clone();
+        // Plist edits: archive_path → serialised bytes
+        // (already in original on-disk format). Resolved via
+        // `plist_sources` so we know where to splice.
+        let mut plist_edit_map: glass_api::PlistEditMap =
+            std::collections::BTreeMap::new();
+        for e in bundle.plist_edits.entries() {
+            if let Some((archive_path, _orig)) =
+                bundle.plist_sources.get(&e.artifact)
+            {
+                plist_edit_map.insert(archive_path.clone(), e.bytes.clone());
+            }
+        }
         // Re-load the source bundle from disk so the exporter
         // sees fresh bytes (the in-memory ParsedArtifact is the
         // source of truth for which file to patch, but the
@@ -624,17 +637,19 @@ impl Shell {
             let edit_map_for_task = edit_map.clone();
             let smali_map_for_task = smali_edit_map.clone();
             let additions_for_task = additions.clone();
+            let plist_map_for_task = plist_edit_map.clone();
             let source_path_for_task = source_path.clone();
             let out_path_for_task = out_path.clone();
             let summary = cx
                 .background_executor()
                 .spawn(async move {
                     match glass_api::open(&source_path_for_task) {
-                        Ok(bundle) => match glass_api::export_to_path_with_smali(
+                        Ok(bundle) => match glass_api::export_to_path_full(
                             &bundle,
                             &edit_map_for_task,
                             &smali_map_for_task,
                             &additions_for_task,
+                            &plist_map_for_task,
                             &out_path_for_task,
                         ) {
                             Ok(()) => Ok(out_path_for_task),

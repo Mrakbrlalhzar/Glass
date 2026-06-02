@@ -144,7 +144,10 @@ fn locate_in_section(container: &Container, vaddr: u64) -> Result<(usize, usize)
 pub fn export_to_path(bundle: &Bundle, edits: &EditMap, out_path: &Path) -> Result<()> {
     let empty_smali = SmaliEditMap::new();
     let empty_adds: ApkAdditions = std::collections::BTreeMap::new();
-    export_to_path_with_smali(bundle, edits, &empty_smali, &empty_adds, out_path)
+    let empty_plist: PlistEditMap = std::collections::BTreeMap::new();
+    export_to_path_full(
+        bundle, edits, &empty_smali, &empty_adds, &empty_plist, out_path,
+    )
 }
 
 /// Brand-new entries to splice into an APK at export time.
@@ -154,11 +157,16 @@ pub fn export_to_path(bundle: &Bundle, edits: &EditMap, out_path: &Path) -> Resu
 /// `smali_edits`. Only meaningful for APK bundles.
 pub type ApkAdditions = std::collections::BTreeMap<String, Vec<u8>>;
 
-/// Same as [`export_to_path`] but also accepts a [`SmaliEditMap`]
-/// of typed class rewrites and an [`ApkAdditions`] map of new
-/// zip entries (used by the Frida gadget-injection flow).
-/// Only meaningful for APK bundles — passing a non-empty smali
-/// map or additions for a Native / IPA bundle is caller error.
+/// Whole-plist replacements keyed by zip-entry archive path
+/// (e.g. `Payload/MyApp.app/Info.plist`). Each value is the
+/// serialised bytes the editor produced — already in the
+/// original on-disk format (binary or XML), ready to splice
+/// in. Only meaningful for IPA bundles.
+pub type PlistEditMap = std::collections::BTreeMap<String, Vec<u8>>;
+
+/// APK-only convenience: edits + smali edits + additions, no
+/// plist edits. Kept for back-compat with existing call sites;
+/// new IPA-aware callers should use `export_to_path_full`.
 pub fn export_to_path_with_smali(
     bundle: &Bundle,
     edits: &EditMap,
@@ -166,24 +174,52 @@ pub fn export_to_path_with_smali(
     additions: &ApkAdditions,
     out_path: &Path,
 ) -> Result<()> {
-    if edits.is_empty() && smali_edits.is_empty() && additions.is_empty() {
+    let empty_plist: PlistEditMap = std::collections::BTreeMap::new();
+    export_to_path_full(bundle, edits, smali_edits, additions, &empty_plist, out_path)
+}
+
+/// Full export entry point — handles every bundle kind and
+/// every edit map. Carry the right set per kind:
+///   * Native: `edits` only.
+///   * APK: `edits` + `smali_edits` + `additions`.
+///   * IPA: `edits` + `plist_edits`.
+/// Passing the wrong set for a bundle is caller error.
+pub fn export_to_path_full(
+    bundle: &Bundle,
+    edits: &EditMap,
+    smali_edits: &SmaliEditMap,
+    additions: &ApkAdditions,
+    plist_edits: &PlistEditMap,
+    out_path: &Path,
+) -> Result<()> {
+    if edits.is_empty()
+        && smali_edits.is_empty()
+        && additions.is_empty()
+        && plist_edits.is_empty()
+    {
         bail!("no edits to export");
     }
     match bundle.kind {
         BundleKind::Native => {
-            if !smali_edits.is_empty() || !additions.is_empty() {
-                bail!("native bundle can't carry smali edits or APK additions");
+            if !smali_edits.is_empty()
+                || !additions.is_empty()
+                || !plist_edits.is_empty()
+            {
+                bail!("native bundle can't carry smali / APK / plist edits");
             }
             export_native_to_path(bundle, edits, out_path)
         }
         BundleKind::Apk => {
+            if !plist_edits.is_empty() {
+                bail!("APK bundle can't carry plist edits");
+            }
             export_apk_to_path(bundle, edits, smali_edits, additions, out_path)
         }
         BundleKind::Ipa => {
             if !smali_edits.is_empty() || !additions.is_empty() {
                 bail!("IPA bundle can't carry smali edits or APK additions");
             }
-            export_ipa_to_path(bundle, edits, out_path)
+            export_ipa_to_path(bundle, edits, plist_edits, out_path)
         }
     }
 }
@@ -312,7 +348,12 @@ fn collect_dex_overrides(
     Ok(())
 }
 
-fn export_ipa_to_path(bundle: &Bundle, edits: &EditMap, out: &Path) -> Result<()> {
+fn export_ipa_to_path(
+    bundle: &Bundle,
+    edits: &EditMap,
+    plist_edits: &PlistEditMap,
+    out: &Path,
+) -> Result<()> {
     // Build a fresh zip by streaming every entry from the source
     // IPA. Patched entries are looked up by archive_path —
     // populated at load time from the original zip walk.
@@ -329,6 +370,14 @@ fn export_ipa_to_path(bundle: &Bundle, edits: &EditMap, out: &Path) -> Result<()
         let new_bytes = export_native_artifact(&artifact.binary.bytes, patches)
             .with_context(|| format!("re-serialising {archive_path}"))?;
         entry_overrides.insert(archive_path, new_bytes);
+    }
+    // Plist edits arrive already keyed by archive path and
+    // already in their original on-disk format — drop them
+    // straight into the override map. If a path collides with
+    // a native edit (shouldn't happen — plists aren't native
+    // artifacts) the plist edit wins as the last writer.
+    for (path, bytes) in plist_edits {
+        entry_overrides.insert(path.clone(), bytes.clone());
     }
     let src = std::fs::File::open(&bundle.source_path).with_context(|| {
         format!("opening source IPA {}", bundle.source_path.display())

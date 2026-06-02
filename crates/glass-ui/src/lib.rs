@@ -2083,7 +2083,7 @@ impl Render for Shell {
         // Changes dialog (same as ⌘E).
         let edit_count = self
             .bundle()
-            .map(|b| b.edits.len() + b.smali_edits.len())
+            .map(|b| b.edits.len() + b.smali_edits.len() + b.plist_edits.len())
             .unwrap_or(0);
         let header = if edit_count > 0 {
             header.child(
