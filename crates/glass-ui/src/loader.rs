@@ -116,7 +116,12 @@ fn snapshot_apk_with_progress(
         .collect();
     for (lib, aid) in apk.native_libs.iter().zip(lib_artifact_ids.iter()) {
         let aid = aid.clone();
-        native_artifact_labels.insert(aid.clone(), lib.name.clone());
+        // Include the ABI in the label — the coverage map
+        // classifies islands by parsing this string, and
+        // disambiguating "the same lib for arm64 vs arm vs
+        // x86_64" needs the ABI somewhere in the label.
+        native_artifact_labels
+            .insert(aid.clone(), format!("lib/{}/{}", lib.abi, lib.name));
         native_sections.insert(aid.clone(), build_section_info(&lib.binary.container));
         symbol_maps.insert(
             aid.clone(),

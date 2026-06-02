@@ -543,16 +543,32 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
     // ---- Inner layout per island --------------------------
     let header_h_world = 24.0_f64;
     let margin_world = 4.0_f64;
+    // Visible gap *between* islands. The squarified outer
+    // treemap packs rects edge-to-edge; inset each one by
+    // gap/2 on every side so neighbours don't share a border.
+    let island_gap_world = 12.0_f64;
+    let inset = island_gap_world / 2.0;
 
     let mut all_tiles: Vec<WorldTile> = Vec::new();
     let mut islands: Vec<Island> = Vec::new();
     let mut dex_content: Vec<Option<DexContent>> = Vec::new();
     for (i, (orig_idx, _area)) in outer_inputs.iter().enumerate() {
-        let r = &outer_rects[i];
-        let inner_x = r.x + margin_world;
-        let inner_y = r.y + header_h_world + margin_world;
-        let inner_w = (r.w - 2.0 * margin_world).max(8.0);
-        let inner_h = (r.h - header_h_world - 2.0 * margin_world).max(8.0);
+        let r_raw = &outer_rects[i];
+        // Inset the island's bounding rect for the gutter.
+        // If a rect is too small to inset without disappearing,
+        // skip it entirely — the treemap occasionally produces
+        // razor-thin slivers for tiny artifacts.
+        if r_raw.w <= island_gap_world || r_raw.h <= island_gap_world {
+            continue;
+        }
+        let isl_x = r_raw.x + inset;
+        let isl_y = r_raw.y + inset;
+        let isl_w = r_raw.w - island_gap_world;
+        let isl_h = r_raw.h - island_gap_world;
+        let inner_x = isl_x + margin_world;
+        let inner_y = isl_y + header_h_world + margin_world;
+        let inner_w = (isl_w - 2.0 * margin_world).max(8.0);
+        let inner_h = (isl_h - header_h_world - 2.0 * margin_world).max(8.0);
 
         match &all_outer[*orig_idx].0 {
             OuterCandidate::Native(aid, label, kind) => {
@@ -567,10 +583,10 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     artifact: aid.clone(),
                     label: label.clone(),
                     kind: *kind,
-                    wx: r.x as f32,
-                    wy: r.y as f32,
-                    ww: r.w as f32,
-                    wh: r.h as f32,
+                    wx: isl_x as f32,
+                    wy: isl_y as f32,
+                    ww: isl_w as f32,
+                    wh: isl_h as f32,
                     header_h: header_h_world as f32,
                 });
                 dex_content.push(None);
@@ -589,10 +605,10 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     artifact: aid.clone(),
                     label: label.clone(),
                     kind: IslandKind::Dex,
-                    wx: r.x as f32,
-                    wy: r.y as f32,
-                    ww: r.w as f32,
-                    wh: r.h as f32,
+                    wx: isl_x as f32,
+                    wy: isl_y as f32,
+                    ww: isl_w as f32,
+                    wh: isl_h as f32,
                     header_h: header_h_world as f32,
                 });
                 dex_content.push(Some(DexContent { packages }));
