@@ -107,12 +107,19 @@ pub fn detect_format(bytes: &[u8]) -> PlistFormat {
 /// and serialise as XML for the editor. Returns the XML text
 /// plus the detected source format so the editor can write
 /// back in the original encoding.
+///
+/// We pretty-print with 4-space indent (Apple's convention,
+/// matches what Xcode emits) rather than the `plist` crate's
+/// default single-tab. The editor doesn't compute tab-stop
+/// widths, so tab characters would render zero-width and
+/// collapse the structure; explicit spaces side-step that.
 pub fn load_as_xml(bytes: &[u8]) -> Result<(String, PlistFormat), String> {
     let format = detect_format(bytes);
     let value = plist::Value::from_reader(std::io::Cursor::new(bytes))
         .map_err(|e| format!("parsing plist: {e}"))?;
     let mut buf: Vec<u8> = Vec::with_capacity(bytes.len().max(256));
-    plist::to_writer_xml(&mut buf, &value)
+    let opts = plist::XmlWriteOptions::default().indent(b' ', 4);
+    plist::to_writer_xml_with_options(&mut buf, &value, &opts)
         .map_err(|e| format!("serialising plist to XML: {e}"))?;
     let text =
         String::from_utf8(buf).map_err(|e| format!("plist XML wasn't UTF-8: {e}"))?;
@@ -142,8 +149,15 @@ pub fn serialise_to_bytes(
     match format {
         PlistFormat::Binary => plist::to_writer_binary(&mut buf, &value)
             .map_err(|e| format!("serialising binary plist: {e}"))?,
-        PlistFormat::Xml => plist::to_writer_xml(&mut buf, &value)
-            .map_err(|e| format!("serialising XML plist: {e}"))?,
+        PlistFormat::Xml => {
+            // Match the indentation the editor displays
+            // (4 spaces) so re-loading after save shows the
+            // same shape the user just looked at.
+            let opts =
+                plist::XmlWriteOptions::default().indent(b' ', 4);
+            plist::to_writer_xml_with_options(&mut buf, &value, &opts)
+                .map_err(|e| format!("serialising XML plist: {e}"))?;
+        }
     }
     Ok(buf)
 }

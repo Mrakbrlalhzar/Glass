@@ -2009,11 +2009,32 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
     // True immediately after `<` until we emit the tag name
     // (so the next identifier renders as `Directive`).
     let mut want_tag_name = false;
+    // Renderer paints spans only; gaps between spans are
+    // dropped entirely. To keep spaces, indentation, and any
+    // other whitespace/punct in element content visible, we
+    // emit a `Plain` filler span between each pair of recognised
+    // tokens (and at the start/end of the line). `last_end`
+    // tracks the byte position immediately after the most-
+    // recent emitted span.
+    let mut last_end = 0usize;
 
-    let push = |spans: &mut Vec<XmlSpan>, s: usize, e: usize, k: ChunkKind| {
-        if e > s {
-            spans.push(XmlSpan { start: s, end: e, kind: k });
+    let mut push = |spans: &mut Vec<XmlSpan>,
+                    last_end: &mut usize,
+                    s: usize,
+                    e: usize,
+                    k: ChunkKind| {
+        if e <= s {
+            return;
         }
+        if *last_end < s {
+            spans.push(XmlSpan {
+                start: *last_end,
+                end: s,
+                kind: ChunkKind::Plain,
+            });
+        }
+        spans.push(XmlSpan { start: s, end: e, kind: k });
+        *last_end = e;
     };
 
     while i < n {
@@ -2027,7 +2048,7 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
                 j += 1;
             }
             let end = if j + 2 < n { j + 3 } else { n };
-            push(&mut spans, start, end, ChunkKind::Comment);
+            push(&mut spans, &mut last_end, start, end, ChunkKind::Comment);
             i = end;
             continue;
         }
@@ -2043,28 +2064,28 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
             {
                 tag_punct_end += 1;
             }
-            push(&mut spans, i, tag_punct_end, ChunkKind::Punct);
+            push(&mut spans, &mut last_end, i, tag_punct_end, ChunkKind::Punct);
             i = tag_punct_end;
             in_tag = true;
             want_tag_name = true;
             continue;
         }
         if in_tag && b == b'>' {
-            push(&mut spans, i, i + 1, ChunkKind::Punct);
+            push(&mut spans, &mut last_end, i, i + 1, ChunkKind::Punct);
             i += 1;
             in_tag = false;
             want_tag_name = false;
             continue;
         }
         if in_tag && (b == b'/' || b == b'?') && i + 1 < n && bytes[i + 1] == b'>' {
-            push(&mut spans, i, i + 2, ChunkKind::Punct);
+            push(&mut spans, &mut last_end, i, i + 2, ChunkKind::Punct);
             i += 2;
             in_tag = false;
             want_tag_name = false;
             continue;
         }
         if in_tag && b == b'=' {
-            push(&mut spans, i, i + 1, ChunkKind::Punct);
+            push(&mut spans, &mut last_end, i, i + 1, ChunkKind::Punct);
             i += 1;
             continue;
         }
@@ -2078,7 +2099,7 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
                 j += 1;
             }
             let end = if j < n { j + 1 } else { n };
-            push(&mut spans, start, end, ChunkKind::String);
+            push(&mut spans, &mut last_end, start, end, ChunkKind::String);
             i = end;
             continue;
         }
@@ -2111,7 +2132,7 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
             } else {
                 ChunkKind::Plain
             };
-            push(&mut spans, start, j, kind);
+            push(&mut spans, &mut last_end, start, j, kind);
             i = j;
             continue;
         }
@@ -2119,6 +2140,16 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
         // without emitting a span so the row-fg colour shows
         // through.
         i += 1;
+    }
+    // Trailing filler so any unrecognised tail (whitespace,
+    // raw text after the last tag) actually renders. Without
+    // this the row builder drops the final gap entirely.
+    if last_end < n {
+        spans.push(XmlSpan {
+            start: last_end,
+            end: n,
+            kind: ChunkKind::Plain,
+        });
     }
     spans
 }
@@ -2149,9 +2180,21 @@ mod xml_tokeniser_tests {
             .collect()
     }
 
+    /// Drop "plain" whitespace fillers so tests focus on
+    /// recognised tokens. Spaces between tags / attributes are
+    /// emitted as Plain-kind spans now (so the renderer paints
+    /// them visibly) but they don't carry useful structural
+    /// information for these tests.
+    fn meaningful(spans: Vec<(&'static str, &'static str)>) -> Vec<(&'static str, &'static str)> {
+        spans
+            .into_iter()
+            .filter(|(k, t)| !(*k == "plain" && t.chars().all(|c| c.is_whitespace())))
+            .collect()
+    }
+
     #[test]
     fn tokenises_simple_element() {
-        let spans = kinds(r#"<key>CFBundleVersion</key>"#);
+        let spans = meaningful(kinds(r#"<key>CFBundleVersion</key>"#));
         assert_eq!(spans[0], ("punct", "<"));
         assert_eq!(spans[1], ("directive", "key"));
         assert_eq!(spans[2], ("punct", ">"));
@@ -2163,8 +2206,7 @@ mod xml_tokeniser_tests {
 
     #[test]
     fn tokenises_attribute() {
-        let spans = kinds(r#"<plist version="1.0">"#);
-        // < plist version = "1.0" >
+        let spans = meaningful(kinds(r#"<plist version="1.0">"#));
         assert_eq!(spans[0].0, "punct");
         assert_eq!(spans[1], ("directive", "plist"));
         assert_eq!(spans[2], ("plain", "version"));
@@ -2175,7 +2217,7 @@ mod xml_tokeniser_tests {
 
     #[test]
     fn tokenises_self_closing() {
-        let spans = kinds(r#"<true/>"#);
+        let spans = meaningful(kinds(r#"<true/>"#));
         assert_eq!(spans[0], ("punct", "<"));
         assert_eq!(spans[1], ("directive", "true"));
         assert_eq!(spans[2], ("punct", "/>"));
@@ -2183,21 +2225,32 @@ mod xml_tokeniser_tests {
 
     #[test]
     fn tokenises_comment() {
-        let spans = kinds(r#"<!-- skip this -->"#);
+        let spans = meaningful(kinds(r#"<!-- skip this -->"#));
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0], ("comment", "<!-- skip this -->"));
     }
 
     #[test]
     fn tokenises_xml_decl() {
-        let spans = kinds(r#"<?xml version="1.0"?>"#);
-        // <? xml version = "1.0" ?>
+        let spans = meaningful(kinds(r#"<?xml version="1.0"?>"#));
         assert_eq!(spans[0], ("punct", "<?"));
         assert_eq!(spans[1], ("directive", "xml"));
         assert_eq!(spans[2], ("plain", "version"));
         assert_eq!(spans[3], ("punct", "="));
         assert_eq!(spans[4], ("string", r#""1.0""#));
         assert_eq!(spans[5], ("punct", "?>"));
+    }
+
+    #[test]
+    fn preserves_whitespace_between_tokens() {
+        // The buggy version dropped these spaces entirely.
+        let spans = kinds(r#"<plist version="1.0">"#);
+        // There must be at least one whitespace-only span
+        // between `plist` and `version`.
+        let has_ws = spans.iter().any(|(k, t)| {
+            *k == "plain" && !t.is_empty() && t.chars().all(|c| c.is_whitespace())
+        });
+        assert!(has_ws, "expected a whitespace span, got {spans:?}");
     }
 }
 
