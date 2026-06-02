@@ -1,11 +1,13 @@
-//! Address-ordered treemap of an artifact's functions.
+//! Address-ordered treemap of an artifact's functions, with
+//! pan + zoom.
 //!
-//! Each native artifact's text-section symbols are laid out as
-//! a mosaic — tile area proportional to symbol size, tile order
-//! follows `.text` address order so neighbours in the mosaic are
-//! neighbours in the binary. Click a tile → Listing tab at the
-//! function's address. When a coverage recording exists, tiles
-//! are coloured by log-scaled hit count.
+//! Each native artifact's text-section symbols are laid out
+//! once at tab-open as a mosaic in *world coordinates* — tile
+//! area proportional to symbol size, tile order follows `.text`
+//! address order so neighbours in the mosaic are neighbours in
+//! the binary. Each frame we transform every tile through the
+//! tab's camera (pan + zoom) to get its screen rect, cull
+//! off-screen tiles, and render the rest.
 //!
 //! Tile colour states:
 //!   * No recording          → neutral grey.
@@ -18,70 +20,223 @@
 //! aspect ratios per tile, which is fine — the win is that
 //! the mosaic carries the binary's link-time structure as a
 //! free hint at where subsystems sit.
+//!
+//! Interaction model:
+//!   * Scroll wheel  → pan (drag the world under the cursor).
+//!   * Mod+wheel     → zoom anchored at cursor.
+//!   * Middle drag   → pan.
+//!   * Left-drag on background → pan.
+//!   * Left-click on tile      → open Listing at that address.
+//!   * Shift-left-click on tile → open in new tab.
 
-use gpui::{div, prelude::*, px, rgb, Context, SharedString};
+use std::sync::Arc;
+
+use gpui::{
+    div, prelude::*, px, rgb, App, Bounds, Context, Pixels, Point, SharedString,
+};
 
 use crate::{LoadedBundle, Shell};
 
-/// One rectangle in the mosaic.
+/// World-space layout — laid out once at tab open. Camera
+/// transforms each tile to screen coords per frame.
+///
+/// World units are arbitrary; we lay tiles out in a 1000-wide
+/// rect with height chosen by the strip-treemap. Camera zoom
+/// converts world units to screen pixels.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // symbol_size will drive tooltip + colour in v0.5
-pub struct Tile {
+pub struct WorldTile {
     pub artifact: glass_db::ArtifactId,
     pub section: String,
     pub symbol_addr: u64,
     pub symbol_size: u64,
     pub display_name: SharedString,
-    /// Pixel bounds within the canvas, relative to the canvas origin.
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    /// Cached hit count for this function, populated by callers
-    /// from the current `Shell::coverage` recording. `None` when
-    /// no recording is active; `Some(0)` when recorded but cold.
-    pub hits: Option<u32>,
+    pub wx: f32,
+    pub wy: f32,
+    pub ww: f32,
+    pub wh: f32,
 }
 
-/// Input row for the layout algorithm.
-struct LayoutInput {
+/// Pan + zoom state for the coverage view.
+///
+/// World → screen transform, with the world origin pinned to
+/// the viewport centre at pan=(0,0). Pixels per world unit at
+/// zoom=1 is `BASE_PX_PER_WORLD`; the user's zoom multiplies
+/// that.
+#[derive(Clone, Debug)]
+pub struct CoverageCamera {
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub zoom: f32,
+    pub viewport_bounds: Bounds<Pixels>,
+    /// `Some(start_pos, start_pan_x, start_pan_y)` mid-drag.
+    pub drag_start: Option<(Point<Pixels>, f32, f32)>,
+    /// True once we've seen a non-zero viewport; first frame
+    /// computes a fit-to-view zoom + pan and flips this on.
+    pub initialised: bool,
+}
+
+impl Default for CoverageCamera {
+    fn default() -> Self {
+        Self {
+            pan_x: 0.,
+            pan_y: 0.,
+            zoom: 1.,
+            viewport_bounds: Bounds::default(),
+            drag_start: None,
+            initialised: false,
+        }
+    }
+}
+
+/// Pixels per world unit at zoom = 1. World rectangles are
+/// laid out at "natural" size in world units; this constant
+/// turns that into a sensible-looking default screen size.
+/// 1.0 ⇒ 1 world unit = 1 screen pixel; works because we lay
+/// out a mosaic at a target world width of around 1000 and a
+/// typical viewport is 600-1600 px wide.
+const BASE_PX_PER_WORLD: f32 = 1.0;
+const MIN_ZOOM: f32 = 0.05;
+const MAX_ZOOM: f32 = 30.0;
+const ZOOM_STEP: f32 = 1.1;
+
+impl CoverageCamera {
+    /// World → screen pixels-per-world-unit at the current zoom.
+    pub fn unit(&self) -> f32 {
+        BASE_PX_PER_WORLD * self.zoom
+    }
+
+    pub fn pan_by(&mut self, dx_px: f32, dy_px: f32) {
+        let unit = self.unit();
+        if unit <= 0. {
+            return;
+        }
+        self.pan_x -= dx_px / unit;
+        self.pan_y -= dy_px / unit;
+    }
+
+    pub fn zoom_by(&mut self, anchor: Point<Pixels>, delta: f32) {
+        let factor = if delta > 0. {
+            ZOOM_STEP
+        } else if delta < 0. {
+            1. / ZOOM_STEP
+        } else {
+            return;
+        };
+        let old_zoom = self.zoom;
+        let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            return;
+        }
+        let bounds = self.viewport_bounds;
+        let centre_x = bounds.origin.x.as_f32() + bounds.size.width.as_f32() / 2.;
+        let centre_y = bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.;
+        let old_unit = BASE_PX_PER_WORLD * old_zoom;
+        let new_unit = BASE_PX_PER_WORLD * new_zoom;
+        let ax = anchor.x.as_f32();
+        let ay = anchor.y.as_f32();
+        // World point under the cursor stays under the cursor
+        // post-zoom: zoom anchored at the cursor.
+        let world_x = self.pan_x + (ax - centre_x) / old_unit;
+        let world_y = self.pan_y + (ay - centre_y) / old_unit;
+        self.zoom = new_zoom;
+        self.pan_x = world_x - (ax - centre_x) / new_unit;
+        self.pan_y = world_y - (ay - centre_y) / new_unit;
+    }
+
+    pub fn drag_start(&mut self, pos: Point<Pixels>) {
+        self.drag_start = Some((pos, self.pan_x, self.pan_y));
+    }
+
+    pub fn drag_move(&mut self, pos: Point<Pixels>) {
+        let Some((start_pos, start_pan_x, start_pan_y)) = self.drag_start else {
+            return;
+        };
+        let unit = self.unit();
+        if unit <= 0. {
+            return;
+        }
+        let dx = (pos.x - start_pos.x).as_f32() / unit;
+        let dy = (pos.y - start_pos.y).as_f32() / unit;
+        self.pan_x = start_pan_x - dx;
+        self.pan_y = start_pan_y - dy;
+    }
+
+    pub fn drag_end(&mut self) {
+        self.drag_start = None;
+    }
+
+    /// Fit a `world_w × world_h` rect (origin at world (0,0))
+    /// into the current viewport with a small margin. Called
+    /// once on first paint after we have real bounds.
+    pub fn fit_to(&mut self, world_w: f32, world_h: f32) {
+        let bounds = self.viewport_bounds;
+        let vw = bounds.size.width.as_f32();
+        let vh = bounds.size.height.as_f32();
+        if vw <= 0. || vh <= 0. || world_w <= 0. || world_h <= 0. {
+            return;
+        }
+        let margin = 0.95;
+        let zoom_x = vw * margin / (world_w * BASE_PX_PER_WORLD);
+        let zoom_y = vh * margin / (world_h * BASE_PX_PER_WORLD);
+        self.zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM);
+        // Centre the world rect on the viewport: world centre
+        // sits at pan = (world_w/2, world_h/2).
+        self.pan_x = world_w / 2.;
+        self.pan_y = world_h / 2.;
+        self.initialised = true;
+    }
+}
+
+/// One tile in screen-space after the camera transform. Used
+/// by the renderer.
+#[derive(Clone, Debug)]
+struct ScreenTile {
     artifact: glass_db::ArtifactId,
     section: String,
-    addr: u64,
-    size: u64,
-    name: SharedString,
+    symbol_addr: u64,
+    display_name: SharedString,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
-/// Compute the mosaic for one native artifact.
-///
-/// `bounds_w` / `bounds_h` are the canvas size in pixels.
-/// `min_tile_px` is the minimum dimension we'll let any tile
-/// shrink to — below this, the function would be unclickable.
-/// Tiles smaller than that fall back to the floor; tiny
-/// functions therefore collectively take more area than their
-/// total size warrants, but the alternative (sub-pixel tiles)
-/// is unusable.
+/// Layout result: world tiles + the world bounding box. The
+/// camera uses the bounding box for "fit to view".
+#[derive(Clone, Debug)]
+pub struct MosaicLayout {
+    pub tiles: Vec<WorldTile>,
+    pub world_w: f32,
+    pub world_h: f32,
+}
+
+impl MosaicLayout {
+    pub fn empty() -> Self {
+        Self {
+            tiles: Vec::new(),
+            world_w: 0.,
+            world_h: 0.,
+        }
+    }
+}
+
+/// Build the world-space mosaic for one native artifact. The
+/// target world width is fixed at `world_w`; the height comes
+/// out of the strip layout so the area encodes total bytes.
 pub fn build_mosaic(
     bundle: &LoadedBundle,
     artifact: &glass_db::ArtifactId,
-    bounds_w: f32,
-    bounds_h: f32,
-    min_tile_px: f32,
-) -> Vec<Tile> {
+    world_w: f32,
+) -> MosaicLayout {
     let Some(symbol_map) = bundle.symbol_maps.get(artifact) else {
-        return Vec::new();
+        return MosaicLayout::empty();
     };
 
-    // Gather function symbols in address order. The SymbolMap
-    // already keeps them sorted; we just have to filter to
-    // functions with non-zero size.
     let mut inputs: Vec<LayoutInput> = symbol_map
         .iter()
         .filter(|s| matches!(s.kind, glass_arch_arm::SymbolKind::Function))
         .filter(|s| s.size > 0)
         .map(|s| {
-            // Look up the containing text section so the click
-            // handler knows what to pass to the Listing tab.
             let section = find_containing_section(bundle, artifact, s.address)
                 .unwrap_or_else(|| ".text".to_string());
             LayoutInput {
@@ -93,109 +248,95 @@ pub fn build_mosaic(
             }
         })
         .collect();
-
-    if inputs.is_empty() || bounds_w < 1.0 || bounds_h < 1.0 {
-        return Vec::new();
+    if inputs.is_empty() || world_w <= 0. {
+        return MosaicLayout::empty();
     }
-
-    // Sort by address — sym map is supposed to already be in
-    // order but normalise here for robustness.
     inputs.sort_by_key(|i| i.addr);
 
-    let total_size: u64 = inputs.iter().map(|i| i.size).sum();
-    if total_size == 0 {
-        return Vec::new();
+    // Pick a target world aspect ratio so the mosaic doesn't
+    // look like a long thin strip. We bias slightly wider than
+    // tall (most viewports are landscape). The actual height
+    // falls out from the strip layout once we set the per-byte
+    // area scale to satisfy world_w × world_h ≈ total_bytes.
+    let total_bytes: u64 = inputs.iter().map(|i| i.size).sum();
+    if total_bytes == 0 {
+        return MosaicLayout::empty();
     }
-    let total_area = (bounds_w as f64) * (bounds_h as f64);
-    let area_per_byte = total_area / (total_size as f64);
-    let min_area = (min_tile_px as f64) * (min_tile_px as f64);
+    let target_aspect = 4.0_f64 / 3.0;
+    let target_h = (world_w as f64) / target_aspect;
+    let target_area = (world_w as f64) * target_h;
+    let area_per_byte = target_area / (total_bytes as f64);
+    // Minimum tile area in world units: 4 (=2×2 world units).
+    // At default zoom that's 2×2 px — clickable enough once
+    // the user zooms in, invisible-ish when zoomed out.
+    let min_area = 4.0_f64;
 
-    // Effective area per tile: max(real_area, min_area). We
-    // pack these into rows ("strips") using the strip-treemap
-    // algorithm: fix the strip's height, fill it with tiles
-    // in input order until adding another would worsen the
-    // aspect ratio more than starting a new strip would.
     let areas: Vec<f64> = inputs
         .iter()
         .map(|i| ((i.size as f64) * area_per_byte).max(min_area))
         .collect();
 
-    let tiles = strip_layout(&inputs, &areas, bounds_w as f64, bounds_h as f64);
-    tiles
+    let (tiles, world_h) = strip_layout(&inputs, &areas, world_w as f64);
+    MosaicLayout {
+        tiles,
+        world_w,
+        world_h: world_h as f32,
+    }
+}
+
+/// Input row for the layout algorithm.
+struct LayoutInput {
+    artifact: glass_db::ArtifactId,
+    section: String,
+    addr: u64,
+    size: u64,
+    name: SharedString,
 }
 
 /// Strip treemap. Lays out rectangles row-by-row, left-to-right
-/// within each row, top-to-bottom across rows. Starts a new row
-/// when the running average aspect ratio in the current row
-/// would deteriorate by adding another tile.
+/// within each row, top-to-bottom across rows. Returns the
+/// tiles + the final mosaic height.
 fn strip_layout(
     inputs: &[LayoutInput],
     areas: &[f64],
     canvas_w: f64,
-    canvas_h: f64,
-) -> Vec<Tile> {
+) -> (Vec<WorldTile>, f64) {
     let mut tiles = Vec::with_capacity(inputs.len());
 
     let mut cursor_y = 0.0_f64;
     let mut idx = 0;
 
     while idx < inputs.len() {
-        // Greedy strip-fill: how many tiles to put in this
-        // row? Start with one, keep adding as long as the
-        // worst aspect ratio improves.
         let row_start = idx;
         let row_height = best_strip_height(&areas[idx..], canvas_w);
-        // How many tiles actually fit in this strip — every
-        // tile's width = area / row_height. We fill until the
-        // accumulated width hits canvas_w.
         let mut cursor_x = 0.0_f64;
         while idx < inputs.len() {
             let a = areas[idx];
             let tile_w = a / row_height;
             if cursor_x + tile_w > canvas_w + 0.5 && idx > row_start {
-                // Tile would overflow this strip; bump to next.
                 break;
             }
-            tiles.push(Tile {
+            tiles.push(WorldTile {
                 artifact: inputs[idx].artifact.clone(),
                 section: inputs[idx].section.clone(),
                 symbol_addr: inputs[idx].addr,
                 symbol_size: inputs[idx].size,
                 display_name: inputs[idx].name.clone(),
-                x: cursor_x as f32,
-                y: cursor_y as f32,
-                w: tile_w as f32,
-                h: row_height as f32,
-                hits: None,
+                wx: cursor_x as f32,
+                wy: cursor_y as f32,
+                ww: tile_w as f32,
+                wh: row_height as f32,
             });
             cursor_x += tile_w;
             idx += 1;
-            // If we'd start to overflow on the next iteration,
-            // break — this gives the strip a slight under-fill
-            // we can't avoid without back-tracking.
             if cursor_x >= canvas_w {
                 break;
             }
         }
         cursor_y += row_height;
-        if cursor_y >= canvas_h {
-            // Out of vertical space. The remaining tiles get
-            // squashed into a final strip — better than
-            // dropping them; the user can still see them and
-            // we can re-layout if they resize the window.
-            if idx < inputs.len() {
-                let remaining_area: f64 = areas[idx..].iter().sum();
-                let final_h = (canvas_h - cursor_y + row_height).max(2.0);
-                // Replace the last completed row's height with
-                // a stretched one that fits the remainder.
-                let _ = remaining_area;
-                let _ = final_h;
-            }
-            break;
-        }
     }
 
-    tiles
+    (tiles, cursor_y)
 }
 
 /// Pick a strip height that gives the best worst-aspect-ratio
@@ -206,10 +347,6 @@ fn best_strip_height(areas_remaining: &[f64], canvas_w: f64) -> f64 {
         return 1.0;
     }
     let look = areas_remaining.len().min(16);
-    // For k tiles spanning width canvas_w, each contributes
-    // area_i, so heights are all the same: h = sum(area)/w.
-    // Aspect ratio of tile i: max(w_i/h, h/w_i) where w_i = a_i/h.
-    // We pick the k that minimises the worst aspect ratio.
     let mut best_k = 1;
     let mut best_score = f64::INFINITY;
     let mut running_sum = 0.0;
@@ -219,9 +356,8 @@ fn best_strip_height(areas_remaining: &[f64], canvas_w: f64) -> f64 {
         if h <= 0.0 {
             continue;
         }
-        // Worst aspect ratio in this strip is the *smallest*
-        // tile vs. h (it gets the narrowest width).
-        let smallest_area = areas_remaining[..=k].iter().copied().fold(f64::INFINITY, f64::min);
+        let smallest_area =
+            areas_remaining[..=k].iter().copied().fold(f64::INFINITY, f64::min);
         let smallest_w = smallest_area / h;
         let aspect = (h / smallest_w).max(smallest_w / h);
         if aspect < best_score {
@@ -229,19 +365,10 @@ fn best_strip_height(areas_remaining: &[f64], canvas_w: f64) -> f64 {
             best_k = k + 1;
         }
     }
-    let _ = best_k;
-    // Strip height = sum of chosen areas / canvas_w. We
-    // re-derived best_k but we don't need to return it; the
-    // outer loop will re-walk and add tiles. To keep the
-    // outer loop simple we return the height that
-    // corresponds to filling exactly best_k tiles.
     let chosen_sum: f64 = areas_remaining[..best_k].iter().sum();
     (chosen_sum / canvas_w).max(2.0)
 }
 
-/// Walk the native sections for `artifact` and return the
-/// section name whose `[base, base+size)` contains `addr`.
-/// Used so the click handler can open the right Listing tab.
 fn find_containing_section(
     bundle: &LoadedBundle,
     artifact: &glass_db::ArtifactId,
@@ -259,8 +386,8 @@ fn find_containing_section(
 /// Map hits to a colour using a log-scaled cold→hot ramp.
 /// `max_hits` is the recording's max, used as the ramp's top.
 pub fn tile_colour(hits: Option<u32>, max_hits: u32) -> u32 {
-    const NEUTRAL: u32 = 0x2a2e35; // no recording
-    const COLD: u32 = 0x1a2436; // recorded, 0 hits
+    const NEUTRAL: u32 = 0x2a2e35;
+    const COLD: u32 = 0x1a2436;
     const BLUE: u32 = 0x1f3b8a;
     const YELLOW: u32 = 0xe1c542;
     const RED: u32 = 0xd13b3b;
@@ -295,13 +422,39 @@ fn lerp_rgb(a: u32, b: u32, t: f32) -> u32 {
     (chan(16) << 16) | (chan(8) << 8) | chan(0)
 }
 
-/// Render the CoverageMap tab body for a single artifact.
-///
-/// Renders the toolbar (artifact picker placeholder) and the
-/// mosaic canvas underneath. The mosaic is laid out at the
-/// most-recently-measured canvas size, captured by a gpui
-/// `canvas` prepaint hook on every frame — same trick the
-/// section-map view uses to get pixel-accurate bounds.
+/// Transform a world tile to screen coords using the camera.
+/// Returns `None` if the tile is fully outside the viewport.
+fn project_tile(world: &WorldTile, camera: &CoverageCamera) -> Option<ScreenTile> {
+    let bounds = camera.viewport_bounds;
+    let vw = bounds.size.width.as_f32();
+    let vh = bounds.size.height.as_f32();
+    if vw <= 0. || vh <= 0. {
+        return None;
+    }
+    let centre_x = vw / 2.;
+    let centre_y = vh / 2.;
+    let unit = camera.unit();
+    let sx = centre_x + (world.wx - camera.pan_x) * unit;
+    let sy = centre_y + (world.wy - camera.pan_y) * unit;
+    let sw = world.ww * unit;
+    let sh = world.wh * unit;
+    // Cull tiles that don't intersect [0,vw]×[0,vh].
+    if sx + sw < 0. || sx > vw || sy + sh < 0. || sy > vh {
+        return None;
+    }
+    Some(ScreenTile {
+        artifact: world.artifact.clone(),
+        section: world.section.clone(),
+        symbol_addr: world.symbol_addr,
+        display_name: world.display_name.clone(),
+        x: sx,
+        y: sy,
+        w: sw,
+        h: sh,
+    })
+}
+
+/// Render the CoverageMap tab body.
 pub fn render_coverage_tab(
     shell: &mut Shell,
     bundle: LoadedBundle,
@@ -310,8 +463,6 @@ pub fn render_coverage_tab(
     dim: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
-    // Pick the first native artifact for v0. A dropdown comes
-    // in v1 when more than one .so warrants the choice.
     let artifact = pick_default_artifact(&bundle);
     let artifact_label = artifact
         .as_ref()
@@ -320,7 +471,9 @@ pub fn render_coverage_tab(
         .unwrap_or_else(|| "(no native artifact)".to_string());
 
     let header_text = match &artifact {
-        Some(_) => format!("Coverage Map — {artifact_label}"),
+        Some(_) => format!(
+            "Coverage Map — {artifact_label}  (drag to pan, ⌘/Ctrl-scroll to zoom)"
+        ),
         None => "Coverage Map — no native artifacts in this bundle".to_string(),
     };
 
@@ -333,15 +486,16 @@ pub fn render_coverage_tab(
         .child(SharedString::from(header_text));
 
     let body: gpui::AnyElement = match artifact {
-        Some(aid) => render_mosaic_canvas(shell, bundle, aid, border, dim, fg, cx)
-            .into_any_element(),
+        Some(aid) => render_canvas(shell, bundle, aid, border, dim, cx),
         None => div()
             .flex_1()
             .flex()
             .items_center()
             .justify_center()
             .text_color(dim)
-            .child("This bundle has no native code. Coverage requires native instrumentation.")
+            .child(
+                "This bundle has no native code. Coverage requires native instrumentation.",
+            )
             .into_any_element(),
     };
 
@@ -356,8 +510,6 @@ pub fn render_coverage_tab(
 }
 
 fn pick_default_artifact(bundle: &LoadedBundle) -> Option<glass_db::ArtifactId> {
-    // Largest text section wins — that's the "main" library
-    // in most APKs. Falls back to any native artifact.
     let mut best: Option<(glass_db::ArtifactId, u64)> = None;
     for (aid, sections) in bundle.native_sections.iter() {
         let text_bytes: u64 = sections
@@ -379,34 +531,83 @@ fn pick_default_artifact(bundle: &LoadedBundle) -> Option<glass_db::ArtifactId> 
     best.map(|(a, _)| a)
 }
 
-/// The actual mosaic. Uses a gpui canvas to capture the
-/// current pixel size; the layout runs synchronously each
-/// frame against the live size. For a few thousand symbols
-/// the cost is negligible; for tens of thousands we may need
-/// to cache by (artifact, size). v0 punts on caching.
-fn render_mosaic_canvas(
+/// Build (or fetch the cached) world layout for the artifact,
+/// project it through the camera, and render the resulting
+/// screen tiles plus the pan/zoom event handlers.
+fn render_canvas(
     shell: &mut Shell,
     bundle: LoadedBundle,
     artifact: glass_db::ArtifactId,
     border: gpui::Rgba,
     dim: gpui::Rgba,
-    _fg: gpui::Rgba,
     cx: &mut Context<Shell>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
+    // Layout once and stash on Shell. Re-layout if the cached
+    // artifact differs (user might switch artifacts later via
+    // a dropdown).
+    let needs_relayout = shell
+        .coverage_layout
+        .as_ref()
+        .map(|(aid, _)| aid != &artifact)
+        .unwrap_or(true);
+    if needs_relayout {
+        let layout = build_mosaic(&bundle, &artifact, 1200.0);
+        shell.coverage_layout = Some((artifact.clone(), Arc::new(layout)));
+    }
+    let layout = shell
+        .coverage_layout
+        .as_ref()
+        .map(|(_, l)| l.clone())
+        .unwrap();
+
+    // First fit-to-view: defer until the canvas hook has
+    // written real bounds. Once we've seen bounds and layout
+    // has dimensions, snap zoom + pan so the whole mosaic is
+    // visible.
+    if !shell.coverage_camera.initialised
+        && shell.coverage_camera.viewport_bounds.size.width.as_f32() > 0.
+        && layout.world_w > 0.
+        && layout.world_h > 0.
+    {
+        shell
+            .coverage_camera
+            .fit_to(layout.world_w, layout.world_h);
+    }
+
+    let camera = shell.coverage_camera.clone();
+
+    // Project tiles. Empty layout → placeholder text.
+    if layout.tiles.is_empty() {
+        return div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(dim)
+            .child("No function symbols in this artifact.")
+            .into_any_element();
+    }
+
     let weak = cx.entity().downgrade();
 
-    // The canvas covers the body and reports its bounds back
-    // into Shell. The mosaic tiles render alongside, absolutely
-    // positioned over the same area using the cached bounds.
+    // Measure: capture bounds → push to camera.
+    let measure_weak = weak.clone();
     let measure = gpui::canvas(
-        {
-            let weak = weak.clone();
-            move |bounds, _window, cx| {
-                if let Some(entity) = weak.upgrade() {
-                    cx.update_entity(&entity, |shell, cx| {
-                        shell.set_coverage_canvas_bounds(bounds, cx);
-                    });
-                }
+        move |bounds, _window, cx| {
+            if let Some(entity) = measure_weak.upgrade() {
+                cx.update_entity(&entity, |shell, cx| {
+                    let cur = shell.coverage_camera.viewport_bounds;
+                    let changed = (cur.size.width.as_f32()
+                        - bounds.size.width.as_f32())
+                    .abs()
+                        + (cur.size.height.as_f32()
+                            - bounds.size.height.as_f32())
+                        .abs();
+                    shell.coverage_camera.viewport_bounds = bounds;
+                    if changed > 0.5 {
+                        cx.notify();
+                    }
+                });
             }
         },
         |_, _, _, _| {},
@@ -416,109 +617,59 @@ fn render_mosaic_canvas(
     .left_0()
     .size_full();
 
-    let tiles_layer =
-        mosaic_tiles_element(shell, bundle, artifact, border, dim, cx);
-
-    div()
-        .flex_1()
-        .relative()
-        .overflow_hidden()
-        .child(measure)
-        .child(tiles_layer)
-}
-
-/// Build the tile DOM. Uses `shell.coverage_canvas_bounds` to
-/// know how big the area is. The very first frame after the
-/// tab opens has no bounds yet → "Sizing…" placeholder; the
-/// second frame fills in.
-fn mosaic_tiles_element(
-    shell: &mut Shell,
-    bundle: LoadedBundle,
-    artifact: glass_db::ArtifactId,
-    border: gpui::Rgba,
-    dim: gpui::Rgba,
-    cx: &mut Context<Shell>,
-) -> gpui::AnyElement {
-    let bounds = shell.coverage_canvas_bounds;
-    let w = f32::from(bounds.size.width);
-    let h = f32::from(bounds.size.height);
-
-    if w < 8.0 || h < 8.0 {
-        return div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(dim)
-            .child("Sizing…")
-            .into_any_element();
-    }
-
-    let tiles = build_mosaic(&bundle, &artifact, w, h, 6.0);
-
-    if tiles.is_empty() {
-        return div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(dim)
-            .child("No function symbols in this artifact.")
-            .into_any_element();
-    }
-
-    let mut root = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .w(px(w))
-        .h(px(h));
-
-    for tile in tiles {
-        let tile_bg = tile_colour(tile.hits, 1);
-        let label = if tile.w >= 60.0 && tile.h >= 14.0 {
-            Some(tile.display_name.clone())
+    // Tile layer.
+    let mut tile_layer = div().absolute().top_0().left_0().size_full();
+    let mut visible = 0usize;
+    for world in &layout.tiles {
+        let Some(s) = project_tile(world, &camera) else {
+            continue;
+        };
+        visible += 1;
+        // Skip sub-pixel tiles entirely — they'd render as
+        // invisible smudges and burn the layout cost.
+        if s.w < 0.5 || s.h < 0.5 {
+            continue;
+        }
+        let bg = tile_colour(None, 1);
+        let label = if s.w >= 60. && s.h >= 14. {
+            Some(s.display_name.clone())
         } else {
             None
         };
-        let artifact_for_click = tile.artifact.clone();
-        let section_for_click = tile.section.clone();
-        let addr_for_click = tile.symbol_addr;
+        let artifact_click = s.artifact.clone();
+        let section_click = s.section.clone();
+        let addr_click = s.symbol_addr;
         let mut t = div()
             .absolute()
-            .left(px(tile.x))
-            .top(px(tile.y))
-            .w(px(tile.w.max(1.0)))
-            .h(px(tile.h.max(1.0)))
-            .bg(rgb(tile_bg))
+            .left(px(s.x))
+            .top(px(s.y))
+            .w(px(s.w.max(1.0)))
+            .h(px(s.h.max(1.0)))
+            .bg(rgb(bg))
             .border_1()
             .border_color(border)
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
                     let new_tab = ev.modifiers.shift;
                     if new_tab {
                         this.open_listing_force_new_tab(
-                            artifact_for_click.clone(),
-                            section_for_click.clone(),
-                            addr_for_click,
+                            artifact_click.clone(),
+                            section_click.clone(),
+                            addr_click,
                             cx,
                         );
                     } else {
                         this.open_listing_at(
-                            artifact_for_click.clone(),
-                            section_for_click.clone(),
-                            addr_for_click,
+                            artifact_click.clone(),
+                            section_click.clone(),
+                            addr_click,
                             cx,
                         );
                     }
+                    // Don't bubble to the background drag handler.
+                    cx.stop_propagation();
                 }),
             );
         if let Some(text) = label {
@@ -532,8 +683,100 @@ fn mosaic_tiles_element(
                     .child(text),
             );
         }
-        root = root.child(t);
+        tile_layer = tile_layer.child(t);
     }
+    let _ = visible;
 
-    root.into_any_element()
+    // Event-handler wrapper: wheel pan / mod-wheel zoom /
+    // middle-drag pan / left-drag-on-background pan.
+    let wheel_weak = weak.clone();
+    let down_weak = weak.clone();
+    let mid_down_weak = weak.clone();
+    let move_weak = weak.clone();
+    let up_weak = weak.clone();
+
+    div()
+        .flex_1()
+        .relative()
+        .overflow_hidden()
+        .child(measure)
+        .child(tile_layer)
+        .on_scroll_wheel(move |ev: &gpui::ScrollWheelEvent, _w, cx: &mut App| {
+            let Some(entity) = wheel_weak.upgrade() else { return };
+            let pos = ev.position;
+            let delta = ev.delta.pixel_delta(px(20.));
+            let zoom = ev.modifiers.shift
+                || ev.modifiers.platform
+                || ev.modifiers.control;
+            cx.update_entity(&entity, |shell, cx| {
+                if zoom {
+                    let raw = if delta.y.as_f32().abs() > 0. {
+                        delta.y.as_f32()
+                    } else {
+                        delta.x.as_f32()
+                    };
+                    shell.coverage_camera.zoom_by(pos, raw);
+                } else {
+                    shell
+                        .coverage_camera
+                        .pan_by(delta.x.as_f32(), delta.y.as_f32());
+                }
+                cx.notify();
+            });
+        })
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                // Background drag: only fires when the tile's
+                // own handler did NOT stop_propagation, so a
+                // click on a tile won't start a drag here.
+                let Some(entity) = down_weak.upgrade() else { return };
+                let pos = ev.position;
+                cx.update_entity(&entity, |shell, _cx| {
+                    shell.coverage_camera.drag_start(pos);
+                });
+            },
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Middle,
+            move |ev: &gpui::MouseDownEvent, _w, cx: &mut App| {
+                let Some(entity) = mid_down_weak.upgrade() else { return };
+                let pos = ev.position;
+                cx.update_entity(&entity, |shell, _cx| {
+                    shell.coverage_camera.drag_start(pos);
+                });
+            },
+        )
+        .on_mouse_move(move |ev: &gpui::MouseMoveEvent, _w, cx: &mut App| {
+            let Some(entity) = move_weak.upgrade() else { return };
+            let pos = ev.position;
+            cx.update_entity(&entity, |shell, cx| {
+                if shell.coverage_camera.drag_start.is_some() {
+                    shell.coverage_camera.drag_move(pos);
+                    cx.notify();
+                }
+            });
+        })
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            {
+                let up_weak = up_weak.clone();
+                move |_ev: &gpui::MouseUpEvent, _w, cx: &mut App| {
+                    let Some(entity) = up_weak.upgrade() else { return };
+                    cx.update_entity(&entity, |shell, _cx| {
+                        shell.coverage_camera.drag_end();
+                    });
+                }
+            },
+        )
+        .on_mouse_up(
+            gpui::MouseButton::Middle,
+            move |_ev: &gpui::MouseUpEvent, _w, cx: &mut App| {
+                let Some(entity) = up_weak.upgrade() else { return };
+                cx.update_entity(&entity, |shell, _cx| {
+                    shell.coverage_camera.drag_end();
+                });
+            },
+        )
+        .into_any_element()
 }

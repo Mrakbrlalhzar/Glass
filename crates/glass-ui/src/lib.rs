@@ -1439,12 +1439,20 @@ pub(crate) struct Shell {
     /// the canvas hook. Used to translate mouse positions into a section
     /// index for the hover cursor.
     pub(crate) section_bar_bounds: Bounds<Pixels>,
-    /// Pixel bounds of the coverage-map mosaic canvas in
-    /// window coordinates, captured by a `canvas` prepaint
-    /// hook each frame. Used by the mosaic renderer to size
-    /// itself to the available area. Zero on the first frame
-    /// after the tab opens; the second frame fills in.
-    pub(crate) coverage_canvas_bounds: Bounds<Pixels>,
+    /// Pan + zoom for the coverage map. The tab is a singleton
+    /// so one camera here suffices. The camera also owns the
+    /// canvas's viewport bounds (refreshed each frame by the
+    /// measure-canvas hook).
+    pub(crate) coverage_camera: crate::coverage_view::CoverageCamera,
+    /// Cached world-space mosaic layout. `(artifact, layout)` —
+    /// re-layout only when the active artifact changes (today
+    /// always the largest native artifact; v1 makes this user-
+    /// switchable). `Arc` so the per-frame render path doesn't
+    /// clone the tile vec.
+    pub(crate) coverage_layout: Option<(
+        glass_db::ArtifactId,
+        Arc<crate::coverage_view::MosaicLayout>,
+    )>,
     /// Index of the section the user is hovering on the bar — drives the
     /// vertical cursor line and the row highlight in the table.
     pub(crate) hovered_section: Option<usize>,

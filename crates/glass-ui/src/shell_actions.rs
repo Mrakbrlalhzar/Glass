@@ -61,7 +61,8 @@ impl Shell {
             overflow_open: false,
             db,
             section_bar_bounds: Bounds::default(),
-            coverage_canvas_bounds: Bounds::default(),
+            coverage_camera: crate::coverage_view::CoverageCamera::default(),
+            coverage_layout: None,
             hovered_section: None,
             bar_cursor_addr: None,
             bar_cursor_x: None,
@@ -215,20 +216,6 @@ impl Shell {
             + (cur.size.width - bounds.size.width).abs();
         if diff > px(0.5) {
             self.section_bar_bounds = bounds;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn set_coverage_canvas_bounds(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let cur = self.coverage_canvas_bounds;
-        let diff = (cur.size.width - bounds.size.width).abs()
-            + (cur.size.height - bounds.size.height).abs();
-        if diff > px(0.5) {
-            self.coverage_canvas_bounds = bounds;
             cx.notify();
         }
     }
