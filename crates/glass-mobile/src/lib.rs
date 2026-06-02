@@ -40,6 +40,15 @@ pub struct IpaBundle {
     pub app_dir: String,
     /// Parsed `Info.plist` — bundle id, executable name, version, …
     pub info: InfoPlist,
+    /// Raw on-disk bytes of `Info.plist`. Kept so the editor
+    /// can round-trip the file in its original format (binary
+    /// or XML) — `info` alone is a typed view that has lost
+    /// every key we don't enumerate.
+    pub info_bytes: Vec<u8>,
+    /// Archive path of the Info.plist inside the IPA, e.g.
+    /// `Payload/MyApp.app/Info.plist`. Used by the export path
+    /// to splice the edited plist back into the zip.
+    pub info_archive_path: String,
     /// Main executable, sliced to arm64/arm64e if the file was fat.
     /// `None` if the executable is missing or armv8-encode couldn't
     /// parse it (e.g. the arm64 slice was absent on an older binary).
@@ -227,6 +236,8 @@ fn open_ipa(path: &Path) -> Result<IpaBundle> {
         path: path.to_path_buf(),
         app_dir,
         info,
+        info_bytes,
+        info_archive_path: info_path,
         main_executable,
         frameworks,
     })

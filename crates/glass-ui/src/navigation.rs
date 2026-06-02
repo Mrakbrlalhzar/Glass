@@ -616,6 +616,16 @@ impl Shell {
                 self.open_smali_editor_for_class(&class_jni, cx);
                 return;
             }
+            // Plist leaves go through the editor opener so the
+            // CodeEditor is seeded with the XML-form body and a
+            // potentially pre-staged edit. The TabKind would
+            // open an empty editor otherwise.
+            if let LeafKind::Plist { artifact } = kind_src {
+                let artifact = artifact.clone();
+                drop(bundle);
+                self.open_plist_editor_for_artifact(&artifact, cx);
+                return;
+            }
             let Some(kind) = TabKind::from_kind(kind_src) else { return };
             kind
         };

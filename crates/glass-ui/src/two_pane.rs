@@ -464,7 +464,9 @@ pub fn render_two_pane(
                     (None, None) => div().flex_1().into_any_element(),
                 }
             }
-            Some(TabKind::ScriptEditor { .. }) | Some(TabKind::SmaliEditor { .. }) => {
+            Some(TabKind::ScriptEditor { .. })
+            | Some(TabKind::SmaliEditor { .. })
+            | Some(TabKind::PlistEditor { .. }) => {
                 let editor = shell
                     .active_tab
                     .and_then(|i| shell.tabs.get(i))

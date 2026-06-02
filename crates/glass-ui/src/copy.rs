@@ -87,7 +87,9 @@ impl Shell {
             // model is the source of truth — return its
             // currently-selected text so the global Cmd-C action
             // can place it on the clipboard.
-            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {
+            TabKind::ScriptEditor { .. }
+            | TabKind::SmaliEditor { .. }
+            | TabKind::PlistEditor { .. } => {
                 tab.code_editor.as_ref().and_then(|e| e.selected_text())
             }
             // Coverage map has no row-level selection model

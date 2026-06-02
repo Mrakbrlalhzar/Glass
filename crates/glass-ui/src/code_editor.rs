@@ -162,6 +162,13 @@ pub(crate) enum HighlightMode {
     None,
     /// Smali source (DEX classes). Uses `crate::smali::tokenize_smali_line`.
     Smali,
+    /// XML — generic markup. Used by the plist editor and
+    /// will also drive the AndroidManifest editor when that
+    /// lands. Tokeniser is line-local; multi-line constructs
+    /// (CDATA, multi-line comments) close at end-of-line and
+    /// re-open on the next, which is good-enough for the
+    /// plist files we'll be editing (single-line bodies).
+    Xml,
 }
 
 impl CodeEditor {
@@ -1767,6 +1774,23 @@ fn render_line_body(
             }
             spans
         }
+        HighlightMode::Xml => {
+            let mut spans = Vec::new();
+            for span in tokenize_xml_line(text) {
+                let kind_rgb = crate::palette::chunk_colour(span.kind);
+                let colour = gpui::Rgba {
+                    r: ((kind_rgb >> 16) & 0xff) as f32 / 255.0,
+                    g: ((kind_rgb >> 8) & 0xff) as f32 / 255.0,
+                    b: (kind_rgb & 0xff) as f32 / 255.0,
+                    a: 1.0,
+                };
+                spans.push((span.start, span.end, colour, false));
+            }
+            if spans.is_empty() && !text.is_empty() {
+                spans.push((0, line_len_bytes, fg, false));
+            }
+            spans
+        }
     };
 
     // Compose a flex row of spans. We always emit at least one
@@ -1949,6 +1973,232 @@ fn nth_line(snapshot: &text::BufferSnapshot, index: usize) -> String {
         s.pop();
     }
     s
+}
+
+/// Byte-range span emitted by the XML tokeniser, paired with
+/// a `ChunkKind` so the renderer can pull a palette colour.
+struct XmlSpan {
+    start: usize,
+    end: usize,
+    kind: glass_arch_arm::ChunkKind,
+}
+
+/// Tokenise one line of XML. Line-local state machine: comments
+/// and tag bodies that don't close on this line still get
+/// reasonable colouring, but multi-line constructs (CDATA, big
+/// comment blocks) reset at end-of-line. Good enough for the
+/// plist files we'll be editing — typical bodies are single-line
+/// `<key>X</key><string>Y</string>`.
+///
+/// Tokens emitted:
+///   * `<`, `>`, `/`, `=`, `?`, `!`, `[`, `]`  → `Punct`
+///   * Tag name immediately after `<` or `</`  → `Directive`
+///   * Attribute name = `value`                → `Plain` for the
+///     name, `String` for the quoted value.
+///   * `<!-- ... -->`                          → `Comment`
+///   * Text between tags                       → `Plain`
+fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
+    use glass_arch_arm::ChunkKind;
+    let bytes = text.as_bytes();
+    let mut spans = Vec::<XmlSpan>::new();
+    let mut i = 0;
+    let n = bytes.len();
+    // True between `<...>` (i.e. inside a tag body, parsing
+    // attributes). False in element content or between tags.
+    let mut in_tag = false;
+    // True immediately after `<` until we emit the tag name
+    // (so the next identifier renders as `Directive`).
+    let mut want_tag_name = false;
+
+    let push = |spans: &mut Vec<XmlSpan>, s: usize, e: usize, k: ChunkKind| {
+        if e > s {
+            spans.push(XmlSpan { start: s, end: e, kind: k });
+        }
+    };
+
+    while i < n {
+        let b = bytes[i];
+        // Comment: <!-- ... -->. Eat through the matching --> or
+        // to end-of-line.
+        if !in_tag && i + 3 < n && &bytes[i..i + 4] == b"<!--" {
+            let start = i;
+            let mut j = i + 4;
+            while j + 2 < n && &bytes[j..j + 3] != b"-->" {
+                j += 1;
+            }
+            let end = if j + 2 < n { j + 3 } else { n };
+            push(&mut spans, start, end, ChunkKind::Comment);
+            i = end;
+            continue;
+        }
+        if !in_tag && b == b'<' {
+            // Opening punctuation. The next non-`/` byte starts
+            // the tag name.
+            let mut tag_punct_end = i + 1;
+            // Absorb leading `/` (closing tag) or `?` (XML decl)
+            // or `!` (DOCTYPE) so the tag-name highlight starts
+            // at the next letter.
+            if tag_punct_end < n
+                && matches!(bytes[tag_punct_end], b'/' | b'?' | b'!')
+            {
+                tag_punct_end += 1;
+            }
+            push(&mut spans, i, tag_punct_end, ChunkKind::Punct);
+            i = tag_punct_end;
+            in_tag = true;
+            want_tag_name = true;
+            continue;
+        }
+        if in_tag && b == b'>' {
+            push(&mut spans, i, i + 1, ChunkKind::Punct);
+            i += 1;
+            in_tag = false;
+            want_tag_name = false;
+            continue;
+        }
+        if in_tag && (b == b'/' || b == b'?') && i + 1 < n && bytes[i + 1] == b'>' {
+            push(&mut spans, i, i + 2, ChunkKind::Punct);
+            i += 2;
+            in_tag = false;
+            want_tag_name = false;
+            continue;
+        }
+        if in_tag && b == b'=' {
+            push(&mut spans, i, i + 1, ChunkKind::Punct);
+            i += 1;
+            continue;
+        }
+        if in_tag && (b == b'"' || b == b'\'') {
+            // Quoted attribute value. Eat to the matching quote
+            // or end-of-line.
+            let quote = b;
+            let start = i;
+            let mut j = i + 1;
+            while j < n && bytes[j] != quote {
+                j += 1;
+            }
+            let end = if j < n { j + 1 } else { n };
+            push(&mut spans, start, end, ChunkKind::String);
+            i = end;
+            continue;
+        }
+        if (b as char).is_whitespace() {
+            // Whitespace inside a tag still ends the tag-name
+            // expectation (the name itself was already emitted),
+            // but we don't push a span for it — uncoloured bytes
+            // just fall through to the default text fill.
+            want_tag_name = false;
+            i += 1;
+            continue;
+        }
+        // Identifier-ish run: tag name, attribute name, or
+        // text-between-tags.
+        let is_name_byte = |c: u8| -> bool {
+            c.is_ascii_alphanumeric()
+                || matches!(c, b':' | b'-' | b'_' | b'.')
+        };
+        if is_name_byte(b) {
+            let start = i;
+            let mut j = i;
+            while j < n && is_name_byte(bytes[j]) {
+                j += 1;
+            }
+            let kind = if in_tag && want_tag_name {
+                want_tag_name = false;
+                ChunkKind::Directive
+            } else if in_tag {
+                ChunkKind::Plain
+            } else {
+                ChunkKind::Plain
+            };
+            push(&mut spans, start, j, kind);
+            i = j;
+            continue;
+        }
+        // Unknown byte (e.g. punctuation inside text). Skip it
+        // without emitting a span so the row-fg colour shows
+        // through.
+        i += 1;
+    }
+    spans
+}
+
+#[cfg(test)]
+mod xml_tokeniser_tests {
+    use super::tokenize_xml_line;
+    use glass_arch_arm::ChunkKind;
+
+    fn kinds(text: &str) -> Vec<(&'static str, &'static str)> {
+        tokenize_xml_line(text)
+            .iter()
+            .map(|s| {
+                let slice = &text[s.start..s.end];
+                let k = match s.kind {
+                    ChunkKind::Punct => "punct",
+                    ChunkKind::Directive => "directive",
+                    ChunkKind::String => "string",
+                    ChunkKind::Comment => "comment",
+                    ChunkKind::Plain => "plain",
+                    _ => "other",
+                };
+                // Workaround: the `&'static str` map is just
+                // for human-readable test output; leak the slice.
+                let s_static: &'static str = Box::leak(slice.to_string().into_boxed_str());
+                (k, s_static)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tokenises_simple_element() {
+        let spans = kinds(r#"<key>CFBundleVersion</key>"#);
+        assert_eq!(spans[0], ("punct", "<"));
+        assert_eq!(spans[1], ("directive", "key"));
+        assert_eq!(spans[2], ("punct", ">"));
+        assert_eq!(spans[3], ("plain", "CFBundleVersion"));
+        assert_eq!(spans[4], ("punct", "</"));
+        assert_eq!(spans[5], ("directive", "key"));
+        assert_eq!(spans[6], ("punct", ">"));
+    }
+
+    #[test]
+    fn tokenises_attribute() {
+        let spans = kinds(r#"<plist version="1.0">"#);
+        // < plist version = "1.0" >
+        assert_eq!(spans[0].0, "punct");
+        assert_eq!(spans[1], ("directive", "plist"));
+        assert_eq!(spans[2], ("plain", "version"));
+        assert_eq!(spans[3], ("punct", "="));
+        assert_eq!(spans[4], ("string", r#""1.0""#));
+        assert_eq!(spans[5], ("punct", ">"));
+    }
+
+    #[test]
+    fn tokenises_self_closing() {
+        let spans = kinds(r#"<true/>"#);
+        assert_eq!(spans[0], ("punct", "<"));
+        assert_eq!(spans[1], ("directive", "true"));
+        assert_eq!(spans[2], ("punct", "/>"));
+    }
+
+    #[test]
+    fn tokenises_comment() {
+        let spans = kinds(r#"<!-- skip this -->"#);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0], ("comment", "<!-- skip this -->"));
+    }
+
+    #[test]
+    fn tokenises_xml_decl() {
+        let spans = kinds(r#"<?xml version="1.0"?>"#);
+        // <? xml version = "1.0" ?>
+        assert_eq!(spans[0], ("punct", "<?"));
+        assert_eq!(spans[1], ("directive", "xml"));
+        assert_eq!(spans[2], ("plain", "version"));
+        assert_eq!(spans[3], ("punct", "="));
+        assert_eq!(spans[4], ("string", r#""1.0""#));
+        assert_eq!(spans[5], ("punct", "?>"));
+    }
 }
 
 #[cfg(test)]

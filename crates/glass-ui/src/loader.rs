@@ -83,6 +83,11 @@ fn snapshot_apk_with_progress(
 ) -> Result<LoadedBundle> {
     // Hash each artifact as we touch its bytes.
     let mut artifact_ids: Vec<glass_db::ArtifactId> = Vec::new();
+    // APK has no plists; the field stays empty.
+    let plist_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
     let mut native_sections: std::collections::HashMap<
         glass_db::ArtifactId,
         Vec<SectionInfo>,
@@ -414,6 +419,8 @@ fn snapshot_apk_with_progress(
         objc_classes: Arc::new(objc_classes),
         swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        plist_sources: Arc::new(plist_sources),
+        plist_edits: crate::plist_edits::PlistEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),
@@ -466,13 +473,28 @@ fn snapshot_ipa_with_progress(
 
     // Info.plist leaf at the top — first thing a reverser checks for
     // the bundle id, executable name, and entitlements clues.
+    // Also computes an ArtifactId from the raw bytes so the
+    // editor + edit registry can address it like any other
+    // bundle artifact.
     let info_rows = flatten_info_plist(&ipa.info);
+    let info_artifact_id = glass_db::ArtifactId::from_bytes(&ipa.info_bytes);
+    artifact_ids.push(info_artifact_id.clone());
+    let mut plist_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
+    plist_sources.insert(
+        info_artifact_id.clone(),
+        (ipa.info_archive_path.clone(), ipa.info_bytes.clone()),
+    );
     {
         let leaf_id = LeafId(bodies.len());
         bodies.push(SharedString::from(""));
         origins.push(SharedString::from("plist"));
         labels.push(SharedString::from("Info.plist"));
-        kinds.push(LeafKind::Manifest);
+        kinds.push(LeafKind::Plist {
+            artifact: info_artifact_id.clone(),
+        });
         roots.push(Node::Leaf {
             label: SharedString::from("Info.plist"),
             leaf_id,
@@ -805,6 +827,8 @@ fn snapshot_ipa_with_progress(
         objc_classes: Arc::new(objc_classes),
         swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        plist_sources: Arc::new(plist_sources),
+        plist_edits: crate::plist_edits::PlistEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),
@@ -986,6 +1010,11 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         .unwrap_or("binary")
         .to_string();
     let aid = glass_db::ArtifactId::from_bytes(&bin.bytes);
+    // Standalone native binary has no plists.
+    let plist_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
     let mut native_artifact_labels: std::collections::HashMap<
         glass_db::ArtifactId,
         String,
@@ -1204,6 +1233,8 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         objc_classes: Arc::new(objc_classes),
         swift_types: Arc::new(swift_types),
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
+        plist_sources: Arc::new(plist_sources),
+        plist_edits: crate::plist_edits::PlistEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),

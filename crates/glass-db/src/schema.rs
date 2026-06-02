@@ -137,6 +137,14 @@ pub enum TabState {
     },
     /// Android manifest viewer (the host APK's, not an artifact).
     Manifest,
+    /// Editable Info.plist or other plist artifact in an IPA.
+    /// Keyed by the plist's ArtifactId so a bundle with several
+    /// plist tabs round-trips correctly.
+    PlistEditor {
+        artifact: ArtifactId,
+        #[serde(default)]
+        scroll_line: u32,
+    },
     /// Control-flow graph for a function. `entry_addr` is the
     /// function's entry-point virtual address; the runtime resolves
     /// it against the artifact's symbol map.

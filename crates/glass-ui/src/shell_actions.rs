@@ -894,6 +894,23 @@ impl Shell {
                 SharedString::from(format!("{short}{star}"))
             }
             TabKind::CoverageMap => SharedString::from("Coverage Map"),
+            TabKind::PlistEditor { .. } => {
+                // Title comes from the leaf label ("Info.plist"
+                // for the canonical case; framework plists get
+                // their archive-relative name when we add them).
+                let dirty = self
+                    .tabs
+                    .get(index)
+                    .and_then(|t| t.code_editor.as_ref())
+                    .map(|e| e.dirty)
+                    .unwrap_or(false);
+                let star = if dirty { "*" } else { "" };
+                let base = self
+                    .tab_leaf(index)
+                    .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
+                    .unwrap_or_else(|| SharedString::from("plist"));
+                SharedString::from(format!("{base}{star}"))
+            }
         };
         // Count tabs of the same kind. Number only when ≥2 exist.
         let total = self.tabs.iter().filter(|t| t.kind == tab.kind).count();
@@ -1308,6 +1325,10 @@ impl Shell {
             // Coverage map renders directly from `LoadedBundle`
             // each frame — no line/scroll setup needed.
             TabKind::CoverageMap => {}
+            // Plist editor sets its CodeEditor up on tab open
+            // (via `open_plist_editor_for_artifact`); no
+            // per-paint reseed needed.
+            TabKind::PlistEditor { .. } => {}
         }
     }
 

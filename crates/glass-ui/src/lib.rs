@@ -31,6 +31,7 @@ mod cfg_block;
 mod cfg_render;
 mod coverage_actions;
 mod coverage_view;
+mod plist_editor;
 mod plist_edits;
 mod colour_picker;
 mod context_menu;
@@ -338,6 +339,18 @@ pub struct LoadedBundle {
     /// `(artifact, class_jni)` pair as `smali_classes`. In-memory
     /// only; closing the bundle drops them.
     pub smali_edits: smali_edits::SmaliEditRegistry,
+    /// Source plist artifacts (Info.plist primarily). Keyed by
+    /// the artifact id so the editor can fetch the source
+    /// bytes + archive path it needs to render and later
+    /// commit a replacement. Value is
+    /// `(archive_path, original_bytes)`; the editor decides
+    /// what to do with them.
+    pub plist_sources:
+        Arc<std::collections::HashMap<glass_db::ArtifactId, (String, Vec<u8>)>>,
+    /// Staged plist edits. Lifecycle mirrors `smali_edits`:
+    /// in-memory only, dropped on close, drained by the
+    /// export path.
+    pub plist_edits: plist_edits::PlistEditRegistry,
     /// Live Frida method-trace registry. Sibling of
     /// `smali_edits` — same `(artifact, class_jni)`-style
     /// keying. Populated by the dock when the user starts a
@@ -633,6 +646,10 @@ pub enum LeafKind {
     SectionMap { artifact: glass_db::ArtifactId },
     /// AndroidManifest.xml viewer.
     Manifest,
+    /// iOS plist editor (Info.plist or a framework's plist).
+    /// Carries the artifact id so the editor can persist
+    /// edits against the right plist in a bundle with several.
+    Plist { artifact: glass_db::ArtifactId },
     /// Control-flow graph for the function whose entry is `entry_addr`.
     Cfg {
         artifact: glass_db::ArtifactId,
@@ -786,6 +803,14 @@ impl LoadedBundle {
                 LeafKind::Manifest => Some(LeafId(i)),
                 _ => None,
             }),
+            TS::PlistEditor { artifact, .. } => {
+                self.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                    LeafKind::Plist { artifact: a } if a == artifact => {
+                        Some(LeafId(i))
+                    }
+                    _ => None,
+                })
+            }
             TS::ObjCClass { artifact, class_name, .. } => {
                 self.kinds.iter().enumerate().find_map(|(i, k)| match k {
                     LeafKind::ObjCClass { artifact: a, class_name: n }
@@ -1206,6 +1231,13 @@ pub(crate) enum TabKind {
         artifact: glass_db::ArtifactId,
     },
     Manifest,
+    /// Editable Info.plist (or any other plist found in the
+    /// bundle). Backed by `CodeEditor` over an XML
+    /// representation of the plist; edits stage into the
+    /// bundle's `plist_edits` registry for the export path.
+    PlistEditor {
+        artifact: glass_db::ArtifactId,
+    },
     Cfg {
         artifact: glass_db::ArtifactId,
         entry_addr: u64,
@@ -1268,6 +1300,10 @@ impl TabKind {
                 artifact: artifact.clone(),
             },
             TabKind::Manifest => glass_db::TabState::Manifest,
+            TabKind::PlistEditor { artifact } => glass_db::TabState::PlistEditor {
+                artifact: artifact.clone(),
+                scroll_line: 0,
+            },
             TabKind::Cfg { artifact, entry_addr } => glass_db::TabState::Cfg {
                 artifact: artifact.clone(),
                 entry_addr: *entry_addr,
@@ -1343,6 +1379,9 @@ impl TabKind {
                 artifact: artifact.clone(),
             },
             LeafKind::Manifest => TabKind::Manifest,
+            LeafKind::Plist { artifact } => TabKind::PlistEditor {
+                artifact: artifact.clone(),
+            },
             LeafKind::Cfg { artifact, entry_addr } => TabKind::Cfg {
                 artifact: artifact.clone(),
                 entry_addr: *entry_addr,
