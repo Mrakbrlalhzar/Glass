@@ -375,6 +375,135 @@ impl MosaicLayout {
     }
 }
 
+/// State of the coverage recording lifecycle. Owned by Shell.
+/// Single recording at a time — starting a new one replaces
+/// the previous result.
+#[derive(Default)]
+pub enum CoverageRecordingState {
+    /// No active recording, no prior result.
+    #[default]
+    Idle,
+    /// In-flight: a stalker script is running on the target.
+    /// `script_id` is the live frida ScriptId so the global
+    /// event pump can route the final result back to us.
+    /// `duration_ms` is informational (UI shows a spinner /
+    /// progress hint).
+    Recording {
+        script_id: glass_frida::ScriptId,
+        started_at: std::time::Instant,
+        duration_ms: u64,
+    },
+    /// A finished recording. Used to colour tiles; the next
+    /// Record click replaces this.
+    Loaded(std::sync::Arc<CoverageRecording>),
+    /// Last recording failed. Surfaces in the toolbar; next
+    /// Record click clears it.
+    Failed(String),
+}
+
+/// Result of one Stalker recording, rolled up to function
+/// granularity for the heatmap.
+#[derive(Debug)]
+pub struct CoverageRecording {
+    pub duration_ms: u64,
+    /// `(artifact, function_start_addr) → hits`. Function
+    /// start address is the symbol's `address` (ARM symbols
+    /// use bit 0 as a Thumb marker — Stalker rows report the
+    /// plain address, so the lookup masks bit 0 internally).
+    pub fn_hits: std::collections::HashMap<
+        (glass_db::ArtifactId, u64),
+        u32,
+    >,
+    /// `max(fn_hits.values())` — used as the top of the
+    /// log-scaled heat ramp.
+    pub max_hits: u32,
+    /// Number of raw Stalker rows that didn't resolve to any
+    /// known function. Surfaced in the UI so the user knows
+    /// some coverage is unaccounted for (typically PLT stubs
+    /// or addresses in libraries we don't have a bundle
+    /// artifact for).
+    pub unresolved: u32,
+}
+
+impl CoverageRecording {
+    /// Build a recording from the raw `{module, offset, hits}`
+    /// rows the JS script `send`s back. `bundle.symbol_maps`
+    /// provides the address→function lookup, keyed by the
+    /// artifact whose basename matches the row's module.
+    pub fn from_rows(
+        duration_ms: u64,
+        rows: &[serde_json::Value],
+        bundle: &LoadedBundle,
+    ) -> Self {
+        // Index artifacts by basename so we can match Frida's
+        // module names ("libsqliteX.so") back to bundle
+        // artifact ids regardless of bundle-internal path.
+        let mut by_basename: std::collections::HashMap<&str, glass_db::ArtifactId> =
+            std::collections::HashMap::new();
+        for (aid, label) in bundle.native_artifact_labels.iter() {
+            let basename = label.rsplit('/').next().unwrap_or(label.as_str());
+            by_basename.insert(basename, aid.clone());
+        }
+
+        let mut fn_hits: std::collections::HashMap<
+            (glass_db::ArtifactId, u64),
+            u32,
+        > = std::collections::HashMap::new();
+        let mut unresolved = 0_u32;
+
+        for row in rows {
+            let Some(module) = row.get("module").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(offset_str) = row.get("offset").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(hits) = row.get("hits").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            let hits = hits as u32;
+            let Some(addr) = u64::from_str_radix(
+                offset_str.trim_start_matches("0x"),
+                16,
+            )
+            .ok() else {
+                continue;
+            };
+            let basename = module.rsplit('/').next().unwrap_or(module);
+            let Some(aid) = by_basename.get(basename) else {
+                unresolved = unresolved.saturating_add(hits);
+                continue;
+            };
+            let Some(sm) = bundle.symbol_maps.get(aid) else {
+                unresolved = unresolved.saturating_add(hits);
+                continue;
+            };
+            // ARM Thumb symbols have bit 0 set — Stalker
+            // reports the plain address. Try both forms.
+            let sym = sm
+                .covering(addr)
+                .or_else(|| sm.covering(addr | 1))
+                .or_else(|| sm.at(addr))
+                .or_else(|| sm.at(addr | 1));
+            match sym {
+                Some(s) => {
+                    let key = (aid.clone(), s.address);
+                    *fn_hits.entry(key).or_insert(0) += hits;
+                }
+                None => unresolved = unresolved.saturating_add(hits),
+            }
+        }
+
+        let max_hits = fn_hits.values().copied().max().unwrap_or(0);
+        Self {
+            duration_ms,
+            fn_hits,
+            max_hits,
+            unresolved,
+        }
+    }
+}
+
 /// Build the global mosaic. Each native artifact (in the
 /// chosen ABI) becomes an island with a flat function tile
 /// list. Each DEX artifact becomes an island with a nested
@@ -1154,13 +1283,138 @@ pub fn render_coverage_tab(
         }
     };
 
-    let header = div()
+    // Recording status string + record-button label depend
+    // on the current recording state.
+    let session_attached = shell
+        .debug_dock
+        .as_ref()
+        .and_then(|d| d.session.as_ref())
+        .is_some();
+    let (record_state_text, button_disabled, button_label, button_active) =
+        match &shell.coverage_recording {
+            CoverageRecordingState::Idle => (
+                String::new(),
+                !session_attached,
+                "Record",
+                false,
+            ),
+            CoverageRecordingState::Recording { duration_ms, started_at, .. } => {
+                let elapsed = started_at.elapsed().as_millis() as u64;
+                let remaining = duration_ms.saturating_sub(elapsed);
+                (
+                    format!("recording… {remaining}ms left"),
+                    true,
+                    "Recording…",
+                    true,
+                )
+            }
+            CoverageRecordingState::Loaded(r) => (
+                format!(
+                    "{} function{} touched, peak {} hits ({}ms)",
+                    r.fn_hits.len(),
+                    if r.fn_hits.len() == 1 { "" } else { "s" },
+                    r.max_hits,
+                    r.duration_ms,
+                ),
+                !session_attached,
+                "Re-record",
+                false,
+            ),
+            CoverageRecordingState::Failed(msg) => (
+                format!("recording failed: {msg}"),
+                !session_attached,
+                "Record",
+                false,
+            ),
+        };
+
+    let duration_ms_for_button = shell.coverage_duration_ms;
+    let header_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
         .px_3()
         .py_2()
         .border_b_1()
         .border_color(border)
         .text_color(fg)
-        .child(SharedString::from(header_text));
+        .child(
+            div()
+                .flex_1()
+                .child(SharedString::from(header_text)),
+        )
+        .child(
+            div()
+                .text_color(dim)
+                .text_xs()
+                .child(SharedString::from(record_state_text)),
+        )
+        .children(
+            // Duration presets — three quick-pick buttons.
+            // Each click sets `coverage_duration_ms` so the
+            // next Record uses that value.
+            [1000u64, 2000, 5000].into_iter().map(|preset| {
+                let is_selected = duration_ms_for_button == preset;
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(if is_selected { fg } else { dim })
+                    .bg(if is_selected {
+                        rgb(0x3a3a45)
+                    } else {
+                        rgb(0x222228)
+                    })
+                    .border_1()
+                    .border_color(border)
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(
+                            move |this,
+                                  _ev: &gpui::MouseDownEvent,
+                                  _w,
+                                  cx| {
+                                this.coverage_duration_ms = preset;
+                                cx.notify();
+                            },
+                        ),
+                    )
+                    .child(SharedString::from(format!("{}ms", preset)))
+            }),
+        )
+        .child({
+            let label = SharedString::from(button_label.to_string());
+            let mut btn = div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(rgb(0xffffff))
+                .bg(if button_active {
+                    rgb(0xb04030)
+                } else if button_disabled {
+                    rgb(0x2a2a30)
+                } else {
+                    rgb(0x3a8a4a)
+                })
+                .border_1()
+                .border_color(border)
+                .child(label);
+            if !button_disabled {
+                btn = btn.cursor_pointer().on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(
+                        move |this, _ev: &gpui::MouseDownEvent, _w, cx| {
+                            let d = this.coverage_duration_ms;
+                            this.start_coverage_recording(d, cx);
+                        },
+                    ),
+                );
+            }
+            btn
+        });
+    let header = header_row;
 
     let body: gpui::AnyElement = if any_code {
         render_canvas(shell, bundle, panel, border, dim, fg, cx)
@@ -1194,7 +1448,7 @@ fn render_canvas(
     panel: gpui::Rgba,
     border: gpui::Rgba,
     dim: gpui::Rgba,
-    fg: gpui::Rgba,
+    _fg: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
     // Layout once per bundle, stash on Shell. Key the cache
@@ -1235,6 +1489,16 @@ fn render_canvas(
     }
 
     let camera = shell.coverage_camera.clone();
+
+    // Coverage recording — for native tiles, swap the kind
+    // tint for the hot/cold ramp keyed by (artifact, addr).
+    // DEX tiles can't be coloured this way (Stalker doesn't
+    // see DEX), so they keep their kind tint regardless.
+    let recording: Option<Arc<CoverageRecording>> =
+        match &shell.coverage_recording {
+            CoverageRecordingState::Loaded(r) => Some(r.clone()),
+            _ => None,
+        };
 
     // Project tiles. Empty layout → placeholder text.
     if layout.tiles.is_empty() {
@@ -1358,11 +1622,21 @@ fn render_canvas(
         if s.w < 0.5 || s.h < 0.5 {
             continue;
         }
-        // Tiles carry the island's kind tint so each island
-        // reads as a region of its colour. Native tiles =
-        // warm brown; DEX class tiles = forest green
-        // (handled in the DEX branch below).
-        let bg = ISLAND_BG_NATIVE;
+        // Tiles carry the island's kind tint normally; when
+        // a recording is loaded, native tiles swap to the
+        // hot/cold ramp keyed by (artifact, addr). DEX tiles
+        // can't be coloured this way (Stalker doesn't see
+        // DEX) and keep their tint regardless.
+        let bg = match &recording {
+            Some(r) => {
+                let hits = r
+                    .fn_hits
+                    .get(&(s.artifact.clone(), s.symbol_addr))
+                    .copied();
+                tile_colour(hits, r.max_hits)
+            }
+            None => ISLAND_BG_NATIVE,
+        };
         let label = if s.w >= 60. && s.h >= 14. {
             Some(s.display_name.clone())
         } else {

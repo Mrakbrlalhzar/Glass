@@ -854,6 +854,13 @@ fn spawn_debug_dock_pump(shell: &gpui::Entity<Shell>, cx: &mut App) {
 /// the script belongs to a live trace) or the dock's general
 /// log (for the smoke-test path and one-off scripts).
 fn route_session_event(shell: &mut Shell, ev: glass_frida::SessionEvent) {
+    // Coverage recordings get first dibs — they own a script
+    // id allocated up front. The handler returns
+    // `Some(unused_event)` when it didn't match, so we can
+    // fall through to the rest of the routing.
+    let Some(ev) = shell.route_coverage_event_or_pass(ev) else {
+        return;
+    };
     match ev {
         glass_frida::SessionEvent::ScriptMessage { script_id, payload } => {
             // Look up the script first as a trace; failing

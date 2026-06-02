@@ -29,6 +29,7 @@ mod annotations_pane;
 mod app;
 mod cfg_block;
 mod cfg_render;
+mod coverage_actions;
 mod coverage_view;
 mod colour_picker;
 mod context_menu;
@@ -1461,6 +1462,16 @@ pub(crate) struct Shell {
         String,
         Arc<crate::coverage_view::MosaicLayout>,
     )>,
+    /// Current coverage-recording state. `Idle` after open,
+    /// `Recording` while a Stalker script is in flight,
+    /// `Loaded` once results have come back. Mutually
+    /// exclusive — starting a new recording replaces any
+    /// existing result.
+    pub(crate) coverage_recording: crate::coverage_view::CoverageRecordingState,
+    /// User's last-chosen recording duration in ms.
+    /// Persisted on Shell so the toolbar field doesn't reset
+    /// between recordings.
+    pub(crate) coverage_duration_ms: u64,
     /// Index of the section the user is hovering on the bar — drives the
     /// vertical cursor line and the row highlight in the table.
     pub(crate) hovered_section: Option<usize>,
