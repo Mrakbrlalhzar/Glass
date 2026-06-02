@@ -97,7 +97,14 @@ impl Default for CoverageCamera {
 const BASE_PX_PER_WORLD: f32 = 1.0;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 30.0;
-const ZOOM_STEP: f32 = 1.1;
+/// Per-event multiplicative zoom factor. Was 1.1 — a single
+/// wheel notch felt twice as fast as the rest of the GUI. The
+/// CFG view uses the same constant; this one is local because
+/// the coverage mosaic spans a much wider zoom range (whole
+/// app → single function) and benefits from finer-grained
+/// steps. sqrt(1.1) ≈ 1.0488 → two notches now give back the
+/// old single-notch step.
+const ZOOM_STEP: f32 = 1.0488;
 
 impl CoverageCamera {
     /// World → screen pixels-per-world-unit at the current zoom.
