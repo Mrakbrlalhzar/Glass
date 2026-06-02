@@ -1297,8 +1297,16 @@ impl TabKind {
             },
             // ScriptEditor is ephemeral — doesn't round-trip.
             TabKind::ScriptEditor { .. } => return None,
-            // CoverageMap is a tool view; doesn't persist.
-            TabKind::CoverageMap => return None,
+            // CoverageMap persists; the real camera values
+            // are written by `save_state` which has access to
+            // `Shell::coverage_camera`. This default fires
+            // when `to_state` is called outside that path
+            // (e.g. from `resolve_tab_state` migrations).
+            TabKind::CoverageMap => glass_db::TabState::CoverageMap {
+                pan_x: 0.,
+                pan_y: 0.,
+                zoom: 1.,
+            },
             // SmaliEditor persists as a `SmaliClass` TabState so
             // the schema (which predates the editor) stays
             // compatible. Restored on reopen, the

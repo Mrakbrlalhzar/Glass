@@ -1200,6 +1200,14 @@ fn spawn_loader(shell: &gpui::Entity<Shell>, path: PathBuf, cx: &mut App) {
                 }
                 let bundle = b.clone();
                 shell.restore_state(&bundle);
+                // First-open default: a freshly-loaded bundle
+                // with no persisted state has no open tabs.
+                // Land the user on the coverage map — it's the
+                // most intuitive single-view onboarding for an
+                // unfamiliar app.
+                if shell.tabs.is_empty() {
+                    shell.open_coverage_map(cx);
+                }
                 shell.rebuild_list_state();
                 shell.save_state();
                 // Rebuild the macOS app menu so File → Open Recent

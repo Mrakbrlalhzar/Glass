@@ -394,6 +394,16 @@ impl Shell {
                             zoom: view.zoom(),
                         });
                     }
+                    if matches!(&t.kind, TabKind::CoverageMap) {
+                        // Camera lives on Shell (singleton tab),
+                        // not on the Tab — read directly.
+                        let cam = &self.coverage_camera;
+                        return Some(glass_db::TabState::CoverageMap {
+                            pan_x: cam.pan_x,
+                            pan_y: cam.pan_y,
+                            zoom: cam.zoom,
+                        });
+                    }
                     // Listing / Hex / Smali: capture the scroll
                     // position so reopening returns to where the
                     // user was reading rather than the top.
@@ -525,6 +535,27 @@ impl Shell {
                     *pan_y,
                     *zoom,
                 ));
+                continue;
+            }
+            if let glass_db::TabState::CoverageMap { pan_x, pan_y, zoom } = state
+            {
+                // CoverageMap is a singleton — only push if we
+                // don't already have one (defensive against
+                // corrupt records with two CoverageMap entries).
+                if !self
+                    .tabs
+                    .iter()
+                    .any(|t| matches!(t.kind, TabKind::CoverageMap))
+                {
+                    self.tabs.push(Tab::new(TabKind::CoverageMap));
+                }
+                // Seed the camera. `initialised = true` so the
+                // first paint doesn't fit-to-view over the user's
+                // saved viewport.
+                self.coverage_camera.pan_x = *pan_x;
+                self.coverage_camera.pan_y = *pan_y;
+                self.coverage_camera.zoom = *zoom;
+                self.coverage_camera.initialised = true;
                 continue;
             }
             // Capture both the kind and the persisted scroll

@@ -182,6 +182,17 @@ pub enum TabState {
         pan_y: f32,
         zoom: f32,
     },
+    /// App-global coverage map — one tab per shell. Persists
+    /// the camera so reopening a bundle lands on the same
+    /// zoom + pan position the user left it at. The layout
+    /// itself is rebuilt deterministically at load, so we
+    /// only have to persist the camera; world coordinates
+    /// are stable across reopens of the same bundle.
+    CoverageMap {
+        pan_x: f32,
+        pan_y: f32,
+        zoom: f32,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
