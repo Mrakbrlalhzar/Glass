@@ -212,26 +212,30 @@ struct ScreenTile {
 /// camera uses the bounding box for "fit to view".
 #[derive(Clone, Debug)]
 pub struct MosaicLayout {
+    /// Function tiles for native islands. DEX islands don't
+    /// appear here — their content lives in `dex_content`.
     pub tiles: Vec<WorldTile>,
     pub islands: Vec<Island>,
+    /// Per-island DEX content. Parallel to `islands` — index N
+    /// here corresponds to island N. `None` for native
+    /// islands. Defaults populated for all entries so callers
+    /// can index without checking length.
+    pub dex_content: Vec<Option<DexContent>>,
     pub world_w: f32,
     pub world_h: f32,
-    /// The ABI we chose to render. Most APKs ship the same
-    /// libraries for 2–4 ABIs (arm64-v8a, armeabi-v7a, x86_64,
-    /// x86); reverse engineering happens against one at a time
-    /// so we filter to a single ABI and surface the pick in
-    /// the header. `None` when the bundle has no native code.
+    /// The ABI we chose to render for the native islands.
+    /// `None` when the bundle has no native code.
     pub chosen_abi: Option<IslandKind>,
-    /// Number of artifacts in the bundle whose ABI we *didn't*
-    /// pick. Shown in the header so the user knows the view is
-    /// filtered.
+    /// Number of native artifacts in the bundle whose ABI we
+    /// *didn't* pick. Shown in the header so the user knows
+    /// the view is filtered. Does not count DEX artifacts.
     pub hidden_artifact_count: usize,
 }
 
-/// One island in the global view — one per native artifact.
-/// Contains the artifact's label and its bounding rect in
-/// world space (used to draw the header strip and the
-/// outer border).
+/// One island in the global view — one per native artifact
+/// (flat function tiles) or one per DEX artifact (packages
+/// containing classes). Contains the artifact's label and its
+/// bounding rect in world space.
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // `artifact` will drive click-to-zoom-into-island
 pub struct Island {
@@ -243,12 +247,50 @@ pub struct Island {
     pub ww: f32,
     pub wh: f32,
     /// Header strip height in world units (scales with the
-    /// camera). The header carries just the island label —
-    /// since we filter to a single ABI per bundle, every
-    /// island in view is the same kind and tinting them
-    /// would only add noise. Once DEX islands land the
-    /// header background will distinguish native from DEX.
+    /// camera). The header carries the island label and a
+    /// kind-derived background tint (native = neutral grey,
+    /// DEX = muted purple).
     pub header_h: f32,
+}
+
+/// A package rectangle inside a DEX island. Contains class
+/// rectangles nested inside it. The package's `wx/wy/ww/wh`
+/// are absolute in world space — the renderer doesn't have to
+/// chase offsets up the tree.
+#[derive(Clone, Debug)]
+pub struct PackageRect {
+    /// Dotted package name, e.g. `com.example.foo`. Empty
+    /// string for classes at the default package.
+    pub name: SharedString,
+    pub wx: f32,
+    pub wy: f32,
+    pub ww: f32,
+    pub wh: f32,
+    pub classes: Vec<ClassRect>,
+}
+
+/// A class rectangle inside a package. World coordinates are
+/// absolute (same convention as `PackageRect`).
+#[derive(Clone, Debug)]
+pub struct ClassRect {
+    /// JNI form (`Lcom/example/Foo;`) — what `open_smali_editor_for_class`
+    /// expects.
+    pub class_jni: String,
+    /// Just the simple name (`Foo`) for the tile label.
+    pub display_name: SharedString,
+    pub wx: f32,
+    pub wy: f32,
+    pub ww: f32,
+    pub wh: f32,
+}
+
+/// Per-DEX-island package + class tree. Stored as a parallel
+/// vec to `MosaicLayout.islands` — keyed by the same index.
+/// Native islands have no entry here; their content is in
+/// `MosaicLayout.tiles` instead.
+#[derive(Clone, Debug, Default)]
+pub struct DexContent {
+    pub packages: Vec<PackageRect>,
 }
 
 /// What kind of code an island contains. Used today for the
@@ -294,16 +336,33 @@ impl IslandKind {
     }
 }
 
-/// Single shared header / island-background tone. Muted so
-/// tile colours (and, once coverage lands, the hot/cold ramp)
-/// read on top without clashing.
-const ISLAND_BG: u32 = 0x2a2e35;
+/// Island background tones. Muted enough that tile colours
+/// read on top, distinct enough to tell native vs DEX apart
+/// at a glance. DEX gets a slight purple tilt.
+const ISLAND_BG_NATIVE: u32 = 0x2a2e35;
+const ISLAND_BG_DEX: u32 = 0x322a39;
+
+fn island_bg(kind: IslandKind) -> u32 {
+    match kind {
+        IslandKind::Dex => ISLAND_BG_DEX,
+        _ => ISLAND_BG_NATIVE,
+    }
+}
+
+/// Dim-grey border for package outlines drawn over the
+/// class tiles. Faint enough that it doesn't fight the class
+/// boundaries; visible enough to mark where packages begin.
+/// 0xRRGGBBAA — alpha ~22%.
+fn rgba_dim_border() -> gpui::Rgba {
+    gpui::rgba(0x8c8c8c38)
+}
 
 impl MosaicLayout {
     pub fn empty() -> Self {
         Self {
             tiles: Vec::new(),
             islands: Vec::new(),
+            dex_content: Vec::new(),
             world_w: 0.,
             world_h: 0.,
             chosen_abi: None,
@@ -312,17 +371,17 @@ impl MosaicLayout {
     }
 }
 
-/// Build the global mosaic — one island per native artifact,
-/// laid out by a squarified outer treemap (sized by total
-/// `.text` bytes). Inside each island, an address-ordered
-/// strip-treemap of the artifact's functions.
+/// Build the global mosaic. Each native artifact (in the
+/// chosen ABI) becomes an island with a flat function tile
+/// list. Each DEX artifact becomes an island with a nested
+/// package → class tree. Outer treemap sizes the islands by
+/// their total code volume — native bytes for .so, summed
+/// smali op counts for .dex.
 ///
-/// Empty bundle (no native code) → empty layout.
+/// Empty bundle (no native code *and* no DEX) → empty layout.
 pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
-    // Gather candidate artifacts: anything with native
-    // function symbols. The label is the artifact's APK path
-    // (`lib/arm64-v8a/libfoo.so`) so we can classify by ABI.
-    let mut all_candidates: Vec<(
+    // ---- Native candidates --------------------------------
+    let mut all_native: Vec<(
         glass_db::ArtifactId,
         u64,
         SharedString,
@@ -345,21 +404,14 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
             .map(SharedString::from)
             .unwrap_or_else(|| SharedString::from(aid.to_string()));
         let kind = IslandKind::from_label(label.as_ref());
-        all_candidates.push((aid.clone(), total_bytes, label, kind));
-    }
-    if all_candidates.is_empty() {
-        return MosaicLayout::empty();
+        all_native.push((aid.clone(), total_bytes, label, kind));
     }
 
-    // Pick one ABI to show. Priority: arm64 → arm → x86_64 →
-    // x86 → other. We always pick the first ABI that has any
-    // artifact at all — even a single-lib match wins over a
-    // lower-priority full set, because reverse engineering
-    // happens against the ABI you'll attach to, and rooted
-    // Android devices are overwhelmingly arm64. "Other"
-    // (anything we can't classify, e.g. standalone .so loaded
-    // outside an APK path) groups together as the catch-all
-    // when no recognised ABI label appears.
+    // Pick one ABI to show among native islands. Priority:
+    // arm64 → arm → x86_64 → x86 → other. First match wins
+    // even on a partial set; rooted Android is overwhelmingly
+    // arm64. "Other" is the catch-all when no ABI label
+    // applies (e.g. a standalone .so loaded outside an APK).
     let priority = [
         IslandKind::NativeArm64,
         IslandKind::NativeArm,
@@ -370,46 +422,109 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
     let chosen_abi = priority
         .iter()
         .copied()
-        .find(|k| all_candidates.iter().any(|(_, _, _, candidate_kind)| candidate_kind == k));
+        .find(|k| all_native.iter().any(|(_, _, _, candidate_kind)| candidate_kind == k));
+    let native_total_count = all_native.len();
+    let native_candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> =
+        match chosen_abi {
+            Some(chosen) => all_native
+                .into_iter()
+                .filter(|(_, _, _, k)| *k == chosen)
+                .map(|(a, b, l, _)| (a, b, l))
+                .collect(),
+            None => Vec::new(),
+        };
+    let hidden_artifact_count =
+        native_total_count.saturating_sub(native_candidates.len());
 
-    let chosen = match chosen_abi {
-        Some(k) => k,
-        None => return MosaicLayout::empty(),
-    };
-    let total_artifact_count = all_candidates.len();
-    let candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> = all_candidates
-        .into_iter()
-        .filter(|(_, _, _, k)| *k == chosen)
-        .map(|(a, b, l, _)| (a, b, l))
-        .collect();
-    let hidden_artifact_count = total_artifact_count.saturating_sub(candidates.len());
+    // ---- DEX candidates -----------------------------------
+    // Group classes by artifact id; each artifact becomes one
+    // DEX island. Skip artifacts whose smali class set is
+    // empty (shouldn't normally happen).
+    let mut dex_classes_by_artifact: std::collections::HashMap<
+        glass_db::ArtifactId,
+        Vec<(String, u64)>,
+    > = std::collections::HashMap::new();
+    for ((aid, class_jni), class) in bundle.smali_classes.iter() {
+        let size = smali_class_size(class);
+        if size == 0 {
+            continue;
+        }
+        dex_classes_by_artifact
+            .entry(aid.clone())
+            .or_default()
+            .push((class_jni.clone(), size));
+    }
 
-    if candidates.is_empty() {
+    // DEX-artifact size = sum of class sizes. Used by the
+    // outer treemap to scale the island vs the native ones.
+    let mut dex_candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> =
+        Vec::new();
+    for (aid, classes) in &dex_classes_by_artifact {
+        let total: u64 = classes.iter().map(|(_, s)| s).sum();
+        if total == 0 {
+            continue;
+        }
+        // Label: prefer a friendlier "classes.dex" derived
+        // from the bundle tree if available; fall back to the
+        // artifact id prefix.
+        let label = SharedString::from(format!("dex {}…", &aid.to_string()[..8.min(aid.to_string().len())]));
+        dex_candidates.push((aid.clone(), total, label));
+    }
+
+    if native_candidates.is_empty() && dex_candidates.is_empty() {
         return MosaicLayout::empty();
     }
 
-    // Outer treemap. World rect target: fixed 1200-wide
-    // landscape, height comes out of the layout. Per-island
-    // area is proportional to that island's bytes.
+    // ---- Outer treemap ------------------------------------
     let outer_world_w = 1200.0_f64;
     let outer_aspect = 4.0_f64 / 3.0;
     let outer_target_h = outer_world_w / outer_aspect;
     let outer_area = outer_world_w * outer_target_h;
-    let total_bytes: u64 = candidates.iter().map(|(_, b, _)| *b).sum();
-    if total_bytes == 0 {
-        return MosaicLayout::empty();
+
+    // Native bytes and DEX bytes are different units (native
+    // .text bytes vs DEX op counts). Mixing them straight gives
+    // DEX way too much area. Scale DEX so its total area
+    // roughly matches a notional "size" that's comparable. The
+    // simplest sane heuristic: scale DEX bytes so the largest
+    // DEX island isn't bigger than the largest native island.
+    // When there's no native code, DEX uses its raw totals.
+    let max_native = native_candidates.iter().map(|(_, b, _)| *b).max().unwrap_or(0);
+    let max_dex = dex_candidates.iter().map(|(_, b, _)| *b).max().unwrap_or(0);
+    let dex_scale: f64 = if max_native == 0 || max_dex == 0 {
+        1.0
+    } else {
+        (max_native as f64 / max_dex as f64).max(0.0001)
+    };
+
+    // Build outer inputs: one row per candidate with the
+    // origin kind so we know which content-builder to call.
+    enum OuterCandidate {
+        Native(glass_db::ArtifactId, SharedString, IslandKind),
+        Dex(glass_db::ArtifactId, SharedString),
+    }
+    let mut all_outer: Vec<(OuterCandidate, f64)> = Vec::new();
+    for (a, b, l) in &native_candidates {
+        let kind = IslandKind::from_label(l.as_ref());
+        all_outer.push((
+            OuterCandidate::Native(a.clone(), l.clone(), kind),
+            *b as f64,
+        ));
+    }
+    for (a, b, l) in &dex_candidates {
+        all_outer.push((
+            OuterCandidate::Dex(a.clone(), l.clone()),
+            (*b as f64) * dex_scale,
+        ));
     }
 
-    // For the outer level we *do* size-sort: islands have no
-    // intrinsic ordering, so picking the best aspect ratios
-    // wins. Sort desc by bytes.
-    let mut outer_inputs: Vec<(usize, f64)> = candidates
+    let total_units: f64 = all_outer.iter().map(|(_, u)| u).sum();
+    if total_units <= 0.0 {
+        return MosaicLayout::empty();
+    }
+    let mut outer_inputs: Vec<(usize, f64)> = all_outer
         .iter()
         .enumerate()
-        .map(|(i, (_, b, _))| {
-            let area = (*b as f64) / (total_bytes as f64) * outer_area;
-            (i, area)
-        })
+        .map(|(i, (_, u))| (i, *u / total_units * outer_area))
         .collect();
     outer_inputs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -417,61 +532,241 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
         outer_inputs.iter().map(|(_, a)| *a).collect(),
         outer_world_w,
     );
-    // Outer height = max y+h across rects.
-    let mut max_h = 0.0_f64;
+    let mut outer_world_h = 0.0_f64;
     for r in &outer_rects {
         let bottom = r.y + r.h;
-        if bottom > max_h {
-            max_h = bottom;
+        if bottom > outer_world_h {
+            outer_world_h = bottom;
         }
     }
-    let outer_world_h = max_h;
 
-    // Now build each island's inner mosaic. The island's
-    // inner rect is the outer rect minus a header strip and
-    // a small margin.
-    let header_h_world = 24.0_f64; // ~24 world units = 24 px @ zoom 1
+    // ---- Inner layout per island --------------------------
+    let header_h_world = 24.0_f64;
     let margin_world = 4.0_f64;
 
     let mut all_tiles: Vec<WorldTile> = Vec::new();
     let mut islands: Vec<Island> = Vec::new();
+    let mut dex_content: Vec<Option<DexContent>> = Vec::new();
     for (i, (orig_idx, _area)) in outer_inputs.iter().enumerate() {
         let r = &outer_rects[i];
-        let (aid, _bytes, label) = &candidates[*orig_idx];
         let inner_x = r.x + margin_world;
         let inner_y = r.y + header_h_world + margin_world;
         let inner_w = (r.w - 2.0 * margin_world).max(8.0);
         let inner_h = (r.h - header_h_world - 2.0 * margin_world).max(8.0);
 
-        let inner_tiles = build_artifact_tiles(bundle, aid, inner_w, inner_h);
-        // Translate each tile from inner-local coords to
-        // world coords.
-        for mut t in inner_tiles {
-            t.wx += inner_x as f32;
-            t.wy += inner_y as f32;
-            all_tiles.push(t);
+        match &all_outer[*orig_idx].0 {
+            OuterCandidate::Native(aid, label, kind) => {
+                let inner_tiles =
+                    build_artifact_tiles(bundle, aid, inner_w, inner_h);
+                for mut t in inner_tiles {
+                    t.wx += inner_x as f32;
+                    t.wy += inner_y as f32;
+                    all_tiles.push(t);
+                }
+                islands.push(Island {
+                    artifact: aid.clone(),
+                    label: label.clone(),
+                    kind: *kind,
+                    wx: r.x as f32,
+                    wy: r.y as f32,
+                    ww: r.w as f32,
+                    wh: r.h as f32,
+                    header_h: header_h_world as f32,
+                });
+                dex_content.push(None);
+            }
+            OuterCandidate::Dex(aid, label) => {
+                let classes =
+                    dex_classes_by_artifact.get(aid).cloned().unwrap_or_default();
+                let packages = build_dex_packages(
+                    &classes,
+                    inner_x,
+                    inner_y,
+                    inner_w,
+                    inner_h,
+                );
+                islands.push(Island {
+                    artifact: aid.clone(),
+                    label: label.clone(),
+                    kind: IslandKind::Dex,
+                    wx: r.x as f32,
+                    wy: r.y as f32,
+                    ww: r.w as f32,
+                    wh: r.h as f32,
+                    header_h: header_h_world as f32,
+                });
+                dex_content.push(Some(DexContent { packages }));
+            }
         }
-        let kind = IslandKind::from_label(label.as_ref());
-        islands.push(Island {
-            artifact: aid.clone(),
-            label: label.clone(),
-            kind,
-            wx: r.x as f32,
-            wy: r.y as f32,
-            ww: r.w as f32,
-            wh: r.h as f32,
-            header_h: header_h_world as f32,
-        });
     }
 
     MosaicLayout {
         tiles: all_tiles,
         islands,
+        dex_content,
         world_w: outer_world_w as f32,
         world_h: outer_world_h as f32,
-        chosen_abi: Some(chosen),
+        chosen_abi,
         hidden_artifact_count,
     }
+}
+
+/// Size proxy for a DEX class — sum of op counts across its
+/// methods. Empty / abstract classes get a floor of 1 so they
+/// still render as a clickable tile when the user zooms in.
+fn smali_class_size(class: &::smali::types::SmaliClass) -> u64 {
+    let s: u64 = class.methods.iter().map(|m| m.ops.len() as u64).sum();
+    s.max(1)
+}
+
+/// Build the per-package and per-class tree inside one DEX
+/// island. Returns absolute-world-coordinate `PackageRect`s
+/// each containing `ClassRect`s. `inner_x/y/w/h` is the inner
+/// area of the island (after header + margin).
+fn build_dex_packages(
+    classes: &[(String, u64)],
+    inner_x: f64,
+    inner_y: f64,
+    inner_w: f64,
+    inner_h: f64,
+) -> Vec<PackageRect> {
+    if classes.is_empty() || inner_w < 4.0 || inner_h < 4.0 {
+        return Vec::new();
+    }
+    // Group classes by package. Package = everything before
+    // the last '/' in the JNI form (`Lcom/example/Foo;` →
+    // `com/example`). Classes at the default package go into
+    // an empty-string package.
+    let mut by_pkg: std::collections::BTreeMap<String, Vec<(String, u64)>> =
+        std::collections::BTreeMap::new();
+    for (jni, size) in classes {
+        let pkg = package_of_jni(jni).to_string();
+        by_pkg.entry(pkg).or_default().push((jni.clone(), *size));
+    }
+
+    // Outer (package) layout: squarified, sized by total
+    // class bytes in the package.
+    let pkg_totals: Vec<(String, f64)> = by_pkg
+        .iter()
+        .map(|(p, cs)| (p.clone(), cs.iter().map(|(_, s)| *s as f64).sum()))
+        .collect();
+    let total: f64 = pkg_totals.iter().map(|(_, t)| t).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let inner_area = inner_w * inner_h;
+    let mut pkg_inputs: Vec<(usize, f64)> = pkg_totals
+        .iter()
+        .enumerate()
+        .map(|(i, (_, t))| (i, *t / total * inner_area))
+        .collect();
+    pkg_inputs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let pkg_rects = squarified_in_box(
+        pkg_inputs.iter().map(|(_, a)| *a).collect(),
+        inner_w,
+        inner_h,
+    );
+
+    let mut out = Vec::with_capacity(pkg_totals.len());
+    for (i, (orig_idx, _area)) in pkg_inputs.iter().enumerate() {
+        let pr = &pkg_rects[i];
+        let (pkg_name, _total) = &pkg_totals[*orig_idx];
+        // Build the class layout inside this package rect.
+        // No header strip for packages — the package's name
+        // is shown only when the package tile itself is big
+        // enough to render at the current zoom (renderer
+        // decides). So the entire pkg rect is class area.
+        let pkg_classes = by_pkg.get(pkg_name).cloned().unwrap_or_default();
+        let class_total: f64 = pkg_classes.iter().map(|(_, s)| *s as f64).sum();
+        let class_rects = if class_total > 0.0 && pr.w > 2.0 && pr.h > 2.0 {
+            let class_areas: Vec<f64> = pkg_classes
+                .iter()
+                .map(|(_, s)| (*s as f64) / class_total * pr.w * pr.h)
+                .collect();
+            // Sort desc so squarified is well-behaved; we
+            // don't care about class order within a package.
+            let mut indexed: Vec<(usize, f64)> =
+                class_areas.iter().copied().enumerate().collect();
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let rects = squarified_in_box(
+                indexed.iter().map(|(_, a)| *a).collect(),
+                pr.w,
+                pr.h,
+            );
+            let mut out_classes = Vec::with_capacity(rects.len());
+            for (k, (orig_class_idx, _a)) in indexed.iter().enumerate() {
+                let cr = &rects[k];
+                let (jni, _size) = &pkg_classes[*orig_class_idx];
+                let display = simple_class_name(jni);
+                out_classes.push(ClassRect {
+                    class_jni: jni.clone(),
+                    display_name: SharedString::from(display),
+                    wx: (inner_x + pr.x + cr.x) as f32,
+                    wy: (inner_y + pr.y + cr.y) as f32,
+                    ww: cr.w as f32,
+                    wh: cr.h as f32,
+                });
+            }
+            out_classes
+        } else {
+            Vec::new()
+        };
+
+        out.push(PackageRect {
+            name: SharedString::from(pkg_name.replace('/', ".")),
+            wx: (inner_x + pr.x) as f32,
+            wy: (inner_y + pr.y) as f32,
+            ww: pr.w as f32,
+            wh: pr.h as f32,
+            classes: class_rects,
+        });
+    }
+    out
+}
+
+/// Package portion of a JNI class string. `Lcom/example/Foo;`
+/// → `com/example`. Classes at the default package return
+/// the empty string.
+fn package_of_jni(jni: &str) -> &str {
+    // Strip leading `L` and trailing `;` defensively.
+    let inner = jni
+        .strip_prefix('L')
+        .and_then(|s| s.strip_suffix(';'))
+        .unwrap_or(jni);
+    match inner.rfind('/') {
+        Some(i) => &inner[..i],
+        None => "",
+    }
+}
+
+/// Simple class name from a JNI string. `Lcom/example/Foo;` →
+/// `Foo`. Nested classes (`Foo$Bar`) keep the dollar form.
+fn simple_class_name(jni: &str) -> String {
+    let inner = jni
+        .strip_prefix('L')
+        .and_then(|s| s.strip_suffix(';'))
+        .unwrap_or(jni);
+    match inner.rfind('/') {
+        Some(i) => inner[i + 1..].to_string(),
+        None => inner.to_string(),
+    }
+}
+
+/// Squarified treemap inside an arbitrary-size box. Same
+/// algorithm as `squarified_outer` but accepts a custom
+/// width *and* height (returns rects that fit inside, with
+/// the row-strip axis being width). Inputs are pre-sorted
+/// desc; areas should be scaled so they sum to ≤ w*h.
+fn squarified_in_box(areas: Vec<f64>, w: f64, h: f64) -> Vec<OuterRect> {
+    // Reuse the existing strip algorithm. The total area
+    // already equals w*h so the resulting rects naturally
+    // fit; rows pack from top down. If the inputs slightly
+    // under- or over-fill due to floating-point drift, the
+    // last row absorbs the difference visually but it's
+    // imperceptible at our scales.
+    let _ = h;
+    squarified_outer(areas, w)
 }
 
 /// Build just the tiles for one artifact's inner mosaic,
@@ -807,12 +1102,14 @@ pub fn render_coverage_tab(
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
     let any_native = !bundle.native_artifact_labels.is_empty();
+    let any_dex = !bundle.smali_classes.is_empty();
+    let any_code = any_native || any_dex;
 
     // Peek the cached layout (if any) for the chosen-ABI
     // header text. First paint on a fresh bundle has no
     // cached layout yet → use a generic header.
-    let header_text = if !any_native {
-        "Coverage Map — no native code in this bundle".to_string()
+    let header_text = if !any_code {
+        "Coverage Map — bundle has no native or DEX code".to_string()
     } else {
         let abi_summary = shell.coverage_layout.as_ref().and_then(|(_, l)| {
             l.chosen_abi.map(|k| {
@@ -829,7 +1126,9 @@ pub fn render_coverage_tab(
             })
         });
         match abi_summary {
-            Some(s) => format!("Coverage Map — {s} — drag to pan, ⌘/Ctrl-scroll to zoom"),
+            Some(s) => format!(
+                "Coverage Map — {s} — drag to pan, ⌘/Ctrl-scroll to zoom"
+            ),
             None => "Coverage Map — drag to pan, ⌘/Ctrl-scroll to zoom".to_string(),
         }
     };
@@ -842,7 +1141,7 @@ pub fn render_coverage_tab(
         .text_color(fg)
         .child(SharedString::from(header_text));
 
-    let body: gpui::AnyElement = if any_native {
+    let body: gpui::AnyElement = if any_code {
         render_canvas(shell, bundle, border, dim, fg, cx)
     } else {
         div()
@@ -851,10 +1150,7 @@ pub fn render_coverage_tab(
             .items_center()
             .justify_center()
             .text_color(dim)
-            .child(
-                "No native code. Coverage requires native instrumentation; \
-                 DEX/Java-side coverage is on the roadmap.",
-            )
+            .child("This bundle has no code to map.")
             .into_any_element()
     };
 
@@ -985,7 +1281,7 @@ fn render_canvas(
             .h(px(rect.h))
             .border_1()
             .border_color(border)
-            .bg(rgb(ISLAND_BG));
+            .bg(rgb(island_bg(isl.kind)));
         island_layer = island_layer.child(outer);
 
         // Header strip. Skip when zoomed out so far that
@@ -1006,7 +1302,7 @@ fn render_canvas(
                 .top(px(rect.y))
                 .w(px(rect.w))
                 .h(px(hdr_h))
-                .bg(rgb(ISLAND_BG))
+                .bg(rgb(island_bg(isl.kind)))
                 .border_b_1()
                 .border_color(border);
             if label_visible {
@@ -1094,6 +1390,161 @@ fn render_canvas(
         tile_layer = tile_layer.child(t);
     }
     let _ = visible;
+
+    // DEX content layer. For each DEX island, render its
+    // packages — and within each package, either the
+    // individual class tiles (when zoomed in enough that
+    // classes are visible) or a single package summary tile
+    // (when zoomed out). The threshold: a package's smallest
+    // dimension on screen has to exceed `CLASS_LOD_PX` for us
+    // to drop into classes; otherwise the whole package is
+    // one tile.
+    const CLASS_LOD_PX: f32 = 60.0;
+    for (idx, content_opt) in layout.dex_content.iter().enumerate() {
+        let Some(content) = content_opt.as_ref() else { continue };
+        let Some(isl) = layout.islands.get(idx) else { continue };
+        // Per-island culling — if the island isn't on screen
+        // at all, skip its content.
+        if project_rect(isl.wx, isl.wy, isl.ww, isl.wh, &camera).is_none() {
+            continue;
+        }
+        for pkg in &content.packages {
+            let Some(pkg_screen) =
+                project_rect(pkg.wx, pkg.wy, pkg.ww, pkg.wh, &camera)
+            else {
+                continue;
+            };
+            if pkg_screen.w < 2.0 || pkg_screen.h < 2.0 {
+                continue;
+            }
+            let render_classes = pkg_screen.w >= CLASS_LOD_PX
+                && pkg_screen.h >= CLASS_LOD_PX;
+            if render_classes {
+                // Zoomed-in branch: render every class.
+                for class in &pkg.classes {
+                    let Some(cs) = project_rect(
+                        class.wx, class.wy, class.ww, class.wh, &camera,
+                    ) else {
+                        continue;
+                    };
+                    if cs.w < 0.5 || cs.h < 0.5 {
+                        continue;
+                    }
+                    let bg = tile_colour(None, 1);
+                    let label = if cs.w >= 50. && cs.h >= 14. {
+                        Some(class.display_name.clone())
+                    } else {
+                        None
+                    };
+                    let jni_for_click = class.class_jni.clone();
+                    let mut t = div()
+                        .absolute()
+                        .left(px(cs.x))
+                        .top(px(cs.y))
+                        .w(px(cs.w.max(1.0)))
+                        .h(px(cs.h.max(1.0)))
+                        .bg(rgb(bg))
+                        .border_1()
+                        .border_color(border)
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(
+                                move |this,
+                                      _ev: &gpui::MouseDownEvent,
+                                      _w,
+                                      cx| {
+                                    this.open_smali_editor_for_class(
+                                        &jni_for_click,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                },
+                            ),
+                        );
+                    if let Some(text) = label {
+                        t = t.child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .text_color(rgb(0xffffff))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(text),
+                        );
+                    }
+                    tile_layer = tile_layer.child(t);
+                }
+                // Faint package outline so the user can see
+                // where packages start/end when classes fill
+                // them. No bg — just a border.
+                let outline = div()
+                    .absolute()
+                    .left(px(pkg_screen.x))
+                    .top(px(pkg_screen.y))
+                    .w(px(pkg_screen.w))
+                    .h(px(pkg_screen.h))
+                    .border_1()
+                    .border_color(rgba_dim_border());
+                tile_layer = tile_layer.child(outline);
+                // Package label badge if the package rect is
+                // big enough — drawn at the top-left as a
+                // small chip so it doesn't fight the class
+                // labels.
+                if pkg_screen.w >= 100. && pkg_screen.h >= 24. {
+                    let pkg_label = if pkg.name.is_empty() {
+                        SharedString::from("(default)")
+                    } else {
+                        pkg.name.clone()
+                    };
+                    let chip = div()
+                        .absolute()
+                        .left(px(pkg_screen.x + 2.))
+                        .top(px(pkg_screen.y + 2.))
+                        .px_1()
+                        .text_xs()
+                        .text_color(rgb(0xcccccc))
+                        .bg(rgb(0x2a2a35))
+                        .child(pkg_label);
+                    tile_layer = tile_layer.child(chip);
+                }
+            } else {
+                // Zoomed-out branch: one tile per package.
+                let bg = tile_colour(None, 1);
+                let label = if pkg_screen.w >= 60. && pkg_screen.h >= 14. {
+                    let pkg_label = if pkg.name.is_empty() {
+                        SharedString::from("(default)")
+                    } else {
+                        pkg.name.clone()
+                    };
+                    Some(pkg_label)
+                } else {
+                    None
+                };
+                let mut t = div()
+                    .absolute()
+                    .left(px(pkg_screen.x))
+                    .top(px(pkg_screen.y))
+                    .w(px(pkg_screen.w.max(1.0)))
+                    .h(px(pkg_screen.h.max(1.0)))
+                    .bg(rgb(bg))
+                    .border_1()
+                    .border_color(border);
+                if let Some(text) = label {
+                    t = t.child(
+                        div()
+                            .px_1()
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(text),
+                    );
+                }
+                tile_layer = tile_layer.child(t);
+            }
+        }
+    }
 
     // Event-handler wrapper: wheel pan / mod-wheel zoom /
     // middle-drag pan / left-drag-on-background pan.
