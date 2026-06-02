@@ -119,25 +119,53 @@ const COVERAGE_BODY: &str = r#"
 
   // Resolve threads to follow.
   //
-  //   * Explicit list: follow exactly those.
-  //   * Otherwise: follow the target's main thread
-  //     (Linux/Android: main TID == pid). Following every
-  //     thread we enumerate instruments frida-core's own
-  //     worker pool and the kernel's binder threads —
-  //     instrumenting everything blocks the script's event
-  //     loop so `setTimeout` never fires.
+  //   * Explicit list (TIDS_ARG non-empty): follow exactly
+  //     those. Filter out the script's own thread; Stalker
+  //     on it would capture frida-core internals only and
+  //     risks deadlocking the event loop.
   //
-  // Either way we filter out the script's own thread; Stalker
-  // on it captures frida-core internals only and risks
-  // deadlocking the event loop.
+  //   * Default: follow the target's main thread plus a
+  //     short list of "app worker" threads — NDK render
+  //     loops live on `RenderThread` not main, so following
+  //     only main misses them. We skip GC/JIT/binder/HW
+  //     worker threads since they're system noise; and cap
+  //     the total at MAX_FOLLOW so a process with hundreds
+  //     of threads doesn't deadlock the JS event loop the
+  //     way "follow everything" did in earlier testing.
   const myTid = Process.getCurrentThreadId();
+  const MAX_FOLLOW = 8;
+  // Name patterns we consider "user-relevant" worker
+  // threads. The main thread (TID == pid) is always
+  // included regardless of name.
+  const FOLLOW_NAME_PATTERNS = [
+    /^RenderThread$/,
+    /^GLThread/,
+    /^Thread-\d+$/,
+    /^pool-/,
+    /^OkHttp/,
+    /^kotlinx\.coroutines/,
+  ];
   let followTids;
+  let candidateThreadNames = [];
   if (TIDS_ARG.length > 0) {
     followTids = TIDS_ARG.filter(function (t) { return t !== myTid; });
   } else {
     const mainTid = Process.id;
-    followTids = (mainTid !== myTid) ? [mainTid] : [];
+    const picked = [];
+    if (mainTid !== myTid) picked.push(mainTid);
+    Process.enumerateThreads().forEach(function (t) {
+      candidateThreadNames.push({ id: t.id, name: t.name, state: t.state });
+      if (picked.length >= MAX_FOLLOW) return;
+      if (t.id === myTid || t.id === mainTid) return;
+      if (FOLLOW_NAME_PATTERNS.some(function (re) { return re.test(t.name); })) {
+        picked.push(t.id);
+      }
+    });
+    followTids = picked;
   }
+  // followTids is what we actually Stalker.follow on. The
+  // candidateThreadNames list is shipped in the init message
+  // for diagnostics — useful when "0 hits" is the result.
 
   const transform = function (iterator) {
     const first = iterator.next();
@@ -179,6 +207,7 @@ const COVERAGE_BODY: &str = r#"
     followed_tids: followedActually,
     errors: followErrors,
     modules: ranges.map(function (r) { return r.name; }),
+    candidate_threads: candidateThreadNames,
   });
 
   setTimeout(function () {

@@ -177,15 +177,19 @@ impl Shell {
                             CoverageRecordingState::Loaded(Arc::new(
                                 recording,
                             ));
-                        if let Some(session) = self
-                            .debug_dock
-                            .as_ref()
-                            .and_then(|d| d.session.clone())
-                        {
-                            std::thread::spawn(move || {
-                                let _ = session.unload_script(active_id);
-                            });
-                        }
+                        // No script-unload here. Spawning a
+                        // detached `std::thread` to call
+                        // `unload_script` from outside the
+                        // gpui async runtime was racy — the
+                        // script's `setTimeout` callback can
+                        // still be unwinding inside frida-
+                        // core's main loop when we yank the
+                        // script out. The script has already
+                        // done its work (Stalker.unfollow +
+                        // flush + send), so leaving it loaded
+                        // is at worst a small leak that the
+                        // next `start_coverage_recording`
+                        // cleans up explicitly.
                         None
                     }
                     _ => None,
