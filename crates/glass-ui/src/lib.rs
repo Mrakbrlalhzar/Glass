@@ -1462,6 +1462,13 @@ pub(crate) struct Shell {
         String,
         Arc<crate::coverage_view::MosaicLayout>,
     )>,
+    /// Cache key of the layout currently being built on a
+    /// background task. Used to avoid kicking off multiple
+    /// concurrent builds across rapid repaints — the render
+    /// path checks this before spawning. Cleared once the
+    /// build finishes (success or failure) and the cache is
+    /// written.
+    pub(crate) coverage_layout_building: Option<String>,
     /// Current coverage-recording state. `Idle` after open,
     /// `Recording` while a Stalker script is in flight,
     /// `Loaded` once results have come back. Mutually

@@ -1448,7 +1448,7 @@ fn render_canvas(
     panel: gpui::Rgba,
     border: gpui::Rgba,
     dim: gpui::Rgba,
-    _fg: gpui::Rgba,
+    fg: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> gpui::AnyElement {
     // Layout once per bundle, stash on Shell. Key the cache
@@ -1459,14 +1459,91 @@ fn render_canvas(
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_else(|| bundle.display_label.clone());
-    let needs_relayout = shell
+
+    // The layout build can be expensive (squarified treemap
+    // over thousands of native symbols + DEX class trees), so
+    // we run it on a background task and show a progress
+    // placeholder until the result lands. The render path
+    // never blocks.
+    let have_layout = shell
         .coverage_layout
         .as_ref()
-        .map(|(k, _)| k != &cache_key)
-        .unwrap_or(true);
-    if needs_relayout {
-        let layout = build_mosaic_global(&bundle);
-        shell.coverage_layout = Some((cache_key, Arc::new(layout)));
+        .map(|(k, _)| k == &cache_key)
+        .unwrap_or(false);
+    if !have_layout {
+        let already_building = shell
+            .coverage_layout_building
+            .as_ref()
+            .map(|k| k == &cache_key)
+            .unwrap_or(false);
+        if !already_building {
+            shell.coverage_layout_building = Some(cache_key.clone());
+            let bundle_for_build = bundle.clone();
+            let key_for_build = cache_key.clone();
+            cx.spawn(async move |this, cx| {
+                let layout = cx
+                    .background_executor()
+                    .spawn(async move {
+                        build_mosaic_global(&bundle_for_build)
+                    })
+                    .await;
+                let _ = this.update(cx, |shell, cx| {
+                    // Only commit the result if the key still
+                    // matches — guards against a bundle swap
+                    // mid-build.
+                    if shell.coverage_layout_building.as_deref()
+                        == Some(key_for_build.as_str())
+                    {
+                        shell.coverage_layout =
+                            Some((key_for_build.clone(), Arc::new(layout)));
+                        shell.coverage_layout_building = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        // First-frame: nothing to draw yet. Show a centred
+        // progress placeholder; the next frame after the
+        // background task finishes will have the layout.
+        return div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .flex_col()
+            .text_color(dim)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(fg)
+                    .child(SharedString::from("Building coverage map…")),
+            )
+            .child(
+                // Indeterminate-style bar: 25%-wide fill that
+                // doesn't animate. Matches the disassembler's
+                // "no total yet" treatment in render_progress.
+                div()
+                    .w(px(360.))
+                    .h(px(6.))
+                    .bg(panel)
+                    .border_1()
+                    .border_color(border)
+                    .rounded_sm()
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .h_full()
+                            .bg(rgb(0x6a8eff))
+                            .rounded_sm()
+                            .w(gpui::relative(0.25)),
+                    ),
+            )
+            .into_any_element();
     }
     let layout = shell
         .coverage_layout

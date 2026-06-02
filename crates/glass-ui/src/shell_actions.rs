@@ -63,6 +63,7 @@ impl Shell {
             section_bar_bounds: Bounds::default(),
             coverage_camera: crate::coverage_view::CoverageCamera::default(),
             coverage_layout: None,
+            coverage_layout_building: None,
             coverage_recording: crate::coverage_view::CoverageRecordingState::Idle,
             coverage_duration_ms: 2000,
             hovered_section: None,

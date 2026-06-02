@@ -46,6 +46,56 @@ pub fn render_two_pane(
         // scripts panel gets its natural height).
         let scripts_panel_el =
             crate::scripts_panel::render_panel(shell, panel, border, fg, dim, accent, cx);
+
+        // Top-of-navigator "Coverage Map" entry. Always
+        // visible (whether or not the tab is currently open);
+        // clicking it opens or focuses the singleton tab.
+        // Lit when the coverage map is the active tab.
+        let coverage_active = shell
+            .active_tab
+            .and_then(|i| shell.tabs.get(i))
+            .map(|t| matches!(t.kind, crate::TabKind::CoverageMap))
+            .unwrap_or(false);
+        let coverage_bg = if coverage_active { accent } else { panel };
+        let coverage_fg = if coverage_active {
+            crate::theme::current().shell.text_bright.rgba()
+        } else {
+            fg
+        };
+        let coverage_handle = cx.entity().downgrade();
+        let coverage_row = div()
+            .h(px(22.))
+            .w_full()
+            .pl(px(8.))
+            .pr_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .bg(coverage_bg)
+            .text_color(coverage_fg)
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div().w(px(14.)).h(px(14.)).flex_shrink_0().child(
+                    gpui::svg()
+                        .path(SharedString::from("icons/section-map.svg"))
+                        .size_full()
+                        .text_color(coverage_fg),
+                ),
+            )
+            .child(SharedString::from("Coverage Map"))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                move |_ev, _w, cx: &mut App| {
+                    let Some(entity) = coverage_handle.upgrade() else { return };
+                    cx.update_entity(&entity, |shell, cx| {
+                        shell.open_coverage_map(cx);
+                    });
+                },
+            );
+
         let left = div()
             .w(shell.left_pane_width)
             .h_full()
@@ -56,6 +106,7 @@ pub fn render_two_pane(
             .bg(panel)
             .child(
                 div().size_full().flex().flex_col()
+                .child(coverage_row)
                 .child(
                 list(shell.list_state.clone(), {
                     let rows = rows.clone();

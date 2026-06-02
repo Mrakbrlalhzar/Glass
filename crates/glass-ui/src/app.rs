@@ -18,7 +18,7 @@ use gpui_platform::application;
 
 use crate::loader::load_bundle_blocking;
 use crate::{
-    About, CloseFile, CloseWindow, Copy, NewWindow, OpenCoverageMap, OpenFile, OpenRecent0,
+    About, CloseFile, CloseWindow, Copy, NewWindow, OpenFile, OpenRecent0,
     OpenRecent1, OpenRecent2, OpenRecent3, OpenRecent4, OpenRecent5, OpenRecent6, OpenRecent7,
     OpenRecent8, OpenRecent9, PaletteActivate, PaletteClose, PaletteDown, PaletteUp, Progress,
     Quit, Shell, ShellState, Theme0, Theme1, Theme2, Theme3, Theme4, Theme5, Theme6, Theme7,
@@ -401,7 +401,6 @@ fn set_app_menus(cx: &mut App, db: Option<&glass_db::Database>) {
         }),
         gpui::Menu::new("View").items([
             gpui::MenuItem::action("Search…", TogglePalette),
-            gpui::MenuItem::action("Coverage Map", OpenCoverageMap),
             gpui::MenuItem::separator(),
             gpui::MenuItem::submenu(
                 gpui::Menu::new("Theme").items(build_theme_items()),
