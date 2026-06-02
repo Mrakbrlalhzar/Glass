@@ -216,6 +216,16 @@ pub struct MosaicLayout {
     pub islands: Vec<Island>,
     pub world_w: f32,
     pub world_h: f32,
+    /// The ABI we chose to render. Most APKs ship the same
+    /// libraries for 2–4 ABIs (arm64-v8a, armeabi-v7a, x86_64,
+    /// x86); reverse engineering happens against one at a time
+    /// so we filter to a single ABI and surface the pick in
+    /// the header. `None` when the bundle has no native code.
+    pub chosen_abi: Option<IslandKind>,
+    /// Number of artifacts in the bundle whose ABI we *didn't*
+    /// pick. Shown in the header so the user knows the view is
+    /// filtered.
+    pub hidden_artifact_count: usize,
 }
 
 /// One island in the global view — one per native artifact.
@@ -302,6 +312,8 @@ impl MosaicLayout {
             islands: Vec::new(),
             world_w: 0.,
             world_h: 0.,
+            chosen_abi: None,
+            hidden_artifact_count: 0,
         }
     }
 }
@@ -315,10 +327,13 @@ impl MosaicLayout {
 pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
     // Gather candidate artifacts: anything with native
     // function symbols. The label is the artifact's APK path
-    // (`lib/arm64-v8a/libfoo.so`) so the user can tell ABIs
-    // apart.
-    let mut candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> =
-        Vec::new();
+    // (`lib/arm64-v8a/libfoo.so`) so we can classify by ABI.
+    let mut all_candidates: Vec<(
+        glass_db::ArtifactId,
+        u64,
+        SharedString,
+        IslandKind,
+    )> = Vec::new();
     for (aid, sm) in bundle.symbol_maps.iter() {
         let total_bytes: u64 = sm
             .iter()
@@ -335,8 +350,46 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
             .cloned()
             .map(SharedString::from)
             .unwrap_or_else(|| SharedString::from(aid.to_string()));
-        candidates.push((aid.clone(), total_bytes, label));
+        let kind = IslandKind::from_label(label.as_ref());
+        all_candidates.push((aid.clone(), total_bytes, label, kind));
     }
+    if all_candidates.is_empty() {
+        return MosaicLayout::empty();
+    }
+
+    // Pick one ABI to show. Priority: arm64 → arm → x86_64 →
+    // x86 → other. We always pick the first ABI that has any
+    // artifact at all — even a single-lib match wins over a
+    // lower-priority full set, because reverse engineering
+    // happens against the ABI you'll attach to, and rooted
+    // Android devices are overwhelmingly arm64. "Other"
+    // (anything we can't classify, e.g. standalone .so loaded
+    // outside an APK path) groups together as the catch-all
+    // when no recognised ABI label appears.
+    let priority = [
+        IslandKind::NativeArm64,
+        IslandKind::NativeArm,
+        IslandKind::NativeX86_64,
+        IslandKind::NativeX86,
+        IslandKind::NativeOther,
+    ];
+    let chosen_abi = priority
+        .iter()
+        .copied()
+        .find(|k| all_candidates.iter().any(|(_, _, _, candidate_kind)| candidate_kind == k));
+
+    let chosen = match chosen_abi {
+        Some(k) => k,
+        None => return MosaicLayout::empty(),
+    };
+    let total_artifact_count = all_candidates.len();
+    let candidates: Vec<(glass_db::ArtifactId, u64, SharedString)> = all_candidates
+        .into_iter()
+        .filter(|(_, _, _, k)| *k == chosen)
+        .map(|(a, b, l, _)| (a, b, l))
+        .collect();
+    let hidden_artifact_count = total_artifact_count.saturating_sub(candidates.len());
+
     if candidates.is_empty() {
         return MosaicLayout::empty();
     }
@@ -422,6 +475,8 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
         islands,
         world_w: outer_world_w as f32,
         world_h: outer_world_h as f32,
+        chosen_abi: Some(chosen),
+        hidden_artifact_count,
     }
 }
 
@@ -759,10 +814,30 @@ pub fn render_coverage_tab(
 ) -> gpui::AnyElement {
     let any_native = !bundle.native_artifact_labels.is_empty();
 
-    let header_text = if any_native {
-        "Coverage Map — drag to pan, ⌘/Ctrl-scroll to zoom"
+    // Peek the cached layout (if any) for the chosen-ABI
+    // header text. First paint on a fresh bundle has no
+    // cached layout yet → use a generic header.
+    let header_text = if !any_native {
+        "Coverage Map — no native code in this bundle".to_string()
     } else {
-        "Coverage Map — no native code in this bundle"
+        let abi_summary = shell.coverage_layout.as_ref().and_then(|(_, l)| {
+            l.chosen_abi.map(|k| {
+                if l.hidden_artifact_count > 0 {
+                    format!(
+                        "ABI: {} (hiding {} other-ABI artifact{})",
+                        k.short_label(),
+                        l.hidden_artifact_count,
+                        if l.hidden_artifact_count == 1 { "" } else { "s" },
+                    )
+                } else {
+                    format!("ABI: {}", k.short_label())
+                }
+            })
+        });
+        match abi_summary {
+            Some(s) => format!("Coverage Map — {s} — drag to pan, ⌘/Ctrl-scroll to zoom"),
+            None => "Coverage Map — drag to pan, ⌘/Ctrl-scroll to zoom".to_string(),
+        }
     };
 
     let header = div()
@@ -771,7 +846,7 @@ pub fn render_coverage_tab(
         .border_b_1()
         .border_color(border)
         .text_color(fg)
-        .child(SharedString::from(header_text.to_string()));
+        .child(SharedString::from(header_text));
 
     let body: gpui::AnyElement = if any_native {
         render_canvas(shell, bundle, border, dim, fg, cx)
