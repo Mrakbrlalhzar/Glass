@@ -831,18 +831,25 @@ fn spawn_debug_dock_pump(shell: &gpui::Entity<Shell>, cx: &mut App) {
                         .as_ref()
                         .and_then(|d| d.session.clone())
                 });
-            let Some(session) = session_opt else {
-                continue;
-            };
-            let events = session.poll_events();
-            if events.is_empty() {
-                continue;
-            }
+            let events = session_opt
+                .as_ref()
+                .map(|s| s.poll_events())
+                .unwrap_or_default();
+            // Tick the coverage watchdog on every pump cycle
+            // (regardless of session presence or event count)
+            // so a recording stuck waiting for results that
+            // never arrive — e.g. the target crashed under
+            // Stalker before delivering its final `send` —
+            // surfaces as Failed instead of spinning forever.
             cx.update_entity(&entity, |shell, cx| {
+                let had_events = !events.is_empty();
                 for ev in events {
                     route_session_event(shell, ev);
                 }
-                cx.notify();
+                let watchdog_fired = shell.coverage_watchdog_tick();
+                if had_events || watchdog_fired {
+                    cx.notify();
+                }
             });
         }
     })

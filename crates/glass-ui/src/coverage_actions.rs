@@ -110,8 +110,13 @@ impl Shell {
             CoverageRecordingState::Recording { script_id, .. } => *script_id,
             _ => return Some(ev),
         };
-        // Match-by-script-id without consuming `ev` first, so
-        // we can hand it back when it isn't ours.
+        // Three classes of event matter to an in-flight recording:
+        //   * ScriptMessage with our script_id  → init / result
+        //   * ScriptError with our script_id    → script blew up
+        //   * Detached (no script_id)           → session died,
+        //     usually because the target crashed under Stalker.
+        //     Surface as Failed AND pass through so the dock log
+        //     also shows the reason.
         let our_event = match &ev {
             glass_frida::SessionEvent::ScriptMessage { script_id, .. }
             | glass_frida::SessionEvent::ScriptError { script_id, .. }
@@ -122,6 +127,15 @@ impl Shell {
             _ => false,
         };
         if !our_event {
+            if let glass_frida::SessionEvent::Detached { reason } = &ev {
+                // Session-level detach. The Recording is dead
+                // either way; flip state to Failed so the user
+                // isn't stuck looking at "recording…" forever.
+                // Return Some(ev) so the dock log still gets it.
+                self.coverage_recording = CoverageRecordingState::Failed(
+                    format!("session detached: {reason}"),
+                );
+            }
             return Some(ev);
         }
 
@@ -183,9 +197,46 @@ impl Shell {
                 );
                 None
             }
-            // ScriptLog / Detached can't reach here because
-            // they didn't match `our_event` above.
+            // ScriptLog never reaches here (didn't match
+            // `our_event` above); the other variants are
+            // exhaustive.
             _ => Some(ev),
+        }
+    }
+
+    /// Watchdog: if we've been stuck in `Recording` for far
+    /// longer than the requested duration plus a generous
+    /// Stalker-teardown allowance, give up and surface Failed.
+    /// Prevents the spinner-of-doom when the target crashes
+    /// before delivering its final `send`. Called from the
+    /// global event pump on every tick so it doesn't need a
+    /// dedicated timer.
+    pub(crate) fn coverage_watchdog_tick(&mut self) -> bool {
+        let (started_at, duration_ms) = match &self.coverage_recording {
+            CoverageRecordingState::Recording {
+                started_at,
+                duration_ms,
+                ..
+            } => (*started_at, *duration_ms),
+            _ => return false,
+        };
+        // duration + 30s grace. Stalker teardown on a big
+        // module set genuinely takes seconds; the watchdog is
+        // for "the target died" not "Stalker is just slow".
+        let deadline = std::time::Duration::from_millis(
+            duration_ms.saturating_add(30_000),
+        );
+        if started_at.elapsed() >= deadline {
+            self.coverage_recording = CoverageRecordingState::Failed(
+                format!(
+                    "no result within {}ms (target may have crashed under \
+                     Stalker, or the session detached silently)",
+                    duration_ms.saturating_add(30_000)
+                ),
+            );
+            true
+        } else {
+            false
         }
     }
 }
