@@ -183,7 +183,7 @@ impl CodeEditor {
         );
         let snap = buffer.snapshot();
         let row_count = snap.row_count() as usize;
-        let cached_max_line_bytes = compute_max_line_bytes(&snap);
+        let cached_max_line_bytes = compute_max_line_bytes(snap);
         Self {
             buffer,
             list_state: ListState::new(row_count, ListAlignment::Top, px(2000.)),
@@ -264,7 +264,7 @@ impl CodeEditor {
         let old_count = self.cached_row_count;
         let new_count = snap.row_count() as usize;
         self.cached_row_count = new_count;
-        self.cached_max_line_bytes = compute_max_line_bytes(&snap);
+        self.cached_max_line_bytes = compute_max_line_bytes(snap);
         // Splice only the count delta at the *end* of the list,
         // never the whole range. ListState::splice resets the
         // scroll-top whenever the spliced range contains the
@@ -385,12 +385,12 @@ impl CodeEditor {
             if self.cursor == 0 {
                 0
             } else {
-                prev_char_boundary(&snap, self.cursor)
+                prev_char_boundary(snap, self.cursor)
             }
         } else if self.cursor >= len {
             len
         } else {
-            next_char_boundary(&snap, self.cursor)
+            next_char_boundary(snap, self.cursor)
         };
         self.set_cursor(target, shift);
     }
@@ -413,7 +413,7 @@ impl CodeEditor {
             return;
         }
         // Pick min(desired, length of new row in bytes).
-        let row_end_col = row_length_bytes(&snap, new_row);
+        let row_end_col = row_length_bytes(snap, new_row);
         let col = desired.min(row_end_col);
         let target = snap.point_to_offset(rope::Point::new(new_row, col));
         self.set_cursor(target, shift);
@@ -430,7 +430,7 @@ impl CodeEditor {
     fn move_line_end(&mut self, shift: bool) {
         let snap = self.buffer.snapshot();
         let here = snap.offset_to_point(self.cursor);
-        let col = row_length_bytes(&snap, here.row);
+        let col = row_length_bytes(snap, here.row);
         let target = snap.point_to_offset(rope::Point::new(here.row, col));
         self.set_cursor(target, shift);
     }
@@ -515,7 +515,7 @@ impl CodeEditor {
             return;
         }
         let snap = self.buffer.snapshot();
-        let prev = prev_char_boundary(&snap, self.cursor);
+        let prev = prev_char_boundary(snap, self.cursor);
         self.apply_edit(prev..self.cursor, "");
     }
 
@@ -530,7 +530,7 @@ impl CodeEditor {
             return;
         }
         let snap = self.buffer.snapshot();
-        let next = next_char_boundary(&snap, self.cursor);
+        let next = next_char_boundary(snap, self.cursor);
         self.apply_edit(self.cursor..next, "");
     }
 
@@ -734,7 +734,7 @@ impl CodeEditor {
         // Round to nearest glyph rather than floor — feels more
         // natural when the user clicks "between" characters.
         let col = ((text_x / GLYPH_WIDTH) + 0.5) as u32;
-        let row_len = row_length_bytes(&snap, row);
+        let row_len = row_length_bytes(snap, row);
         let col = col.min(row_len);
 
         Some(snap.point_to_offset(rope::Point::new(row, col)))
@@ -892,7 +892,7 @@ impl CodeEditor {
         // Updating cached_max_line_bytes + cached_row_count.
         let snap = self.buffer.snapshot();
         self.cached_row_count = snap.row_count() as usize;
-        self.cached_max_line_bytes = compute_max_line_bytes(&snap);
+        self.cached_max_line_bytes = compute_max_line_bytes(snap);
         self.list_state = ListState::new(
             self.cached_row_count,
             ListAlignment::Top,
@@ -2018,7 +2018,7 @@ fn tokenize_xml_line(text: &str) -> Vec<XmlSpan> {
     // recent emitted span.
     let mut last_end = 0usize;
 
-    let mut push = |spans: &mut Vec<XmlSpan>,
+    let push = |spans: &mut Vec<XmlSpan>,
                     last_end: &mut usize,
                     s: usize,
                     e: usize,

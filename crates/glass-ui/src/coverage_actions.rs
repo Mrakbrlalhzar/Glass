@@ -117,15 +117,12 @@ impl Shell {
         //     usually because the target crashed under Stalker.
         //     Surface as Failed AND pass through so the dock log
         //     also shows the reason.
-        let our_event = match &ev {
+        let our_event = matches!(
+            &ev,
             glass_frida::SessionEvent::ScriptMessage { script_id, .. }
             | glass_frida::SessionEvent::ScriptError { script_id, .. }
-                if *script_id == active_id =>
-            {
-                true
-            }
-            _ => false,
-        };
+                if *script_id == active_id
+        );
         if !our_event {
             if let glass_frida::SessionEvent::Detached { reason } = &ev {
                 // Session-level detach. The Recording is dead

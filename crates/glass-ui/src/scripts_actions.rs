@@ -430,7 +430,7 @@ impl Shell {
             for chunk in snap.as_rope().chunks_in_range(line_start..line_end) {
                 text.push_str(chunk);
             }
-            (row, (off - line_start) as usize, text)
+            (row, off - line_start, text)
         };
 
         // Walk tokens to find which one covers `col_in_row`,
@@ -628,7 +628,7 @@ impl Shell {
         for chunk in snap.as_rope().chunks_in_range(line_start..line_end) {
             text.push_str(chunk);
         }
-        smali_link_target_at_col(&text, (off - line_start) as usize)
+        smali_link_target_at_col(&text, off - line_start)
     }
 
     /// Whether the given row in the buffer text is a class-
