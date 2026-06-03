@@ -23,6 +23,7 @@ smali.workspace = true
 blake3 = { version = "1", features = ["rayon"] }
 parking_lot.workspace = true
 plist.workspace = true
+quick-xml = "0.32"
 gpui.workspace = true
 gpui_platform.workspace = true
 rope.workspace = true

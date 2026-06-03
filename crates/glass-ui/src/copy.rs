@@ -68,9 +68,12 @@ impl Shell {
         match &tab.kind {
             TabKind::Listing { .. } => copy_listing(tab),
             TabKind::Hex { .. } => copy_hex(tab),
-            TabKind::SmaliEditor { .. } => copy_smali(tab),
             TabKind::SectionMap { artifact } => copy_section_map(self, artifact),
-            TabKind::Manifest => copy_manifest(self, tab),
+            // ManifestEditor uses the rope-backed selection like the
+            // other editor tabs — handled below.
+            TabKind::ManifestEditor { .. } => {
+                tab.code_editor.as_ref().and_then(|e| e.selected_text())
+            }
             // CFG and DexCallGraph don't carry a per-node selection
             // state today. TODO: when node-selection lands, plumb it
             // through here.
@@ -191,18 +194,6 @@ fn copy_hex(tab: &crate::Tab) -> Option<String> {
     }
 }
 
-fn copy_smali(tab: &crate::Tab) -> Option<String> {
-    let row_idx = tab.selected_row?;
-    let lines = tab.lines.as_ref()?;
-    let line = lines.get(row_idx)?;
-    let trimmed = line.trim_end();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 fn copy_section_map(shell: &Shell, artifact: &glass_db::ArtifactId) -> Option<String> {
     let idx = shell.hovered_section?;
     let bundle = shell.bundle()?;
@@ -212,25 +203,6 @@ fn copy_section_map(shell: &Shell, artifact: &glass_db::ArtifactId) -> Option<St
         "{}  base=0x{:x}  size=0x{:x}",
         sec.name, sec.address, sec.size
     ))
-}
-
-fn copy_manifest(shell: &Shell, tab: &crate::Tab) -> Option<String> {
-    let row_idx = tab.selected_row?;
-    let bundle = shell.bundle()?;
-    let row = bundle.manifest_rows.get(row_idx)?;
-    let mut s = String::new();
-    for _ in 0..row.depth {
-        s.push_str("  ");
-    }
-    for chunk in row.chunks.iter() {
-        s.push_str(&chunk.text);
-    }
-    let trimmed = s.trim_end();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 #[cfg(test)]

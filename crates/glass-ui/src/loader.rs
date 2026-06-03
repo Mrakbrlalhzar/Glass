@@ -206,21 +206,35 @@ fn snapshot_apk_with_progress(
     > = std::collections::HashMap::new();
 
     // Manifest leaf at the very top — first thing a reverser usually
-    // looks at. Only emit when we actually parsed a manifest.
-    let manifest_rows: Vec<ManifestRow> = match apk.manifest.as_ref() {
-        Some(m) => {
+    // looks at. Only emit when we actually parsed a manifest. We
+    // key the leaf by the manifest's ArtifactId so the editor and
+    // export path can carry per-manifest state in bundles that
+    // ship more than one (split APKs, AABs).
+    let mut manifest_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
+    let manifest_rows: Vec<ManifestRow> = match (apk.manifest.as_ref(), apk.manifest_bytes.as_ref()) {
+        (Some(m), Some(bytes)) => {
+            let manifest_aid = glass_db::ArtifactId::from_bytes(bytes);
+            manifest_sources.insert(
+                manifest_aid.clone(),
+                (apk.manifest_archive_path.clone(), bytes.clone()),
+            );
             let leaf_id = LeafId(bodies.len());
             bodies.push(SharedString::from(""));
             origins.push(SharedString::from("manifest"));
             labels.push(SharedString::from("AndroidManifest.xml"));
-            kinds.push(LeafKind::Manifest);
+            kinds.push(LeafKind::Manifest {
+                artifact: manifest_aid,
+            });
             roots.push(Node::Leaf {
                 label: SharedString::from("AndroidManifest.xml"),
                 leaf_id,
             });
             flatten_manifest(m)
         }
-        None => Vec::new(),
+        _ => Vec::new(),
     };
 
     // Count total classes up-front for a determinate bar.
@@ -421,6 +435,8 @@ fn snapshot_apk_with_progress(
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         plist_sources: Arc::new(plist_sources),
         plist_edits: crate::plist_edits::PlistEditRegistry::new(),
+        manifest_sources: Arc::new(manifest_sources),
+        manifest_edits: crate::manifest_edits::ManifestEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),
@@ -479,6 +495,11 @@ fn snapshot_ipa_with_progress(
     let info_rows = flatten_info_plist(&ipa.info);
     let info_artifact_id = glass_db::ArtifactId::from_bytes(&ipa.info_bytes);
     artifact_ids.push(info_artifact_id.clone());
+    // IPAs don't ship an AndroidManifest.
+    let manifest_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
     let mut plist_sources: std::collections::HashMap<
         glass_db::ArtifactId,
         (String, Vec<u8>),
@@ -829,6 +850,8 @@ fn snapshot_ipa_with_progress(
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         plist_sources: Arc::new(plist_sources),
         plist_edits: crate::plist_edits::PlistEditRegistry::new(),
+        manifest_sources: Arc::new(manifest_sources),
+        manifest_edits: crate::manifest_edits::ManifestEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),
@@ -1010,7 +1033,11 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         .unwrap_or("binary")
         .to_string();
     let aid = glass_db::ArtifactId::from_bytes(&bin.bytes);
-    // Standalone native binary has no plists.
+    // Standalone native binary has no plists and no manifest.
+    let manifest_sources: std::collections::HashMap<
+        glass_db::ArtifactId,
+        (String, Vec<u8>),
+    > = std::collections::HashMap::new();
     let plist_sources: std::collections::HashMap<
         glass_db::ArtifactId,
         (String, Vec<u8>),
@@ -1235,6 +1262,8 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         smali_edits: crate::smali_edits::SmaliEditRegistry::new(),
         plist_sources: Arc::new(plist_sources),
         plist_edits: crate::plist_edits::PlistEditRegistry::new(),
+        manifest_sources: Arc::new(manifest_sources),
+        manifest_edits: crate::manifest_edits::ManifestEditRegistry::new(),
         traces: crate::traces::TraceRegistry::new(),
         hooks: crate::hooks::HookRegistry::new(),
         pending_additions: std::collections::BTreeMap::new(),

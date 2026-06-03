@@ -1119,9 +1119,10 @@ fn spawn_smali_editor_reparse_poll(shell: &gpui::Entity<Shell>, cx: &mut App) {
                 .timer(std::time::Duration::from_millis(250))
                 .await;
             let Some(entity) = weak.upgrade() else { break };
-            let _ = cx.update_entity(&entity, |shell, cx| {
+            cx.update_entity(&entity, |shell, cx| {
                 shell.reparse_idle_smali_editors(cx);
                 shell.reparse_idle_plist_editors(cx);
+                shell.reparse_idle_manifest_editors(cx);
             });
         }
     })

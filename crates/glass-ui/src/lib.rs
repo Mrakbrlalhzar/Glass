@@ -31,6 +31,8 @@ mod cfg_block;
 mod cfg_render;
 mod coverage_actions;
 mod coverage_view;
+mod manifest_editor;
+mod manifest_edits;
 mod plist_editor;
 mod plist_edits;
 mod colour_picker;
@@ -351,6 +353,17 @@ pub struct LoadedBundle {
     /// in-memory only, dropped on close, drained by the
     /// export path.
     pub plist_edits: plist_edits::PlistEditRegistry,
+    /// Source AndroidManifest artifacts. Keyed by the manifest's
+    /// ArtifactId; value is `(archive_path, original_axml_bytes)`
+    /// so the editor can decode at open time and the export path
+    /// can splice the edited bytes back into the right APK entry.
+    /// Empty for non-APK bundles.
+    pub manifest_sources:
+        Arc<std::collections::HashMap<glass_db::ArtifactId, (String, Vec<u8>)>>,
+    /// Staged manifest edits. Lifecycle mirrors `plist_edits`:
+    /// in-memory only, dropped on close, drained by the export
+    /// path.
+    pub manifest_edits: manifest_edits::ManifestEditRegistry,
     /// Live Frida method-trace registry. Sibling of
     /// `smali_edits` — same `(artifact, class_jni)`-style
     /// keying. Populated by the dock when the user starts a
@@ -644,8 +657,11 @@ pub enum LeafKind {
     },
     /// Section map (overview) for a native artifact.
     SectionMap { artifact: glass_db::ArtifactId },
-    /// AndroidManifest.xml viewer.
-    Manifest,
+    /// AndroidManifest.xml editor. Carries the artifact id of the
+    /// manifest (computed by hashing the binary AXML bytes) so the
+    /// editor can persist edits against the right manifest in a
+    /// multi-APK bundle.
+    Manifest { artifact: glass_db::ArtifactId },
     /// iOS plist editor (Info.plist or a framework's plist).
     /// Carries the artifact id so the editor can persist
     /// edits against the right plist in a bundle with several.
@@ -800,9 +816,19 @@ impl LoadedBundle {
                 })
             }
             TS::Manifest => self.kinds.iter().enumerate().find_map(|(i, k)| match k {
-                LeafKind::Manifest => Some(LeafId(i)),
+                // Legacy variant — promote to the first manifest
+                // leaf the bundle exposes.
+                LeafKind::Manifest { .. } => Some(LeafId(i)),
                 _ => None,
             }),
+            TS::ManifestEditor { artifact, .. } => {
+                self.kinds.iter().enumerate().find_map(|(i, k)| match k {
+                    LeafKind::Manifest { artifact: a } if a == artifact => {
+                        Some(LeafId(i))
+                    }
+                    _ => None,
+                })
+            }
             TS::PlistEditor { artifact, .. } => {
                 self.kinds.iter().enumerate().find_map(|(i, k)| match k {
                     LeafKind::Plist { artifact: a } if a == artifact => {
@@ -1230,7 +1256,13 @@ pub(crate) enum TabKind {
     SectionMap {
         artifact: glass_db::ArtifactId,
     },
-    Manifest,
+    /// Editable AndroidManifest.xml. Backed by `CodeEditor` over
+    /// a decoded XML representation of the binary AXML;
+    /// edits stage into the bundle's `manifest_edits` registry
+    /// for the export path.
+    ManifestEditor {
+        artifact: glass_db::ArtifactId,
+    },
     /// Editable Info.plist (or any other plist found in the
     /// bundle). Backed by `CodeEditor` over an XML
     /// representation of the plist; edits stage into the
@@ -1299,7 +1331,10 @@ impl TabKind {
             TabKind::SectionMap { artifact } => glass_db::TabState::SectionMap {
                 artifact: artifact.clone(),
             },
-            TabKind::Manifest => glass_db::TabState::Manifest,
+            TabKind::ManifestEditor { artifact } => glass_db::TabState::ManifestEditor {
+                artifact: artifact.clone(),
+                scroll_line: 0,
+            },
             TabKind::PlistEditor { artifact } => glass_db::TabState::PlistEditor {
                 artifact: artifact.clone(),
                 scroll_line: 0,
@@ -1378,7 +1413,9 @@ impl TabKind {
             LeafKind::SectionMap { artifact } => TabKind::SectionMap {
                 artifact: artifact.clone(),
             },
-            LeafKind::Manifest => TabKind::Manifest,
+            LeafKind::Manifest { artifact } => TabKind::ManifestEditor {
+                artifact: artifact.clone(),
+            },
             LeafKind::Plist { artifact } => TabKind::PlistEditor {
                 artifact: artifact.clone(),
             },
@@ -2083,7 +2120,12 @@ impl Render for Shell {
         // Changes dialog (same as ⌘E).
         let edit_count = self
             .bundle()
-            .map(|b| b.edits.len() + b.smali_edits.len() + b.plist_edits.len())
+            .map(|b| {
+                b.edits.len()
+                    + b.smali_edits.len()
+                    + b.plist_edits.len()
+                    + b.manifest_edits.len()
+            })
             .unwrap_or(0);
         let header = if edit_count > 0 {
             header.child(

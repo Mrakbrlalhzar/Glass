@@ -145,8 +145,15 @@ pub fn export_to_path(bundle: &Bundle, edits: &EditMap, out_path: &Path) -> Resu
     let empty_smali = SmaliEditMap::new();
     let empty_adds: ApkAdditions = std::collections::BTreeMap::new();
     let empty_plist: PlistEditMap = std::collections::BTreeMap::new();
+    let empty_manifest: ManifestEditMap = std::collections::BTreeMap::new();
     export_to_path_full(
-        bundle, edits, &empty_smali, &empty_adds, &empty_plist, out_path,
+        bundle,
+        edits,
+        &empty_smali,
+        &empty_adds,
+        &empty_plist,
+        &empty_manifest,
+        out_path,
     )
 }
 
@@ -164,9 +171,16 @@ pub type ApkAdditions = std::collections::BTreeMap<String, Vec<u8>>;
 /// in. Only meaningful for IPA bundles.
 pub type PlistEditMap = std::collections::BTreeMap<String, Vec<u8>>;
 
+/// Whole-manifest replacements keyed by zip-entry archive path
+/// (`AndroidManifest.xml` for a single-APK bundle). Each value
+/// is the binary-AXML bytes the editor produced, ready to
+/// splice into the APK. Only meaningful for APK bundles.
+pub type ManifestEditMap = std::collections::BTreeMap<String, Vec<u8>>;
+
 /// APK-only convenience: edits + smali edits + additions, no
-/// plist edits. Kept for back-compat with existing call sites;
-/// new IPA-aware callers should use `export_to_path_full`.
+/// plist or manifest edits. Kept for back-compat with existing
+/// call sites; new mobile-aware callers should use
+/// `export_to_path_full`.
 pub fn export_to_path_with_smali(
     bundle: &Bundle,
     edits: &EditMap,
@@ -175,13 +189,22 @@ pub fn export_to_path_with_smali(
     out_path: &Path,
 ) -> Result<()> {
     let empty_plist: PlistEditMap = std::collections::BTreeMap::new();
-    export_to_path_full(bundle, edits, smali_edits, additions, &empty_plist, out_path)
+    let empty_manifest: ManifestEditMap = std::collections::BTreeMap::new();
+    export_to_path_full(
+        bundle,
+        edits,
+        smali_edits,
+        additions,
+        &empty_plist,
+        &empty_manifest,
+        out_path,
+    )
 }
 
 /// Full export entry point — handles every bundle kind and
 /// every edit map. Carry the right set per kind:
 ///   * Native: `edits` only.
-///   * APK: `edits` + `smali_edits` + `additions`.
+///   * APK: `edits` + `smali_edits` + `additions` + `manifest_edits`.
 ///   * IPA: `edits` + `plist_edits`.
 /// Passing the wrong set for a bundle is caller error.
 pub fn export_to_path_full(
@@ -190,12 +213,14 @@ pub fn export_to_path_full(
     smali_edits: &SmaliEditMap,
     additions: &ApkAdditions,
     plist_edits: &PlistEditMap,
+    manifest_edits: &ManifestEditMap,
     out_path: &Path,
 ) -> Result<()> {
     if edits.is_empty()
         && smali_edits.is_empty()
         && additions.is_empty()
         && plist_edits.is_empty()
+        && manifest_edits.is_empty()
     {
         bail!("no edits to export");
     }
@@ -204,8 +229,9 @@ pub fn export_to_path_full(
             if !smali_edits.is_empty()
                 || !additions.is_empty()
                 || !plist_edits.is_empty()
+                || !manifest_edits.is_empty()
             {
-                bail!("native bundle can't carry smali / APK / plist edits");
+                bail!("native bundle can't carry smali / APK / plist / manifest edits");
             }
             export_native_to_path(bundle, edits, out_path)
         }
@@ -213,11 +239,23 @@ pub fn export_to_path_full(
             if !plist_edits.is_empty() {
                 bail!("APK bundle can't carry plist edits");
             }
-            export_apk_to_path(bundle, edits, smali_edits, additions, out_path)
+            export_apk_to_path(
+                bundle,
+                edits,
+                smali_edits,
+                additions,
+                manifest_edits,
+                out_path,
+            )
         }
         BundleKind::Ipa => {
-            if !smali_edits.is_empty() || !additions.is_empty() {
-                bail!("IPA bundle can't carry smali edits or APK additions");
+            if !smali_edits.is_empty()
+                || !additions.is_empty()
+                || !manifest_edits.is_empty()
+            {
+                bail!(
+                    "IPA bundle can't carry smali / APK / manifest edits"
+                );
             }
             export_ipa_to_path(bundle, edits, plist_edits, out_path)
         }
@@ -248,6 +286,7 @@ fn export_apk_to_path(
     edits: &EditMap,
     smali_edits: &SmaliEditMap,
     additions: &ApkAdditions,
+    manifest_edits: &ManifestEditMap,
     out: &Path,
 ) -> Result<()> {
     use smali::android::zip::ApkFile;
@@ -262,6 +301,9 @@ fn export_apk_to_path(
     let mut overrides: Vec<(String, Vec<u8>)> = Vec::new();
     collect_native_overrides(bundle, edits, &mut overrides)?;
     collect_dex_overrides(bundle, smali_edits, &mut overrides)?;
+    for (entry_name, bytes) in manifest_edits {
+        overrides.push((entry_name.clone(), bytes.clone()));
+    }
 
     let mut apk = ApkFile::from_file(&bundle.source_path)
         .map_err(|e| anyhow!("opening APK {}: {e:?}", bundle.source_path.display()))?;

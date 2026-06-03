@@ -31,6 +31,16 @@ pub struct ApkBundle {
     /// broken manifest doesn't block the rest of the bundle from
     /// loading.
     pub manifest: Option<smali::android::binary_xml::AndroidManifest>,
+    /// Raw on-disk bytes of `AndroidManifest.xml` (binary AXML).
+    /// Kept so the editor can decode + re-encode the file in its
+    /// original format — `manifest` alone is a typed DOM that
+    /// loses formatting and any chunk we don't enumerate.
+    /// `None` if the archive had no manifest entry.
+    pub manifest_bytes: Option<Vec<u8>>,
+    /// Archive path of the manifest inside the APK (always
+    /// `AndroidManifest.xml` in practice — kept explicit for
+    /// symmetry with `IpaBundle::info_archive_path`).
+    pub manifest_archive_path: String,
 }
 
 pub struct IpaBundle {
@@ -96,7 +106,9 @@ fn open_apk(path: &Path) -> Result<ApkBundle> {
     let mut dex_files = Vec::new();
     let mut native_libs = Vec::new();
     let mut manifest = None;
+    let mut manifest_bytes: Option<Vec<u8>> = None;
     if let Some(entry) = apk.entry("AndroidManifest.xml") {
+        manifest_bytes = Some(entry.data.clone());
         match smali::android::binary_xml::AndroidManifest::from_apk_entry(entry) {
             Ok(m) => manifest = Some(m),
             Err(e) => tracing::warn!("AndroidManifest.xml parse failed: {e}"),
@@ -136,6 +148,8 @@ fn open_apk(path: &Path) -> Result<ApkBundle> {
         dex_files,
         native_libs,
         manifest,
+        manifest_bytes,
+        manifest_archive_path: "AndroidManifest.xml".to_string(),
     })
 }
 

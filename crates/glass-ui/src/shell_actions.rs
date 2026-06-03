@@ -826,11 +826,7 @@ impl Shell {
                     .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                     .unwrap_or_else(|| SharedString::from("overview"))
             }
-            TabKind::SmaliEditor { class_jni, .. } => self
-                .tab_leaf(index)
-                .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
-                .unwrap_or_else(|| SharedString::from(class_jni.clone())),
-            TabKind::Manifest => self
+            TabKind::ManifestEditor { .. } => self
                 .tab_leaf(index)
                 .and_then(|LeafId(i)| bundle.labels.get(i).cloned())
                 .unwrap_or_else(|| SharedString::from("manifest")),
@@ -1033,17 +1029,9 @@ impl Shell {
         match &tab.kind {
             // SectionMap renders its own widget — no setup here.
             TabKind::SectionMap { .. } => {}
-            // Manifest: rows are precomputed at bundle load. Just
-            // size the scroll state once on first activation.
-            TabKind::Manifest => {
-                let len = bundle.manifest_rows.len();
-                if tab.lines.is_none() {
-                    tab.scroll = ListState::new(len, ListAlignment::Top, px(2000.));
-                    // Reuse `lines` as a "did initial setup" marker —
-                    // empty vec is enough.
-                    tab.lines = Some(Arc::new(Vec::new()));
-                }
-            }
+            // ManifestEditor uses CodeEditor (seeded at open time);
+            // nothing to do here.
+            TabKind::ManifestEditor { .. } => {}
             // Hex: cheap to build (one row per 16 bytes), do it inline
             // on first activation.
             TabKind::Hex { artifact, section } => {
@@ -1318,10 +1306,10 @@ impl Shell {
                     tab.lines = Some(Arc::new(Vec::new()));
                 }
             }
-            // Script + Smali editors: the CodeEditor owns its own
+            // Script editor: the CodeEditor owns its own
             // ListState (one row per line). It's seeded at open
             // time, so there's nothing to do here.
-            TabKind::ScriptEditor { .. } | TabKind::SmaliEditor { .. } => {}
+            TabKind::ScriptEditor { .. } => {}
             // Coverage map renders directly from `LoadedBundle`
             // each frame — no line/scroll setup needed.
             TabKind::CoverageMap => {}
@@ -1704,10 +1692,6 @@ impl Shell {
         let Some(active) = self.active_tab else { return };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
             TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
-            // SmaliEditor tabs also drive the templated editors —
-            // launched via the right-click "Edit in template…"
-            // items in the code editor's context menu.
-            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return;
@@ -2035,10 +2019,6 @@ impl Shell {
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
             TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
-            // Allow opening the templated field editor from a
-            // SmaliEditor tab too (via right-click "Edit field
-            // in template…").
-            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {
             return false;
@@ -2185,9 +2165,6 @@ impl Shell {
         let Some(bundle) = self.bundle() else { return false };
         let Some(active) = self.active_tab else { return false };
         let Some(class_jni) = self.tabs.get(active).and_then(|t| match &t.kind {
-            TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
-            // Right-click "Edit method in template…" in the
-            // code editor.
             TabKind::SmaliEditor { class_jni, .. } => Some(class_jni.clone()),
             _ => None,
         }) else {

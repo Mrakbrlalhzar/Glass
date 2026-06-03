@@ -59,7 +59,7 @@ pub fn icon_path_for_leaf(
         L::Listing { .. } => "icons/listing.svg",
         L::Hex { .. } => "icons/hex.svg",
         L::SectionMap { .. } => "icons/section-map.svg",
-        L::Manifest => "icons/manifest.svg",
+        L::Manifest { .. } => "icons/manifest.svg",
         // No dedicated ObjC icon yet — reuse the smali leaf icon
         // since both represent "class viewer" leaves.
         L::ObjCClass { .. } => "icons/smali.svg",

@@ -538,6 +538,7 @@ impl Shell {
             && bundle.smali_edits.is_empty()
             && bundle.pending_additions.is_empty()
             && bundle.plist_edits.is_empty()
+            && bundle.manifest_edits.is_empty()
         {
             return;
         }
@@ -578,6 +579,18 @@ impl Shell {
                 bundle.plist_sources.get(&e.artifact)
             {
                 plist_edit_map.insert(archive_path.clone(), e.bytes.clone());
+            }
+        }
+        // Manifest edits: same shape as plist edits — archive_path
+        // → serialised binary AXML bytes — resolved through
+        // `manifest_sources`.
+        let mut manifest_edit_map: glass_api::ManifestEditMap =
+            std::collections::BTreeMap::new();
+        for e in bundle.manifest_edits.entries() {
+            if let Some((archive_path, _orig)) =
+                bundle.manifest_sources.get(&e.artifact)
+            {
+                manifest_edit_map.insert(archive_path.clone(), e.bytes.clone());
             }
         }
         // Re-load the source bundle from disk so the exporter
@@ -638,6 +651,7 @@ impl Shell {
             let smali_map_for_task = smali_edit_map.clone();
             let additions_for_task = additions.clone();
             let plist_map_for_task = plist_edit_map.clone();
+            let manifest_map_for_task = manifest_edit_map.clone();
             let source_path_for_task = source_path.clone();
             let out_path_for_task = out_path.clone();
             let summary = cx
@@ -650,6 +664,7 @@ impl Shell {
                             &smali_map_for_task,
                             &additions_for_task,
                             &plist_map_for_task,
+                            &manifest_map_for_task,
                             &out_path_for_task,
                         ) {
                             Ok(()) => Ok(out_path_for_task),

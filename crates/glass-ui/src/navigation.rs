@@ -612,7 +612,7 @@ impl Shell {
             let Some(kind_src) = bundle.kinds.get(leaf.0) else { return };
             if let LeafKind::SmaliClass { class_jni } = kind_src {
                 let class_jni = class_jni.clone();
-                drop(bundle);
+                let _ = bundle;
                 self.open_smali_editor_for_class(&class_jni, cx);
                 return;
             }
@@ -622,8 +622,17 @@ impl Shell {
             // open an empty editor otherwise.
             if let LeafKind::Plist { artifact } = kind_src {
                 let artifact = artifact.clone();
-                drop(bundle);
+                let _ = bundle;
                 self.open_plist_editor_for_artifact(&artifact, cx);
+                return;
+            }
+            // Manifest leaves take the same editor route as plist:
+            // the CodeEditor is seeded with the decoded XML and a
+            // pre-staged edit if one exists.
+            if let LeafKind::Manifest { artifact } = kind_src {
+                let artifact = artifact.clone();
+                let _ = bundle;
+                self.open_manifest_editor_for_artifact(&artifact, cx);
                 return;
             }
             let Some(kind) = TabKind::from_kind(kind_src) else { return };

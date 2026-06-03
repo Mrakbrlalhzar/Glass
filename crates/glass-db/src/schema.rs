@@ -136,7 +136,20 @@ pub enum TabState {
         scroll_top: u64,
     },
     /// Android manifest viewer (the host APK's, not an artifact).
+    /// Legacy variant — replaced by `ManifestEditor` once the
+    /// APK loader started keying manifests by ArtifactId. Kept so
+    /// stored snapshots that predate the change still parse; the
+    /// resolve path promotes them to a `ManifestEditor` on the
+    /// bundle's first manifest leaf.
     Manifest,
+    /// Editable AndroidManifest.xml. Keyed by the manifest's
+    /// ArtifactId so split-APK bundles can round-trip per
+    /// manifest. `scroll_line` is the editor's last cursor row.
+    ManifestEditor {
+        artifact: ArtifactId,
+        #[serde(default)]
+        scroll_line: u32,
+    },
     /// Editable Info.plist or other plist artifact in an IPA.
     /// Keyed by the plist's ArtifactId so a bundle with several
     /// plist tabs round-trips correctly.

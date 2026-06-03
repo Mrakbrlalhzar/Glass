@@ -111,8 +111,7 @@ impl Shell {
     ) {
         let Some(active) = self.active_tab else { return };
         let class_jni = match self.tabs.get(active).map(|t| &t.kind) {
-            Some(TabKind::SmaliEditor { class_jni, .. })
-            | Some(TabKind::SmaliEditor { class_jni, .. }) => class_jni.clone(),
+            Some(TabKind::SmaliEditor { class_jni, .. }) => class_jni.clone(),
             _ => return,
         };
         self.open_smali_editor_for_class(&class_jni, cx);
@@ -353,7 +352,7 @@ impl Shell {
             // staged edit (the user reverted by typing back to
             // the original) and stop.
             if bundle.smali_edits.get(artifact, class_jni).is_some() {
-                drop(bundle);
+                let _ = bundle;
                 if let Some(bundle) = self.bundle_mut() {
                     bundle.smali_edits.remove(artifact, class_jni);
                 }
@@ -369,7 +368,7 @@ impl Shell {
                 return false;
             }
         }
-        drop(bundle);
+        let _ = bundle;
         self.stage_smali_class_edit(
             artifact.clone(),
             class_jni.to_string(),
