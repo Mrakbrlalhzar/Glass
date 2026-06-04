@@ -9,11 +9,13 @@
     <key>CFBundleIdentifier</key>
     <string>dev.azw.glass</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>@@CFBUNDLE_VERSION@@</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>@@CFBUNDLE_SHORT_VERSION@@</string>
     <key>CFBundleExecutable</key>
     <string>glass</string>
+    <key>CFBundleIconFile</key>
+    <string>Glass</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
