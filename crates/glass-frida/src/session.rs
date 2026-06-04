@@ -362,9 +362,9 @@ fn actor_main(
         // here; the inner loop handles backlog quickly and
         // then we sleep below.
         unsafe {
-            let ctx = frida_sys::g_main_context_default();
-            while frida_sys::g_main_context_pending(ctx) != 0 {
-                frida_sys::g_main_context_iteration(ctx, 0);
+            let ctx = crate::glib_ffi::g_main_context_default();
+            while crate::glib_ffi::g_main_context_pending(ctx) != 0 {
+                crate::glib_ffi::g_main_context_iteration(ctx, 0);
             }
         }
 
@@ -511,35 +511,35 @@ fn handle_command(
                 }
             };
             unsafe {
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let device = frida_sys::frida_device_manager_add_remote_device_sync(
                     mgr.ptr,
                     host_c.as_ptr(),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() || device.is_null() {
                     let _ = reply.send(Err(format!(
                         "add_remote_device {host}: error"
                     )));
                     if !err.is_null() {
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                     }
                     return true;
                 }
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let sess_ptr = frida_sys::frida_device_attach_sync(
                     device,
                     pid,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() || sess_ptr.is_null() {
                     frida_sys::frida_unref(device as _);
                     if !err.is_null() {
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                     }
                     let _ = reply.send(Err(format!("attach pid {pid}: error")));
                     return true;
@@ -573,71 +573,71 @@ fn handle_command(
                 }
             };
             unsafe {
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let device = frida_sys::frida_device_manager_add_remote_device_sync(
                     mgr.ptr,
                     host_c.as_ptr(),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() || device.is_null() {
                     let _ = reply.send(Err(format!(
                         "add_remote_device {host}: error"
                     )));
                     if !err.is_null() {
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                     }
                     return true;
                 }
                 // Spawn with default options — frida-core handles
                 // Android package resolution itself (`program`
                 // can be a package name on Android).
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let opts = frida_sys::frida_spawn_options_new();
                 let pid = frida_sys::frida_device_spawn_sync(
                     device,
                     program_c.as_ptr(),
                     opts,
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 frida_sys::frida_unref(opts as _);
                 if !err.is_null() || pid == 0 {
                     frida_sys::frida_unref(device as _);
                     if !err.is_null() {
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                     }
                     let _ = reply.send(Err(format!(
                         "spawn {program}: error"
                     )));
                     return true;
                 }
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let sess_ptr = frida_sys::frida_device_attach_sync(
                     device,
                     pid,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() || sess_ptr.is_null() {
                     // Best-effort kill so we don't leave a paused
                     // process orphaned on the device.
-                    let mut kill_err: *mut frida_sys::GError =
+                    let mut kill_err: *mut crate::glib_ffi::GError =
                         std::ptr::null_mut();
                     frida_sys::frida_device_kill_sync(
                         device,
                         pid,
                         std::ptr::null_mut(),
-                        &mut kill_err,
+                        crate::glib_ffi::err_out(&mut kill_err),
                     );
                     if !kill_err.is_null() {
-                        frida_sys::g_clear_error(&mut kill_err);
+                        crate::glib_ffi::g_clear_error(&mut kill_err);
                     }
                     frida_sys::frida_unref(device as _);
                     if !err.is_null() {
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                     }
                     let _ = reply.send(Err(format!(
                         "attach pid {pid} after spawn: error"
@@ -690,15 +690,15 @@ fn handle_command(
                     opts,
                     frida_sys::FridaScriptRuntime_FRIDA_SCRIPT_RUNTIME_DEFAULT,
                 );
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 let script_ptr = frida_sys::frida_session_create_script_sync(
                     sess.ptr,
                     source_c.as_ptr(),
                     opts,
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
-                frida_sys::g_object_unref(opts as _);
+                crate::glib_ffi::g_object_unref(opts as _);
                 if !err.is_null() || script_ptr.is_null() {
                     // Surface the GError message so the dock
                     // log shows what frida-core actually
@@ -715,7 +715,7 @@ fn handle_command(
                                 .to_string_lossy()
                                 .into_owned()
                         };
-                        frida_sys::g_clear_error(&mut err);
+                        crate::glib_ffi::g_clear_error(&mut err);
                         owned
                     } else {
                         "create_script returned null script_ptr".to_string()
@@ -733,7 +733,7 @@ fn handle_command(
                 let callback_fn: unsafe extern "C" fn() = std::mem::transmute(
                     on_script_message as *const (),
                 );
-                frida_sys::g_signal_connect_data(
+                crate::glib_ffi::g_signal_connect_data(
                     script_ptr as _,
                     signal_name.as_ptr(),
                     Some(callback_fn),
@@ -742,11 +742,11 @@ fn handle_command(
                     0,
                 );
                 // Now load it.
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 frida_sys::frida_script_load_sync(
                     script_ptr,
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() {
                     let m = (*err).message;
@@ -757,7 +757,7 @@ fn handle_command(
                             .to_string_lossy()
                             .into_owned()
                     };
-                    frida_sys::g_clear_error(&mut err);
+                    crate::glib_ffi::g_clear_error(&mut err);
                     frida_sys::frida_unref(script_ptr as _);
                     let _ = reply.send(Err(format!("script load: {msg}")));
                     return true;
@@ -812,12 +812,12 @@ fn handle_command(
             // <clinit> wait loop. Already-resumed devices
             // return success.
             unsafe {
-                let mut err: *mut frida_sys::GError = std::ptr::null_mut();
+                let mut err: *mut crate::glib_ffi::GError = std::ptr::null_mut();
                 frida_sys::frida_device_resume_sync(
                     sess.device_ptr,
                     pid,
                     std::ptr::null_mut(),
-                    &mut err,
+                    crate::glib_ffi::err_out(&mut err),
                 );
                 if !err.is_null() {
                     let msg_ptr = (*err).message;
@@ -828,7 +828,7 @@ fn handle_command(
                             .to_string_lossy()
                             .into_owned()
                     };
-                    frida_sys::g_clear_error(&mut err);
+                    crate::glib_ffi::g_clear_error(&mut err);
                     let _ = reply.send(Err(msg));
                     return true;
                 }

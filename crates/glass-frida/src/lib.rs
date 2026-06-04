@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use glass_device::DeviceId;
 
 pub mod gadgets;
+mod glib_ffi;
 pub mod injection;
 pub mod patch;
 pub mod server;
