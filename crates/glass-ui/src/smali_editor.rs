@@ -101,22 +101,6 @@ where
 pub(crate) const REPARSE_IDLE_MS: u64 = 500;
 
 impl Shell {
-    /// Open (or focus) a `SmaliEditor` tab for the currently-
-    /// active `SmaliClass` view. Retained because some legacy
-    /// code paths still reference it; new callsites should use
-    /// `open_smali_editor_for_class` directly.
-    pub(crate) fn open_active_smali_in_glass_editor(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self.active_tab else { return };
-        let class_jni = match self.tabs.get(active).map(|t| &t.kind) {
-            Some(TabKind::SmaliEditor { class_jni, .. }) => class_jni.clone(),
-            _ => return,
-        };
-        self.open_smali_editor_for_class(&class_jni, cx);
-    }
-
     /// Open (or focus) a `SmaliEditor` tab for `class_jni`. Looks
     /// up the owning artifact through the bundle's
     /// `smali_classes` map and seeds the editor from the
@@ -396,66 +380,6 @@ impl Shell {
         true
     }
 
-    /// Parse the active smali editor buffer and, on success,
-    /// stage an edit on the bundle. On parse failure, attach the
-    /// error to the editor's `save_error` so the footer
-    /// surfaces it.
-    pub(crate) fn save_active_smali_editor(
-        &mut self,
-        artifact: glass_db::ArtifactId,
-        class_jni: String,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self.active_tab else { return };
-        let body = match self
-            .tabs
-            .get(active)
-            .and_then(|t| t.code_editor.as_ref())
-        {
-            Some(e) => e.text(),
-            None => return,
-        };
-        let parsed = match glass_api::parse_smali_class(&body) {
-            Ok(c) => c,
-            Err(e) => {
-                if let Some(editor) = self
-                    .tabs
-                    .get_mut(active)
-                    .and_then(|t| t.code_editor.as_mut())
-                {
-                    editor.set_save_error(format!("parse error: {e:#}"));
-                }
-                cx.notify();
-                return;
-            }
-        };
-        // Sanity check: the body's declared class must match the
-        // tab's identity, else we'd stage the edit under the
-        // wrong key.
-        let body_jni = glass_api::smali_class_jni(&parsed);
-        if body_jni != class_jni {
-            if let Some(editor) = self
-                .tabs
-                .get_mut(active)
-                .and_then(|t| t.code_editor.as_mut())
-            {
-                editor.set_save_error(format!(
-                    "body declares class {body_jni:?} but this tab edits {class_jni:?}",
-                ));
-            }
-            cx.notify();
-            return;
-        }
-        self.stage_smali_class_edit(artifact, class_jni, parsed, cx);
-        if let Some(editor) = self
-            .tabs
-            .get_mut(active)
-            .and_then(|t| t.code_editor.as_mut())
-        {
-            editor.mark_clean();
-        }
-        cx.notify();
-    }
 }
 
 #[cfg(test)]

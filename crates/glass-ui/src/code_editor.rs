@@ -230,7 +230,9 @@ impl CodeEditor {
         self.buffer.snapshot().len()
     }
 
-    /// Caret byte offset.
+    /// Caret byte offset. Test-only accessor — the editor's
+    /// production paths consult `self.cursor` internally.
+    #[cfg(test)]
     pub fn cursor(&self) -> usize {
         self.cursor
     }
@@ -933,6 +935,10 @@ impl CodeEditor {
 /// Returns `None` when the row is outside any `.method` / `.field`
 /// declaration (e.g. class-level header, blank lines between
 /// members).
+///
+/// Test-only thin wrapper; production code calls
+/// `member_at_row_with_offset` directly.
+#[cfg(test)]
 pub(crate) fn member_at_row(
     buffer_text: &str,
     row: u32,

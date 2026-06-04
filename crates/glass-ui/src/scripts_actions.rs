@@ -671,9 +671,6 @@ impl Shell {
     /// Smali-specific context-menu builder: appends nav /
     /// annotation / revert items to `items` based on what
     /// (method or field) sits under the right-clicked row.
-    /// Mirrors what `open_smali_context_menu` and
-    /// `open_field_context_menu` produce for the SmaliClass
-    /// viewer so the menu surface matches.
     fn code_editor_smali_extra_items(
         &self,
         artifact: &glass_db::ArtifactId,
@@ -765,9 +762,8 @@ impl Shell {
             .map(|b| b.smali_edits.get(artifact, class_jni).is_some())
             .unwrap_or(false);
 
-        // The DEX artifact for annotation lookups — same trick
-        // `open_smali_context_menu` uses: first artifact in the
-        // bundle's list.
+        // The DEX artifact for annotation lookups: first
+        // artifact in the bundle's list.
         let dex_artifact = self
             .bundle()
             .and_then(|b| b.artifact_ids.first().cloned());
@@ -918,8 +914,7 @@ impl Shell {
 
     /// Translate a (method, line offset) into the canonical
     /// `AnnotationKey` + the existing annotation for that key.
-    /// Mirrors the same translation in `open_smali_context_menu`:
-    /// offset 0 → `Method`; offset >0 → `OpIndex` when the
+    /// Offset 0 → `Method`; offset >0 → `OpIndex` when the
     /// parsed method can map line offset to op index, else
     /// `MethodLine` as fallback.
     fn resolve_method_annotation_key(

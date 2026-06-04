@@ -26,13 +26,10 @@
 //! edited line that produced a valid smali method is guaranteed
 //! to round-trip cleanly.
 
-use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString};
+use gpui::{div, prelude::*, px, App, Context, SharedString};
 
 use crate::text_input::TextInput;
 use crate::Shell;
-
-// NB: Context<Shell> is referenced by the key-routing helpers
-// below; AnyElement / App / SharedString are used by render_row.
 
 /// State for an in-place op edit. Lives on `Shell.op_edit` from
 /// the moment the user opens the editor until they Enter / Esc /
@@ -359,60 +356,6 @@ pub const OPCODE_LIST: &[&str] = &[
     "and-int/lit8", "or-int/lit8", "xor-int/lit8",
     "shl-int/lit8", "shr-int/lit8", "ushr-int/lit8",
 ];
-
-/// Render the inline edit row. Caller embeds the returned div
-/// in place of the normal row when
-/// `shell.op_edit.row_index == this row's index`.
-pub fn render_row(
-    state: &OpEditState,
-    bg: gpui::Rgba,
-    fg: gpui::Rgba,
-    dim: gpui::Rgba,
-) -> AnyElement {
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(22.))
-        .w_full()
-        .bg(bg)
-        .px_3()
-        .text_base()
-        .font_family("Courier New")
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .child(state.input.render(
-                    fg,
-                    dim,
-                    if state.is_new_line {
-                        "type a smali op, Enter to commit · Esc cancels · ⌘↵ inserts below"
-                    } else {
-                        "Enter commits · Esc cancels · ⌘↵ inserts below"
-                    },
-                    "Courier New",
-                )),
-        );
-    if let Some(err) = state.error.as_ref() {
-        row = row.child(
-            div()
-                .ml_3()
-                .text_xs()
-                .text_color(crate::theme::current().errors.highlight.rgba())
-                .child(SharedString::from(err.clone())),
-        );
-    }
-    row.on_mouse_down(
-        gpui::MouseButton::Left,
-        |_ev, _w, cx: &mut App| {
-            // Eat clicks inside the editor so they don't bubble
-            // up to the row's select-on-click handler.
-            cx.stop_propagation();
-        },
-    )
-    .into_any_element()
-}
 
 /// Build the modified method body by replacing the line at
 /// `line_offset_within_method` in `method.to_smali()` with

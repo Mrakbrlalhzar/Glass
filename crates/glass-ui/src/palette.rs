@@ -47,7 +47,6 @@ colour!(COLOUR_DIRECTIVE, smali.directive);
 colour!(COLOUR_MODIFIER, smali.modifier);
 colour!(COLOUR_LABEL, smali.label);
 colour!(COLOUR_TYPE, smali.type_);
-colour!(COLOUR_TYPE_EXTERNAL, smali.type_external);
 colour!(COLOUR_STRING, smali.string);
 
 colour!(COLOUR_ROW_SELECTED, state.row_selected);
