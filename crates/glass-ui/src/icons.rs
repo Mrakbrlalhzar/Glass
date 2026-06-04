@@ -17,6 +17,11 @@ const HEX: &[u8] = include_bytes!("../assets/icons/hex.svg");
 const MANIFEST: &[u8] = include_bytes!("../assets/icons/manifest.svg");
 const LISTING: &[u8] = include_bytes!("../assets/icons/listing.svg");
 const SECTION_MAP: &[u8] = include_bytes!("../assets/icons/section-map.svg");
+/// App icon PNG, referenced by the About modal. Source of
+/// truth is `icons/icon.png` at the repo root — same file the
+/// packaging/make-icns.sh script derives Glass.icns from, so
+/// the in-app About logo stays in sync with the bundle icon.
+const LOGO: &[u8] = include_bytes!("../../../icons/icon.png");
 
 /// Asset source registered with gpui at app startup. Resolves
 /// the `icons/<name>.svg` paths used by `svg().path(...)` to
@@ -33,6 +38,7 @@ impl AssetSource for IconAssets {
             "icons/manifest.svg" => Some(MANIFEST),
             "icons/listing.svg" => Some(LISTING),
             "icons/section-map.svg" => Some(SECTION_MAP),
+            "icons/logo.png" => Some(LOGO),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -127,6 +133,7 @@ mod tests {
             "icons/manifest.svg",
             "icons/listing.svg",
             "icons/section-map.svg",
+            "icons/logo.png",
         ] {
             assert!(s.load(path).unwrap().is_some(), "missing {path}");
         }

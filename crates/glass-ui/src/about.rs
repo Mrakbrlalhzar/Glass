@@ -71,7 +71,12 @@ pub fn render_about(
     dim: gpui::Rgba,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    let header = div()
+    // Title + tagline column, paired with the app icon to the
+    // left. The icon is the same source PNG that packaging/
+    // make-icns.sh feeds into Glass.icns — keeping one canonical
+    // copy means the in-app logo can't drift from the bundle
+    // icon Finder shows.
+    let title_block = div()
         .flex()
         .flex_col()
         .gap_1()
@@ -89,6 +94,19 @@ pub fn render_about(
                     "A fast, native, mobile-app interactive disassembler.",
                 )),
         );
+    let header = div()
+        .flex()
+        .flex_row()
+        .gap_4()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .h(px(96.))
+                .flex_shrink_0()
+                .child(gpui::img("icons/logo.png").size_full()),
+        )
+        .child(title_block);
 
     let describe = if GIT_DESCRIBE.is_empty() {
         format!("commit {GIT_COMMIT}")
@@ -115,20 +133,29 @@ pub fn render_about(
         .child(SharedString::from(format!("Source   {REPO_URL}")))
         .child(SharedString::from("Licence  GPL-3.0-only (inherits from smali)"));
 
-    let mut attrib_list = div()
+    let attrib_header = div()
+        .text_xs()
+        .text_color(fg)
+        .child(SharedString::from("Third-party (direct dependencies)"));
+
+    // The attribution list outgrew the card a while back. Wrap it
+    // in its own scroll container with `flex_1` so it consumes
+    // whatever vertical space is left in the card (after header /
+    // build_meta / links) and scrolls internally. `id` is required
+    // for gpui to track the scroll offset across frames.
+    let mut attrib_rows = div()
+        .id("about-attrib-list")
+        .flex_1()
+        .min_h(px(0.))
+        .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap_1()
         .text_xs()
         .font_family("Menlo")
         .text_color(dim);
-    attrib_list = attrib_list.child(
-        div()
-            .text_color(fg)
-            .child(SharedString::from("Third-party (direct dependencies)")),
-    );
     for (name, licence, blurb) in ATTRIBUTIONS {
-        attrib_list = attrib_list.child(
+        attrib_rows = attrib_rows.child(
             div()
                 .flex()
                 .flex_row()
@@ -147,7 +174,7 @@ pub fn render_about(
     let card = div()
         .id("about-card")
         .w(px(620.))
-        .max_h(px(640.))
+        .h(px(640.))
         .bg(panel)
         .border_1()
         .border_color(border)
@@ -161,7 +188,8 @@ pub fn render_about(
         .child(header)
         .child(build_meta)
         .child(links)
-        .child(attrib_list)
+        .child(attrib_header)
+        .child(attrib_rows)
         // Eat clicks inside so the backdrop dismiss handler doesn't
         // fire when the user clicks on the card content.
         .on_mouse_down(
