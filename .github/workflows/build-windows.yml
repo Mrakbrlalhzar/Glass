@@ -1,0 +1,93 @@
+name: Build Windows binary
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Release uploads need write access to repo contents.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build glass (windows-amd64)
+    runs-on: windows-latest
+    # gpui requires the MSVC toolchain. The windows-latest image
+    # already ships everything the native build scripts need —
+    # Visual Studio Build Tools (MSVC linker + Windows SDK), CMake
+    # (tree-sitter -> wasmtime C API), and LLVM/Clang (bindgen for
+    # frida-sys / gpui / media) — so unlike the Linux job there is
+    # nothing to apt-install. We only have to tell bindgen where
+    # libclang lives, since the image doesn't export LIBCLANG_PATH.
+    env:
+      LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the toolchain explicitly to match `rust-toolchain.toml`
+      # and the macOS / Linux workflows. The default host target on
+      # the windows runner is x86_64-pc-windows-msvc. Bump all the
+      # workflows + the toolchain file together when moving forward.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.94.0"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release -p glass-cli
+
+      # Stage the naked .exe under a self-identifying name. On MSVC
+      # the debug info lives in a separate .pdb, so the release .exe
+      # is already small — no strip step needed (unlike Linux).
+      - name: Stage binary
+        id: bin
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            name="glass-${tag}-windows-amd64.exe"
+          else
+            name="glass-windows-amd64-${GITHUB_SHA}.exe"
+          fi
+          cp target/release/glass.exe "dist/${name}"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glass-windows-amd64-${{ github.sha }}
+          path: dist/${{ steps.bin.outputs.name }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # On a v* tag push: attach the naked .exe to the GitHub
+      # Release. softprops/action-gh-release creates the release if
+      # it doesn't already exist, or adds files to it if the macOS /
+      # Linux job got there first. Skipped for branch / PR / manual
+      # runs — those only produce a workflow artifact.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ steps.bin.outputs.name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true

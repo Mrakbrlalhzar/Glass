@@ -267,7 +267,7 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 
 ## Building
 
-Glass runs on **macOS 13+** (the primary target, GPU-accelerated via Metal — no extra SDK needed, the Metal framework ships with the OS) and **Linux** (X11 or Wayland via `gpui_linux`, Vulkan-backed). A Windows port is on the roadmap.
+Glass runs on **macOS 13+** (the primary target, GPU-accelerated via Metal — no extra SDK needed, the Metal framework ships with the OS), **Linux** (X11 or Wayland via `gpui_linux`, Vulkan-backed), and **Windows 10/11** (Direct3D-backed via `gpui`, built with the MSVC toolchain).
 
 There is a release prebuilt binary for macOS under Releases but if you need to build from source: the good news: it's two commands.
 
@@ -298,6 +298,28 @@ There is a release prebuilt binary for macOS under Releases but if you need to b
    ```
 
    The build fails early in a dependency build script (`fontconfig was not found in the pkg-config search path`) if `libfontconfig-dev` is missing, and later at link time for the X11/Wayland/Vulkan libraries. `libglib2.0-dev` is needed because the Frida driver links GLib dynamically on Linux (on macOS the Frida devkit bundles it statically) — without it the link fails with `undefined symbol: g_object_unref`.
+
+   **Windows only — install the native build toolchain.** `gpui` requires the MSVC toolchain (the GNU/MinGW target is not supported). Using [winget](https://learn.microsoft.com/windows/package-manager/winget/):
+
+   ```powershell
+   # 1. MSVC compiler, linker, and Windows SDK (the "Desktop development with C++" workload).
+   winget install --id Microsoft.VisualStudio.2022.BuildTools `
+     --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+   # 2. CMake — tree-sitter (via the Zed `language` crates) builds wasmtime's C API with it.
+   winget install --id Kitware.CMake
+
+   # 3. LLVM/Clang — `bindgen` (frida-sys, gpui, media) needs libclang.dll.
+   winget install --id LLVM.LLVM
+   ```
+
+   The LLVM installer does **not** add itself to `PATH`, so point `bindgen` at `libclang.dll` before building (set it permanently via *System → Environment Variables*, or per-shell):
+
+   ```powershell
+   $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+   ```
+
+   Without these the build fails in dependency build scripts: `linker 'link.exe' not found` (no MSVC), `failed to spawn 'cmake'` (no CMake), or `Unable to find libclang` (no `LIBCLANG_PATH`). The `glass` binary's stack reserve is bumped automatically on MSVC (see `crates/glass-cli/build.rs`) so the CLI doesn't overflow Windows' small default main-thread stack — no action needed.
 
 3. **Clone and build**:
 
