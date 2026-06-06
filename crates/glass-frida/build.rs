@@ -24,6 +24,39 @@ fn main() {
     });
     println!("cargo:rustc-env=GLASS_FRIDA_VERSION={version}");
     println!("cargo:rerun-if-changed=build.rs");
+
+    link_glib();
+}
+
+/// Emit the system GLib link flags on Linux.
+///
+/// Our hand-rolled FFI in `src/glib_ffi.rs` references GLib
+/// symbols (`g_object_unref`, `g_signal_connect_data`, the
+/// `g_main_context_*` family, …). On macOS the Frida devkit
+/// bundles GLib statically, so those symbols resolve from
+/// `libfrida-core` and no directive is needed. On Linux the
+/// devkit links GLib dynamically and leaves the symbols to the
+/// system libraries, so without these directives the final
+/// binary fails at link time with `undefined symbol: g_*`.
+///
+/// `pkg-config` is used (rather than a bare `rustc-link-lib`) so
+/// non-standard library locations are picked up via the proper
+/// `-L` search paths.
+fn link_glib() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "linux" {
+        return;
+    }
+    // `gobject-2.0` pulls in `glib-2.0` transitively, but probe
+    // both explicitly so a missing package names itself clearly.
+    for lib in ["glib-2.0", "gobject-2.0"] {
+        if let Err(e) = pkg_config::Config::new().probe(lib) {
+            panic!(
+                "glass-frida: could not locate `{lib}` via pkg-config: {e}\n\
+                 On Debian/Ubuntu install it with `sudo apt-get install libglib2.0-dev`."
+            );
+        }
+    }
 }
 
 /// Find the active `frida-sys` source dir under

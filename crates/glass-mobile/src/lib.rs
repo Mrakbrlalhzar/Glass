@@ -134,8 +134,11 @@ fn open_apk(path: &Path) -> Result<ApkBundle> {
                 match Arm64Binary::from_bytes(PathBuf::from(&name), bytes) {
                     Ok(binary) => native_libs.push(NativeLib { abi, name: lib_name, binary }),
                     Err(e) => {
-                        // Non-AArch64 ABIs (armeabi-v7a, x86, x86_64) will fail
-                        // here today — that's fine until we add more arches.
+                        // armv8-encode parses every ABI (AArch64, ARMv7,
+                        // x86, x86_64) — non-ARM ones load too and the UI
+                        // routes them to the hex view. We only land here
+                        // when the container genuinely fails to parse, so
+                        // skip just that lib and keep loading the APK.
                         tracing::debug!("skipping {name}: {e}");
                     }
                 }

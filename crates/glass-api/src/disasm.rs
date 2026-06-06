@@ -1,7 +1,7 @@
 //! Disassembly verbs — linear sweep, per-function, single-word decode.
 
 use anyhow::{Context, Result};
-use armv8_encode::container::{Container, SectionKind};
+use armv8_encode::container::{Architecture, Container, SectionKind};
 use armv8_encode::isa::aarch64;
 use glass_arch_arm::{format as fmt, SymbolMap};
 use serde::Serialize;
@@ -53,6 +53,19 @@ impl Bundle {
             })
             .with_context(|| format!("no artifact matches {artifact_ref:?}"))?;
         let container = &art.binary.container;
+        // Linear sweep decodes fixed 4-byte AArch64 words. On a
+        // non-ARM artifact (x86_64, …) that yields a wall of bogus
+        // `.word` rows, so refuse it outright and point at the byte
+        // view — mirrors the GUI, which routes these to the hex
+        // viewer instead of a disassembly listing.
+        if matches!(container.architecture, Architecture::Other) {
+            anyhow::bail!(
+                "artifact {:?} is a non-ARM architecture; linear-sweep \
+                 disassembly supports AArch64 and ARMv7 only. Inspect its \
+                 bytes with `sections` / the GUI hex viewer instead.",
+                art.label,
+            );
+        }
         let section = pick_text_section(container, section_filter)
             .with_context(|| {
                 if let Some(name) = section_filter {

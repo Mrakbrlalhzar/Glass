@@ -12,12 +12,14 @@
 //! `g_object_unref`, `g_clear_error`, `g_signal_connect_data`,
 //! and friends undeclared in the Rust bindings.
 //!
-//! The symbols are present in the linked `libfrida-core`
-//! (statically on macOS, via libglib-2.0 on Linux) — they're
-//! just not in the Rust prototype set. Re-declaring our own
-//! `extern "C"` prototypes is enough to compile, and the
-//! linker resolves both decls (this one and the bindgen one)
-//! to the same external symbol.
+//! On macOS the symbols are present in the linked
+//! `libfrida-core` (the devkit bundles GLib statically). On
+//! Linux the devkit links GLib dynamically, so they come from
+//! the system `libglib-2.0` / `libgobject-2.0` — `build.rs`
+//! emits the corresponding link directives via pkg-config.
+//! Either way, re-declaring our own `extern "C"` prototypes is
+//! enough to compile, and the linker resolves both decls (this
+//! one and the bindgen one) to the same external symbol.
 //!
 //! `GError` is also re-declared so we have a single canonical
 //! shape across platforms regardless of whether `frida-sys`

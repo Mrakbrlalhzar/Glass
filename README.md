@@ -251,7 +251,7 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 - Binary / instruction palette (⌘2 to switch into it) scans every native artifact globally — Android apps with `arm64-v8a` + `armeabi-v7a` get unified results with the artifact + section labelled per match.
 - Right-click cross-references in every view: **References to address** / **Callers of function** / **Open hex view here** in the listing, hex and CFG; **Callers of method** / **References to field** in smali. Results show in the palette with a scope chip; Esc clears the scope back to bundle-wide search. Indices build on a background thread after load — a progress chip shows while in flight.
 - Themes (View → Theme) with selectable per-window background tints.
-- Cmd-O open, Cmd-N new window, Cmd-W close window, Cmd-⇧W close file (return window to launched-empty state). macOS app menu with **File → Open Recent** (last 10 bundles, deduplicated by path).
+- Cmd-O open, Cmd-N new window, Cmd-W close window, Cmd-⇧W close file (return window to launched-empty state) — on Linux / Windows the same shortcuts use **Ctrl** instead of **Cmd**. macOS app menu with **File → Open Recent** (last 10 bundles, deduplicated by path); Linux has no native menu bar, so use the keyboard shortcuts, the **Open file…** button on the empty window, or pass a path on the command line.
 - Window bounds + open tabs + tree expansion state persisted per-bundle in `redb`; relaunching reopens where you left off.
 
 ### What's missing
@@ -284,6 +284,20 @@ There is a release prebuilt binary for macOS under Releases but if you need to b
    ```
 
    This pulls in `libxkbcommon-dev`, the Wayland and XCB headers, Vulkan, ALSA, and the rest of the toolchain `gpui_linux` needs to link. Without these the build fails at link time with missing `xkbcommon` / `wayland-client` symbols.
+
+   If you'd rather not run the script, the equivalent packages on **Debian / Ubuntu (amd64)** are:
+
+   ```sh
+   sudo apt-get update && sudo apt-get install -y \
+     build-essential clang cmake pkg-config \
+     libfontconfig-dev libfreetype-dev \
+     libwayland-dev libxkbcommon-x11-dev \
+     libasound2-dev libvulkan-dev \
+     libzstd-dev libsqlite3-dev libssl-dev \
+     libglib2.0-dev
+   ```
+
+   The build fails early in a dependency build script (`fontconfig was not found in the pkg-config search path`) if `libfontconfig-dev` is missing, and later at link time for the X11/Wayland/Vulkan libraries. `libglib2.0-dev` is needed because the Frida driver links GLib dynamically on Linux (on macOS the Frida devkit bundles it statically) — without it the link fails with `undefined symbol: g_object_unref`.
 
 3. **Clone and build**:
 

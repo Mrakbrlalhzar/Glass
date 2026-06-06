@@ -74,25 +74,32 @@ pub fn launch(path: Option<PathBuf>, fresh: bool) -> Result<()> {
         // keeps the process alive in the dock, which doesn't match
         // how a command-line-launched tool is expected to behave.
         cx.set_quit_mode(QuitMode::LastWindowClosed);
+        // `secondary-` is gpui's portable primary-modifier token:
+        // it resolves to Cmd on macOS and Ctrl on Linux / Windows.
+        // Hardcoding `cmd-` here bound these to the Super key on
+        // Linux (where the window manager swallows most of them), so
+        // e.g. file-open had no working shortcut off macOS. The
+        // plain-key bindings (escape/arrows/page) are platform-
+        // neutral and stay as-is.
         cx.bind_keys([
-            KeyBinding::new("cmd-f", TogglePalette, None),
+            KeyBinding::new("secondary-f", TogglePalette, None),
             KeyBinding::new("escape", PaletteClose, None),
             KeyBinding::new("up", PaletteUp, None),
             KeyBinding::new("down", PaletteDown, None),
             KeyBinding::new("enter", PaletteActivate, None),
-            KeyBinding::new("cmd-1", PaletteModeText, None),
-            KeyBinding::new("cmd-2", PaletteModeBinary, None),
+            KeyBinding::new("secondary-1", PaletteModeText, None),
+            KeyBinding::new("secondary-2", PaletteModeBinary, None),
             KeyBinding::new("pageup", ListingPageUp, None),
             KeyBinding::new("pagedown", ListingPageDown, None),
             KeyBinding::new("left", HexCursorLeft, None),
             KeyBinding::new("right", HexCursorRight, None),
-            KeyBinding::new("cmd-e", ToggleChangesDialog, None),
-            KeyBinding::new("cmd-o", OpenFile, None),
-            KeyBinding::new("cmd-n", NewWindow, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
-            KeyBinding::new("cmd-shift-w", CloseFile, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("secondary-e", ToggleChangesDialog, None),
+            KeyBinding::new("secondary-o", OpenFile, None),
+            KeyBinding::new("secondary-n", NewWindow, None),
+            KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("secondary-shift-w", CloseFile, None),
+            KeyBinding::new("secondary-c", Copy, None),
+            KeyBinding::new("secondary-q", Quit, None),
         ]);
 
         {

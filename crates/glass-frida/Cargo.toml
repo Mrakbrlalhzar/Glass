@@ -35,3 +35,10 @@ frida-sys = "0.17"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Linux: resolve the system glib/gobject link flags so our
+# hand-rolled GLib FFI (src/glib_ffi.rs) links. Left
+# unconditional (not target-gated) so cross-compiling to Linux
+# from another host still has the crate available to build.rs.
+[build-dependencies]
+pkg-config = "0.3"

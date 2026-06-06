@@ -572,7 +572,15 @@ fn snapshot_ipa_with_progress(
         let overview_id = LeafId(bodies.len());
         bodies.push(SharedString::from(""));
         origins.push(SharedString::from(origin.clone()));
-        labels.push(SharedString::from(format!("{display_name} (overview)")));
+        // Tag the overview with the arch when we can't disassemble,
+        // so the hex fallback is self-explanatory — matches the APK
+        // and standalone-binary loaders.
+        let overview_label = if listable {
+            format!("{display_name} (overview)")
+        } else {
+            format!("{display_name} ({}) (overview)", arch_label(arch))
+        };
+        labels.push(SharedString::from(overview_label));
         kinds.push(LeafKind::SectionMap { artifact: aid.clone() });
 
         let mut children: Vec<Node> = vec![Node::Leaf {
@@ -1051,6 +1059,8 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
     native_sections.insert(aid.clone(), build_section_info(&bin.container));
     let mut symbol_maps = std::collections::HashMap::new();
     symbol_maps.insert(aid.clone(), glass_arch_arm::SymbolMap::build(&bin.container));
+    let arch = bin.container.architecture;
+    let listable = is_listable(arch);
     let mut text_sections = std::collections::HashMap::new();
     let mut data_sections = std::collections::HashMap::new();
     let symbol_addrs_all: Vec<u64> = symbol_maps
@@ -1059,7 +1069,12 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         .unwrap_or_default();
     for (sec_idx, sec) in bin.container.sections.iter().enumerate() {
         let kind = NativeSectionKind::from_armv8(sec.kind);
-        if matches!(sec.kind, armv8_encode::container::SectionKind::Text) {
+        let is_text = matches!(sec.kind, armv8_encode::container::SectionKind::Text);
+        // Only register as a disassemblable text section when the
+        // architecture is one we can decode (AArch64 / ARMv7). For
+        // other arches (x86_64, …) the text bytes go in as data so
+        // the hex view can render them — mirrors the APK/IPA loaders.
+        if listable && is_text {
             let symbol_addrs: Vec<u64> = symbol_addrs_all
                 .iter()
                 .copied()
@@ -1090,9 +1105,17 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
     let mut labels_v: Vec<SharedString> = Vec::new();
     let mut kinds_v: Vec<LeafKind> = Vec::new();
 
+    let origin = SharedString::from(arch_label(arch));
     bodies.push(SharedString::from(""));
-    origins.push(SharedString::from("arm64"));
-    labels_v.push(SharedString::from(format!("{display_label} (overview)")));
+    origins.push(origin.clone());
+    // Tag the overview with the arch when we can't disassemble, so
+    // "why is this in hex?" is self-evident — matches the APK loader.
+    let overview_label = if listable {
+        format!("{display_label} (overview)")
+    } else {
+        format!("{display_label} ({}) (overview)", arch_label(arch))
+    };
+    labels_v.push(SharedString::from(overview_label));
     kinds_v.push(LeafKind::SectionMap { artifact: aid.clone() });
     tree_roots.push(Node::Leaf {
         label: SharedString::from("Overview"),
@@ -1105,12 +1128,21 @@ pub fn snapshot_arm64(bin: Arm64Binary) -> Result<LoadedBundle> {
         }
         let leaf_id = LeafId(bodies.len());
         bodies.push(SharedString::from(""));
-        origins.push(SharedString::from("arm64"));
+        origins.push(origin.clone());
         labels_v.push(SharedString::from(sec.name.clone()));
-        kinds_v.push(LeafKind::Listing {
-            artifact: aid.clone(),
-            section: sec.name.clone(),
-        });
+        // Disassemble only the arches we can decode; route the rest
+        // (x86_64, …) to the hex view over the same section bytes.
+        if listable {
+            kinds_v.push(LeafKind::Listing {
+                artifact: aid.clone(),
+                section: sec.name.clone(),
+            });
+        } else {
+            kinds_v.push(LeafKind::Hex {
+                artifact: aid.clone(),
+                section: sec.name.clone(),
+            });
+        }
         tree_roots.push(Node::Leaf {
             label: SharedString::from(sec.name.clone()),
             leaf_id,

@@ -2222,14 +2222,54 @@ impl Render for Shell {
                 .text_color(self.theme.errors.highlight.rgba())
                 .child(format!("Load failed: {msg}"))
                 .into_any_element(),
-            ShellState::Empty => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(dim)
-                .child("pass an .apk to `glass gui <path>`")
-                .into_any_element(),
+            // No native menu bar exists on Linux (gpui only renders
+            // the app menu on macOS), so the empty state must offer
+            // its own way in: a clickable Open button that dispatches
+            // the same OpenFile action the menu / shortcut use.
+            ShellState::Empty => {
+                let open_hint = if cfg!(target_os = "macos") { "⌘O" } else { "Ctrl+O" };
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .text_color(dim)
+                    .child("No bundle loaded")
+                    .child(
+                        div()
+                            .id("empty-open")
+                            .px_4()
+                            .py_2()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(border)
+                            .bg(panel)
+                            .text_color(fg)
+                            .hover(|s| s.bg(hover_bg))
+                            .cursor_pointer()
+                            .child("Open file…")
+                            .child(div().text_xs().text_color(dim).child(open_hint))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_this, _ev, window, cx| {
+                                    window.dispatch_action(Box::new(OpenFile), cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(dim)
+                            .child("or pass a path: glass <file.apk|file.ipa>"),
+                    )
+                    .into_any_element()
+            }
         };
 
         let palette_overlay: Option<gpui::AnyElement> = if self.palette_open {

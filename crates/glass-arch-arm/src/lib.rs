@@ -62,7 +62,13 @@ impl Arm64Binary {
             Err(_) => bytes,
         };
         let container = Container::from_bytes(&bytes)
-            .context("parsing AArch64 container (ELF/Mach-O)")?;
+            .context("parsing native container (ELF/Mach-O)")?;
+        // Note: armv8-encode's reader is deliberately lenient and
+        // parses any ELF/Mach-O, tagging non-ARM machines (x86_64, …)
+        // as `Architecture::Other`. We keep them — the file is still
+        // inspectable — and let the UI route unsupported arches to the
+        // hex viewer instead of the AArch64/ARMv7 disassembly. See
+        // `glass_ui::loader::is_listable`.
         Ok(Self { path, bytes, container })
     }
 }
