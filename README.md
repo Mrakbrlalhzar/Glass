@@ -251,7 +251,7 @@ Glass is usable today for reversing Android (APK / DEX / native `.so`) and iOS (
 - Binary / instruction palette (⌘2 to switch into it) scans every native artifact globally — Android apps with `arm64-v8a` + `armeabi-v7a` get unified results with the artifact + section labelled per match.
 - Right-click cross-references in every view: **References to address** / **Callers of function** / **Open hex view here** in the listing, hex and CFG; **Callers of method** / **References to field** in smali. Results show in the palette with a scope chip; Esc clears the scope back to bundle-wide search. Indices build on a background thread after load — a progress chip shows while in flight.
 - Themes (View → Theme) with selectable per-window background tints.
-- Cmd-O open, Cmd-N new window, Cmd-W close window, Cmd-⇧W close file (return window to launched-empty state) — on Linux / Windows the same shortcuts use **Ctrl** instead of **Cmd**. macOS app menu with **File → Open Recent** (last 10 bundles, deduplicated by path); Linux has no native menu bar, so use the keyboard shortcuts, the **Open file…** button on the empty window, or pass a path on the command line.
+- Cmd-O open, Cmd-N new window, Cmd-W close window, Cmd-⇧W close file (return window to launched-empty state) — on Linux / Windows the same shortcuts use **Ctrl** instead of **Cmd**. **File → Open Recent** (last 10 bundles, deduplicated by path) and **View → Theme**. On macOS these live in the native menu bar; on Linux / Windows (where gpui draws no native menu) Glass renders its own **Glass / File / View** menu bar in the window header.
 - Window bounds + open tabs + tree expansion state persisted per-bundle in `redb`; relaunching reopens where you left off.
 
 ### What's missing

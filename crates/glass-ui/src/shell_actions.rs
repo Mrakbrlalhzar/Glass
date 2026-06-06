@@ -92,6 +92,7 @@ impl Shell {
             palette_scope: None,
             palette_focused: false,
             context_menu: None,
+            app_menu_open: None,
             about_open: false,
             annotations_pane_open: false,
             annotations_pane_h_offset: px(0.),

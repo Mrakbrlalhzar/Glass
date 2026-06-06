@@ -27,6 +27,7 @@ mod annotation_editor;
 mod annotations;
 mod annotations_pane;
 mod app;
+mod app_menu;
 mod cfg_block;
 mod cfg_render;
 mod coverage_actions;
@@ -1634,6 +1635,10 @@ pub(crate) struct Shell {
     palette_focused: bool,
     /// Right-click context menu state. `None` when no menu is open.
     context_menu: Option<ContextMenuState>,
+    /// Which in-window app menu (File / View / …) is open, if any.
+    /// Only used off macOS — macOS draws the native menu bar. See
+    /// [`crate::app_menu`].
+    pub(crate) app_menu_open: Option<app_menu::AppMenu>,
     /// Whether the About-Glass modal is currently shown.
     pub(crate) about_open: bool,
     /// Whether the right-side annotations pane is visible. Persisted
@@ -2034,6 +2039,13 @@ impl Render for Shell {
             .bg(panel)
             .text_sm()
             .text_color(dim)
+            // In-window menu bar — only off macOS, where gpui draws no
+            // native menu bar. macOS keeps its native bar.
+            .children(if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some(app_menu::render_menu_bar(self, fg, hover_bg, cx))
+            })
             .child(div().flex_1().child(header_text))
             // Search affordance — clicking is equivalent to ⌘F.
             .child(
@@ -2941,6 +2953,13 @@ impl Render for Shell {
             root = root.child(device_picker::render_dropdown(
                 self, panel, border, fg, dim, accent, cx,
             ));
+        }
+        // In-window app-menu dropdown (off macOS). Rendered last so it
+        // sits above all other chrome.
+        if let Some(o) =
+            app_menu::render_dropdown(self, panel, border, fg, dim, accent, hover_bg, cx)
+        {
+            root = root.child(o);
         }
         root
     }
