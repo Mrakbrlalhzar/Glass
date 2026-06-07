@@ -711,10 +711,25 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
         let isl_y = r_raw.y + inset;
         let isl_w = r_raw.w - island_gap_world;
         let isl_h = r_raw.h - island_gap_world;
+        // Per-island header height: shrink to fit when the
+        // island is small, so the inner canvas is always
+        // positive and tiles don't have to fight for vertical
+        // space the header has eaten. A standard header is 24
+        // world units; on a sliver-thin island (e.g. a small
+        // library next to libg.so getting only a few units of
+        // height in the outer treemap) we cap it at 30 % of the
+        // island so 70 % stays for inner content. Without this
+        // adjustment a tiny island has negative natural
+        // inner_h, and the previous workarounds either clamped
+        // it up — making the strip layout overflow into the
+        // next island — or bailed out entirely, leaving the
+        // island empty.
+        let header_h_isl =
+            (header_h_world).min(isl_h * 0.3).max(0.0);
         let inner_x = isl_x + margin_world;
-        let inner_y = isl_y + header_h_world + margin_world;
-        let inner_w = (isl_w - 2.0 * margin_world).max(8.0);
-        let inner_h = (isl_h - header_h_world - 2.0 * margin_world).max(8.0);
+        let inner_y = isl_y + header_h_isl + margin_world;
+        let inner_w = (isl_w - 2.0 * margin_world).max(0.0);
+        let inner_h = (isl_h - header_h_isl - 2.0 * margin_world).max(0.0);
 
         match &all_outer[*orig_idx].0 {
             OuterCandidate::Native(aid, label, kind) => {
@@ -735,7 +750,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     wy: isl_y as f32,
                     ww: isl_w as f32,
                     wh: isl_h as f32,
-                    header_h: header_h_world as f32,
+                    header_h: header_h_isl as f32,
                 });
                 dex_content.push(None);
                 native_tile_ranges.push(Some((start, end)));
@@ -758,7 +773,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     wy: isl_y as f32,
                     ww: isl_w as f32,
                     wh: isl_h as f32,
-                    header_h: header_h_world as f32,
+                    header_h: header_h_isl as f32,
                 });
                 dex_content.push(Some(DexContent { packages }));
                 native_tile_ranges.push(None);
@@ -976,13 +991,32 @@ fn build_artifact_tiles(
     }
     let target_area = target_w * target_h;
     let area_per_byte = target_area / (total_bytes as f64);
+    // Floor: each tile gets at least `min_area` square world
+    // units so single-instruction stubs are still clickable.
+    // When a library has so many tiny functions that the floor
+    // inflates the total beyond `target_area`, the strip layout
+    // overflows the island's bounding box and paints over
+    // neighbouring islands — observed on libg.so in coc.apk,
+    // where ~50k functions × 4 sq-units >> the (small) inner
+    // canvas area.
     let min_area = 4.0_f64;
-    let areas: Vec<f64> = inputs
+    let mut areas: Vec<f64> = inputs
         .iter()
         .map(|i| ((i.size as f64) * area_per_byte).max(min_area))
         .collect();
+    let total_area: f64 = areas.iter().sum();
+    if total_area > target_area {
+        // Uniform rescale so the strip layout fits. Sub-pixel
+        // tiles get even smaller; the chrome / LoD cull in the
+        // renderer drops them at draw time, so the visual cost
+        // is invisible at the zoom level where this kicks in.
+        let scale = target_area / total_area;
+        for a in &mut areas {
+            *a *= scale;
+        }
+    }
 
-    let (tiles, _h) = strip_layout(&inputs, &areas, target_w);
+    let (tiles, _h) = strip_layout(&inputs, &areas, target_w, target_h);
     tiles
 }
 
@@ -1060,12 +1094,24 @@ struct LayoutInput {
 }
 
 /// Strip treemap. Lays out rectangles row-by-row, left-to-right
-/// within each row, top-to-bottom across rows. Returns the
-/// tiles + the final mosaic height.
+/// within each row, top-to-bottom across rows. Hard-bounded by
+/// `canvas_h`: if a row would push past the canvas, its height
+/// is squeezed to whatever's left and the layout terminates.
+/// Returns the tiles + the actual mosaic height (which equals
+/// `canvas_h` when clamping kicks in).
+///
+/// The hard clamp is a backstop. The natural fit comes from
+/// `areas.sum() == canvas_w * canvas_h`, which is what
+/// `build_artifact_tiles` rescales the input areas to. Without
+/// the backstop, any drift between the natural row heights and
+/// the canvas geometry stacks up over thousands of rows and
+/// produces overflow — observed on libg.so where the tiles spill
+/// over into the next island.
 fn strip_layout(
     inputs: &[LayoutInput],
     areas: &[f64],
     canvas_w: f64,
+    canvas_h: f64,
 ) -> (Vec<WorldTile>, f64) {
     let mut tiles = Vec::with_capacity(inputs.len());
 
@@ -1074,7 +1120,20 @@ fn strip_layout(
 
     while idx < inputs.len() {
         let row_start = idx;
-        let row_height = best_strip_height(&areas[idx..], canvas_w);
+        let mut row_height = best_strip_height(&areas[idx..], canvas_w);
+        // Backstop: never let a row push past the canvas bottom.
+        // If we still have rows to lay out but no vertical space
+        // for a natural-height row, squeeze the remaining work
+        // into the leftover slice. Last-row tiles get shorter;
+        // the chrome / LoD cull at draw time hides the
+        // resulting sub-pixel slivers.
+        let remaining_h = (canvas_h - cursor_y).max(0.0);
+        if remaining_h <= 0.0 {
+            break;
+        }
+        if row_height > remaining_h {
+            row_height = remaining_h;
+        }
         let mut cursor_x = 0.0_f64;
         while idx < inputs.len() {
             let a = areas[idx];
@@ -1132,7 +1191,14 @@ fn best_strip_height(areas_remaining: &[f64], canvas_w: f64) -> f64 {
         }
     }
     let chosen_sum: f64 = areas_remaining[..best_k].iter().sum();
-    (chosen_sum / canvas_w).max(2.0)
+    // Tiny epsilon floor to avoid a degenerate zero-height row;
+    // do NOT clamp to a visible value here. A 2.0 floor caused
+    // overflow on libraries with tens of thousands of tiny
+    // functions: rescaled areas produce row heights well below
+    // 1, and forcing each row to >= 2 stacks `n_rows × 2` of
+    // height into a canvas that's only `n_rows × ~0.5` tall —
+    // the strip ends up overflowing into the next island.
+    (chosen_sum / canvas_w).max(f64::EPSILON)
 }
 
 fn find_containing_section(
@@ -1824,17 +1890,35 @@ fn render_canvas(
     // packages — and within each package, either the
     // individual class tiles (when zoomed in enough that
     // classes are visible) or a single package summary tile
-    // (when zoomed out). The threshold: a package's smallest
-    // dimension on screen has to exceed `CLASS_LOD_PX` for us
-    // to drop into classes; otherwise the whole package is
-    // one tile.
+    // (when zoomed out). Two LoD thresholds:
+    //
+    //   * `DEX_ISLAND_LOD_PX`: mirror of the native island
+    //     threshold. Below this, packages would average sub-
+    //     readable size; skip the package loop entirely. The
+    //     island bg + header already drawn in `island_layer` is
+    //     the LoD-out summary. Without this, a single DEX file
+    //     with hundreds of packages emits hundreds of quads per
+    //     frame at zoom-out.
+    //   * `CLASS_LOD_PX`: per-package threshold for switching
+    //     between the per-class branch and the package-summary
+    //     branch.
+    //   * `PKG_TILE_MIN_PX`: below this a package summary tile
+    //     wouldn't be visible at all; skip emitting it.
+    const DEX_ISLAND_LOD_PX: f32 = 80.0;
     const CLASS_LOD_PX: f32 = 60.0;
+    const PKG_TILE_MIN_PX: f32 = 6.0;
     for (idx, content_opt) in layout.dex_content.iter().enumerate() {
         let Some(content) = content_opt.as_ref() else { continue };
         let Some(isl) = layout.islands.get(idx) else { continue };
         // Per-island culling — if the island isn't on screen
-        // at all, skip its content.
-        if project_rect(isl.wx, isl.wy, isl.ww, isl.wh, &camera).is_none() {
+        // at all, or is too small for per-package detail, skip
+        // its content entirely.
+        let Some(isl_screen) =
+            project_rect(isl.wx, isl.wy, isl.ww, isl.wh, &camera)
+        else {
+            continue;
+        };
+        if isl_screen.w < DEX_ISLAND_LOD_PX || isl_screen.h < DEX_ISLAND_LOD_PX {
             continue;
         }
         for pkg in &content.packages {
@@ -1843,7 +1927,7 @@ fn render_canvas(
             else {
                 continue;
             };
-            if pkg_screen.w < 2.0 || pkg_screen.h < 2.0 {
+            if pkg_screen.w < PKG_TILE_MIN_PX || pkg_screen.h < PKG_TILE_MIN_PX {
                 continue;
             }
             let render_classes = pkg_screen.w >= CLASS_LOD_PX
@@ -1942,7 +2026,13 @@ fn render_canvas(
                 }
             } else {
                 // Zoomed-out branch: one tile per package.
+                // Drop the border quad on tiles too small to
+                // read — same TILE_CHROME_MIN_PX reasoning as
+                // the native side.
+                const PKG_CHROME_MIN_PX: f32 = 12.0;
                 let bg = ISLAND_BG_DEX;
+                let want_chrome = pkg_screen.w >= PKG_CHROME_MIN_PX
+                    && pkg_screen.h >= PKG_CHROME_MIN_PX;
                 let label = if pkg_screen.w >= 60. && pkg_screen.h >= 14. {
                     let pkg_label = if pkg.name.is_empty() {
                         SharedString::from("(default)")
@@ -1959,9 +2049,10 @@ fn render_canvas(
                     .top(px(pkg_screen.y))
                     .w(px(pkg_screen.w.max(1.0)))
                     .h(px(pkg_screen.h.max(1.0)))
-                    .bg(rgb(bg))
-                    .border_1()
-                    .border_color(border);
+                    .bg(rgb(bg));
+                if want_chrome {
+                    t = t.border_1().border_color(border);
+                }
                 if let Some(text) = label {
                     t = t.child(
                         div()

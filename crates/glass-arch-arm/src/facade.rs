@@ -452,6 +452,19 @@ impl PageBaseTracker {
         Self::default()
     }
 
+    /// Seed the AArch64 ADRP page slot for register Xd with
+    /// `page`. Used by callers that build the listing in pieces
+    /// (the paged listing cache) so an ADRP that lives in a
+    /// previous page can still complete an ADD in the current
+    /// page. Callers that build the whole section in one pass
+    /// don't need this — `observe` sets the slot naturally as
+    /// it walks the ADRP instruction.
+    pub fn set_x_page(&mut self, reg: u8, page: u64) {
+        if (reg as usize) < self.aarch64_pages.len() {
+            self.aarch64_pages[reg as usize] = Some(page);
+        }
+    }
+
     /// Consume one instruction in source order. Returns the
     /// fused absolute address when this instruction completes a
     /// known pair; updates internal state otherwise.

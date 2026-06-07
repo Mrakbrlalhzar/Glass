@@ -164,8 +164,8 @@ impl Shell {
         // Dispatch by tab kind: each one owns a different row
         // collection.
         let (row_count, only_instructions) = match &tab.kind {
-            crate::TabKind::Listing { .. } => match tab.listing_rows.as_ref() {
-                Some(rows) => (rows.len(), true),
+            crate::TabKind::Listing { .. } => match tab.listing_paged.as_ref() {
+                Some(p) => (p.total_rows() as usize, true),
                 None => return,
             },
             crate::TabKind::Hex { .. } => match tab.hex_paged.as_ref() {
@@ -184,17 +184,21 @@ impl Shell {
         let max = row_count as i32 - 1;
         let mut pos = tab.selected_row.unwrap_or(0) as i32;
         if only_instructions {
-            // Listing: walk past non-Instruction rows.
-            let rows = tab.listing_rows.as_ref().unwrap().clone();
-            loop {
-                let next = pos + step;
-                if next < 0 || next > max {
-                    return;
-                }
-                pos = next;
-                if matches!(rows[pos as usize], crate::ListingRow::Instruction { .. }) {
-                    break;
-                }
+            // Listing: walk past non-Instruction rows (symbol
+            // headers, BB separators) using the paged cache. The
+            // helpers materialise a page if it isn't cached;
+            // typical key-by-key navigation stays in one page.
+            let Some(paged) = tab.listing_paged.as_ref().cloned() else { return };
+            let candidate = (pos + step).clamp(0, max) as u32;
+            let next_pos = if step > 0 {
+                paged.next_instruction_at_or_after(candidate)
+            } else {
+                paged.prev_instruction_at_or_before(candidate)
+            };
+            let Some(next_pos) = next_pos else { return };
+            pos = next_pos as i32;
+            if pos == tab.selected_row.unwrap_or(0) as i32 {
+                return;
             }
         } else {
             let next = (pos + step).clamp(0, max);
@@ -236,12 +240,8 @@ impl Shell {
         let Some(active) = self.active_tab else { return };
         let Some(tab) = self.tabs.get(active) else { return };
         let Some(selected) = tab.selected_row else { return };
-        let Some(rows) = tab.listing_rows.as_ref() else { return };
-        let Some(row) = rows.get(selected) else { return };
-        let crate::ListingRow::Instruction { address, .. } = row else {
-            return;
-        };
-        let address = *address;
+        let Some(paged) = tab.listing_paged.as_ref().cloned() else { return };
+        let Some(address) = paged.addr_at(selected as u32) else { return };
         let artifact = match &tab.kind {
             crate::TabKind::Listing { artifact, .. } => artifact.clone(),
             _ => return,

@@ -52,6 +52,7 @@ mod traces_dialog;
 mod device_picker;
 mod hex;
 mod paged_hex;
+mod paged_listing;
 mod icons;
 mod injection_dialog;
 mod listing_model;
@@ -1181,13 +1182,18 @@ pub(crate) struct Tab {
     /// Scroll state for the right pane when this tab is active.
     pub(crate) scroll: ListState,
     /// SmaliClass: cached line split of the body.
-    /// Listing: unused (see `listing_rows`).
+    /// Listing: unused (see `listing_paged`).
     pub(crate) lines: Option<Arc<Vec<SharedString>>>,
-    /// Listing: precomputed mixed rows.
-    pub(crate) listing_rows: Option<Arc<Vec<ListingRow>>>,
-    /// While `listing_rows` is being built off-thread, holds the
-    /// shared progress structure so the render path can show a bar.
-    pub(crate) listing_progress: Option<Arc<Mutex<Progress>>>,
+    /// Listing: paged row cache. `None` until the tab's
+    /// background prepass lands; once built, the `PagedListing`
+    /// is held for the tab's lifetime but its page LRU evicts
+    /// under memory pressure — see `paged_listing`.
+    pub(crate) listing_paged: Option<Arc<paged_listing::PagedListing>>,
+    /// Listing: `true` while the background prepass is running.
+    /// Prevents `ensure_active_tab_lines` from kicking off
+    /// duplicate builds on successive render frames. Cleared
+    /// when the result is installed into `listing_paged`.
+    pub(crate) listing_build_in_flight: bool,
     /// Horizontal scroll offset for the right-pane body.
     pub(crate) h_offset: Pixels,
     /// One-shot scroll target consumed on the next active-tab paint.
@@ -1461,8 +1467,8 @@ impl Tab {
             pending_scroll_restore: None,
             scroll: ListState::new(0, ListAlignment::Top, px(2000.)),
             lines: None,
-            listing_rows: None,
-            listing_progress: None,
+            listing_paged: None,
+            listing_build_in_flight: false,
             h_offset: px(0.),
             selected_row: None,
             selected_byte_addr: None,

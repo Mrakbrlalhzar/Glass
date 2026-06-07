@@ -253,24 +253,10 @@ pub fn build_listing_rows(
     data: &DataPeek,
     progress: Option<&Arc<Mutex<Progress>>>,
 ) -> Vec<ListingRow> {
-    // ARMv7 sections come in with a precomputed `Vec<DecodedInsn>`
-    // attached — the upstream recursive-descent disassembler ran at
-    // load time to honor literal pools and the variable Thumb
-    // encoding width. Route those through a dedicated builder that
-    // walks the precomputed vector instead of the AArch64-only
-    // 4-byte-chunk path below.
     if text.precomputed.is_some() {
         return build_listing_rows_armv7(text, symbols, data, progress);
     }
-    use glass_arch_arm::format as fmt;
     let n = text.instruction_count();
-    // Tracks the row index of the ADRP that produced each
-    // x_page_bases entry. When a later ADD resolves an ADRP+ADD
-    // pair whose resolved target sits in a *different* section
-    // from the page address, we use this to retro-label the ADRP
-    // row with the destination section (negative offset) so the
-    // reader sees the destination at a glance.
-    let mut x_page_origin_row: [Option<usize>; 32] = [None; 32];
     if let Some(p) = progress {
         if let Ok(mut p) = p.lock() {
             p.phase = SharedString::from("Disassembling…");
@@ -278,20 +264,93 @@ pub fn build_listing_rows(
             p.total = n;
         }
     }
-    // Rough capacity: ~1.2 rows per insn (some symbol headers + BB
-    // separators). Avoids most reallocations on large sections.
     let mut rows = Vec::with_capacity(n + n / 8);
+    build_listing_rows_for_range_with_progress(
+        text,
+        symbols,
+        data,
+        0,
+        n as u32,
+        None,
+        &mut rows,
+        progress,
+    );
+    assign_arrows(&mut rows);
+    if let Some(p) = progress {
+        if let Ok(mut p) = p.lock() {
+            p.current = n;
+            p.done = true;
+        }
+    }
+    rows
+}
 
-    // ADRP+ADD pair tracking via the shared facade tracker. For
-    // each X-register the tracker remembers the most recent ADRP
-    // page address loaded into it; any later ADD that sources from
-    // that register resolves to `page + imm`. The tracker
-    // invalidates a slot whenever an instruction writes to its
-    // register (the conservative rule — a write loses the page
-    // base for further resolution).
+/// Build the AArch64 per-instruction rows for instruction indices
+/// `first_insn..end_insn`, appending them to `rows`. Optional
+/// `seed_x_pages` initialises the ADRP page-base tracker so an
+/// ADD in this range can fuse with an ADRP in a previous range
+/// (e.g. the page before, when the paged builder is calling).
+///
+/// Does NOT run `assign_arrows` — arrows are global to the
+/// section and are computed separately. The `paged_listing` path
+/// computes arrows once at construction; the monolithic
+/// `build_listing_rows` runs `assign_arrows` over the full row
+/// list after this returns.
+pub fn build_listing_rows_for_range(
+    text: &TextSectionBytes,
+    symbols: &glass_arch_arm::SymbolMap,
+    data: &DataPeek,
+    first_insn: u32,
+    end_insn: u32,
+    seed_x_pages: Option<[Option<u64>; 32]>,
+    rows: &mut Vec<ListingRow>,
+) {
+    build_listing_rows_for_range_with_progress(
+        text,
+        symbols,
+        data,
+        first_insn,
+        end_insn,
+        seed_x_pages,
+        rows,
+        None,
+    );
+}
+
+/// Same as `build_listing_rows_for_range` but with periodic
+/// progress callbacks every 1024 instructions. Used by the
+/// legacy monolithic path (and any future caller that needs to
+/// animate a progress bar).
+pub fn build_listing_rows_for_range_with_progress(
+    text: &TextSectionBytes,
+    symbols: &glass_arch_arm::SymbolMap,
+    data: &DataPeek,
+    first_insn: u32,
+    end_insn: u32,
+    seed_x_pages: Option<[Option<u64>; 32]>,
+    rows: &mut Vec<ListingRow>,
+    progress: Option<&Arc<Mutex<Progress>>>,
+) {
+    use glass_arch_arm::format as fmt;
+    // Per-register origin-row bookkeeping is local to this call —
+    // cross-page retro-labels only target rows in the current
+    // build (the paged caller accepts losing them for cross-page
+    // ADRP+ADD pairs).
+    let mut x_page_origin_row: [Option<usize>; 32] = [None; 32];
+
+    // Tracker is seeded so cross-range ADRP+ADD pairs fuse.
     let mut tracker = glass_arch_arm::PageBaseTracker::new();
+    if let Some(seeds) = seed_x_pages {
+        for (reg, page) in seeds.iter().enumerate() {
+            if let Some(p) = page {
+                tracker.set_x_page(reg as u8, *p);
+            }
+        }
+    }
 
-    for i in 0..n {
+    let start_row = rows.len();
+    for i in first_insn..end_insn {
+        let i = i as usize;
         if i % 1024 == 0 {
             if let Some(p) = progress {
                 if let Ok(mut p) = p.lock() {
@@ -578,16 +637,7 @@ pub fn build_listing_rows(
             });
         }
     }
-
-    assign_arrows(&mut rows);
-
-    if let Some(p) = progress {
-        if let Ok(mut p) = p.lock() {
-            p.current = n;
-            p.done = true;
-        }
-    }
-    rows
+    let _ = start_row;
 }
 
 /// After rows are built, scan every Instruction for a direct branch

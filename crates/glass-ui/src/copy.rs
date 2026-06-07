@@ -51,10 +51,12 @@ impl Shell {
                 if a != artifact {
                     continue;
                 }
-                let Some(rows) = tab.listing_rows.as_ref() else { continue };
-                if let Some(idx) = crate::listing_model::listing_row_for_addr(rows, addr) {
-                    if let Some(row) = rows.get(idx) {
-                        return Some(format_listing_row(row));
+                let Some(paged) = tab.listing_paged.as_ref() else { continue };
+                if let Some(idx) = paged.row_for_addr(addr) {
+                    if let Some((page, off)) = paged.page_for_row_blocking(idx) {
+                        if let Some(row) = page.get(off) {
+                            return Some(format_listing_row(row));
+                        }
                     }
                 }
             }
@@ -104,8 +106,9 @@ impl Shell {
 
 fn copy_listing(tab: &crate::Tab) -> Option<String> {
     let row_idx = tab.selected_row?;
-    let rows = tab.listing_rows.as_ref()?;
-    let row = rows.get(row_idx)?;
+    let paged = tab.listing_paged.as_ref()?;
+    let (page, off) = paged.page_for_row_blocking(row_idx as u32)?;
+    let row = page.get(off)?;
     Some(format_listing_row(row))
 }
 

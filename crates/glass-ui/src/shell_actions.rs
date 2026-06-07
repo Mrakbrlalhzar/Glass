@@ -6,20 +6,19 @@
 //! defined on `Shell` exactly as before.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
 use gpui::{
     px, Bounds, Context, ListAlignment, ListOffset, ListState, Pixels, SharedString, Window,
 };
 
-use crate::listing_model::{build_listing_rows, listing_row_for_addr, DataPeek, ListingRow};
+use crate::listing_model::DataPeek;
 use crate::search::SearchJump;
 use crate::SearchEntry;
 use crate::{
     flatten, scroll_into_view_with_context, Expanded, LeafId,
-    LoadedBundle, NativeSectionKind, Progress, RowKind, SectionInfo, Shell, ShellState, Tab,
-    TabKind, TextSectionBytes,
+    LoadedBundle, NativeSectionKind, RowKind, SectionInfo, Shell, ShellState, Tab,
+    TabKind,
 };
 
 impl Shell {
@@ -413,17 +412,15 @@ impl Shell {
                     let top_row = t.scroll.logical_scroll_top().item_ix;
                     match &t.kind {
                         TabKind::Listing { artifact, section } => {
+                            // Persist the byte-address of the top
+                            // visible row. Non-blocking lookup: if
+                            // the row's page isn't cached we record
+                            // 0 rather than block at shutdown. Reopen
+                            // restore goes through pending_scroll_addr.
                             let scroll_top = t
-                                .listing_rows
+                                .listing_paged
                                 .as_ref()
-                                .and_then(|rows| {
-                                    rows.get(top_row).and_then(|r| match r {
-                                        crate::ListingRow::Instruction { address, .. } => {
-                                            Some(*address)
-                                        }
-                                        _ => None,
-                                    })
-                                })
+                                .and_then(|p| p.addr_at_if_cached(top_row as u32))
                                 .unwrap_or(0);
                             return Some(glass_db::TabState::Listing {
                                 artifact: artifact.clone(),
@@ -932,96 +929,6 @@ impl Shell {
     }
 
     /// Lazily populate the active tab's line cache. Returns `None` if
-    /// there is no active tab or the bundle is gone.
-    /// Spawn a worker thread that runs `build_listing_rows`, plus a
-    /// foreground task that animates progress and installs the result.
-    ///
-    /// `tab_id` identifies which tab to install rows into. Using the
-    /// id (not the `TabKind`) means two tabs with the same kind —
-    /// e.g. "Follow in new tab" duplicates a section's Listing —
-    /// each get their own rows installed once their worker
-    /// completes.
-    pub(crate) fn spawn_listing_build(
-        &self,
-        tab_id: crate::TabId,
-        text: TextSectionBytes,
-        symbols: Arc<glass_arch_arm::SymbolMap>,
-        data: Arc<DataPeek>,
-        progress: Arc<Mutex<Progress>>,
-        cx: &mut Context<Self>,
-    ) {
-        let progress_for_bg = progress.clone();
-        let symbols_for_bg = symbols.clone();
-        let text_for_bg = text.clone();
-        let data_for_bg = data.clone();
-        let build_task = cx.background_executor().spawn(async move {
-            build_listing_rows(
-                &text_for_bg,
-                &symbols_for_bg,
-                &data_for_bg,
-                Some(&progress_for_bg),
-            )
-        });
-
-        let progress_for_poll = progress.clone();
-        cx.spawn(async move |this, cx| {
-            // Animate the bar while the worker runs. Same shape as the
-            // bundle-loader poll loop.
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(33))
-                    .await;
-                let _ = this.update(cx, |_s, cx| cx.notify());
-                let done = progress_for_poll.lock().map(|p| p.done).unwrap_or(true);
-                if done {
-                    break;
-                }
-            }
-            let rows = build_task.await;
-            let comment_count = rows
-                .iter()
-                .filter(|r| {
-                    matches!(r, ListingRow::Instruction { comment, .. } if !comment.is_empty())
-                })
-                .count();
-            tracing::info!(
-                "listing build: total_rows={}, comments={}",
-                rows.len(),
-                comment_count
-            );
-            let rows = Arc::new(rows);
-            let _ = this.update(cx, |shell, cx| {
-                let Some(idx) = shell.tabs.iter().position(|t| t.id == tab_id) else {
-                    return;
-                };
-                if let Some(tab) = shell.tabs.get_mut(idx) {
-                    tab.scroll =
-                        ListState::new(rows.len(), ListAlignment::Top, px(2000.));
-                    tab.listing_rows = Some(rows.clone());
-                    tab.listing_progress = None;
-                    // Apply any pending scroll request now that rows
-                    // exist. Leave the pending addr in place so
-                    // `ensure_active_tab_lines` re-applies it on the
-                    // next paint once the viewport has real bounds —
-                    // otherwise the first scroll can land short
-                    // because `scroll_into_view_with_context` reads
-                    // zero viewport height.
-                    if let Some(addr) = tab.pending_scroll_addr {
-                        if let Some(row_idx) = listing_row_for_addr(rows.as_ref(), addr)
-                        {
-                            scroll_into_view_with_context(&tab.scroll, row_idx);
-                            tab.selected_row = Some(row_idx);
-                        } else {
-                            tab.pending_scroll_addr = None;
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     pub(crate) fn ensure_active_tab_lines(&mut self, cx: &mut Context<Self>) {
         let Some(active) = self.active_tab else { return };
         let Some(bundle) = self.bundle().cloned() else { return };
@@ -1092,8 +999,11 @@ impl Shell {
                 }
             }
             // Listing: kick off a background build the first time the
-            // tab is activated. Worker thread fills in `listing_rows`;
-            // a foreground poll loop animates the progress bar.
+            // tab is activated. Paged build: prepass only —
+            // formatted rows materialise lazily as the user
+            // scrolls. No worker thread, no progress bar; the
+            // upfront cost is a single decode-only walk of the
+            // section bytes plus a section-wide arrow pass.
             TabKind::Listing { artifact, section } => {
                 let artifact = artifact.clone();
                 let section = section.clone();
@@ -1101,91 +1011,12 @@ impl Shell {
                 let Some(text) = bundle.text_sections.get(&key).cloned() else {
                     return;
                 };
-                // First decide what to do based on tab state, *then* drop
-                // the borrow before calling spawn_listing_build.
-                let mut start_build = None;
-                if tab.listing_rows.is_none() && tab.listing_progress.is_none() {
-                    let empty = glass_arch_arm::SymbolMap::default();
-                    let symbols_arc: Arc<glass_arch_arm::SymbolMap> = Arc::new(
-                        bundle.symbol_maps.get(&artifact).cloned().unwrap_or(empty),
-                    );
-                    // Snapshot this artifact's data sections so the
-                    // worker can peek string literals when forming
-                    // adrp+add comments. Sharing through Arc keeps it
-                    // cheap on big binaries.
-                    let mut data_sections = Vec::new();
-                    let mut section_meta = Vec::new();
-                    for ((aid, name), ds) in bundle.data_sections.iter() {
-                        if aid != &artifact {
-                            continue;
-                        }
-                        // Skip DWARF / debug sections: they live in
-                        // their own base-0 address space (when unlinked
-                        // or shipped that way) and trick `peek_string`
-                        // into thinking every pointer is "inside" them.
-                        if ds.kind == NativeSectionKind::Debug {
-                            continue;
-                        }
-                        if ds.base == 0 {
-                            continue;
-                        }
-                        data_sections.push((ds.base, ds.bytes.clone()));
-                        section_meta.push(crate::listing_model::DataSectionMeta {
-                            name: name.clone(),
-                            base: ds.base,
-                            size: ds.bytes.len() as u64,
-                        });
-                    }
-                    // Also include every native section (text + data)
-                    // so ADRP targets that land in some other text
-                    // page can still resolve to a section name. Text
-                    // sections are not in `data_sections` because the
-                    // string-peek logic doesn't want them.
-                    if let Some(sections) = bundle.native_sections.get(&artifact) {
-                        for sec in sections.iter() {
-                            if section_meta.iter().any(|m| m.base == sec.address) {
-                                continue;
-                            }
-                            section_meta.push(crate::listing_model::DataSectionMeta {
-                                name: sec.name.to_string(),
-                                base: sec.address,
-                                size: sec.size,
-                            });
-                        }
-                    }
-                    // Code sections — needed only by `peek_u32_le` for
-                    // ARMv7 Thumb literal-pool dereference (the pool
-                    // word sits inside `.text`, between functions, and
-                    // holds a 32-bit pointer into rodata). `peek_string`
-                    // stays data-only.
-                    let mut code_sections = Vec::new();
-                    for ((aid, _name), ts) in bundle.text_sections.iter() {
-                        if aid != &artifact {
-                            continue;
-                        }
-                        code_sections.push((ts.base, ts.bytes.clone()));
-                    }
-                    let data_arc = Arc::new(DataPeek {
-                        sections: data_sections,
-                        code_sections,
-                        section_meta,
-                    });
-                    let n = text.instruction_count();
-                    let progress = Arc::new(Mutex::new(Progress {
-                        label: section.clone(),
-                        phase: SharedString::from("Disassembling…"),
-                        current: 0,
-                        total: n,
-                        done: false,
-                    }));
-                    tab.listing_progress = Some(progress.clone());
-                    let tab_id = tab.id;
-                    start_build = Some((tab_id, symbols_arc, data_arc, progress));
-                }
-                if tab.listing_rows.is_some() {
+                // Already built — handle pending scroll only.
+                if tab.listing_paged.is_some() {
                     if let Some(addr) = tab.pending_scroll_addr {
-                        if let Some(rows) = tab.listing_rows.as_ref() {
-                            if let Some(idx) = listing_row_for_addr(rows.as_ref(), addr) {
+                        if let Some(paged) = tab.listing_paged.as_ref() {
+                            if let Some(idx) = paged.row_for_addr(addr) {
+                                let idx = idx as usize;
                                 let viewport_ready =
                                     tab.scroll.viewport_bounds().size.height > px(0.);
                                 scroll_into_view_with_context(&tab.scroll, idx);
@@ -1200,13 +1031,100 @@ impl Shell {
                             }
                         }
                     }
+                    return;
                 }
-                // `tab` borrow ends here; spawn the build outside.
-                if let Some((tab_id, symbols_arc, data_arc, progress)) = start_build {
-                    self.spawn_listing_build(
-                        tab_id, text, symbols_arc, data_arc, progress, cx,
-                    );
+                // Background prepass already running — wait for it.
+                if tab.listing_build_in_flight {
+                    return;
                 }
+                tab.listing_build_in_flight = true;
+                let tab_id = tab.id;
+                let empty = glass_arch_arm::SymbolMap::default();
+                let symbols_arc: Arc<glass_arch_arm::SymbolMap> = Arc::new(
+                    bundle.symbol_maps.get(&artifact).cloned().unwrap_or(empty),
+                );
+                let mut data_sections = Vec::new();
+                let mut section_meta = Vec::new();
+                for ((aid, name), ds) in bundle.data_sections.iter() {
+                    if aid != &artifact {
+                        continue;
+                    }
+                    if ds.kind == NativeSectionKind::Debug {
+                        continue;
+                    }
+                    if ds.base == 0 {
+                        continue;
+                    }
+                    data_sections.push((ds.base, ds.bytes.clone()));
+                    section_meta.push(crate::listing_model::DataSectionMeta {
+                        name: name.clone(),
+                        base: ds.base,
+                        size: ds.bytes.len() as u64,
+                    });
+                }
+                if let Some(sections) = bundle.native_sections.get(&artifact) {
+                    for sec in sections.iter() {
+                        if section_meta.iter().any(|m| m.base == sec.address) {
+                            continue;
+                        }
+                        section_meta.push(crate::listing_model::DataSectionMeta {
+                            name: sec.name.to_string(),
+                            base: sec.address,
+                            size: sec.size,
+                        });
+                    }
+                }
+                let mut code_sections = Vec::new();
+                for ((aid, _name), ts) in bundle.text_sections.iter() {
+                    if aid != &artifact {
+                        continue;
+                    }
+                    code_sections.push((ts.base, ts.bytes.clone()));
+                }
+                let data_arc = Arc::new(DataPeek {
+                    sections: data_sections,
+                    code_sections,
+                    section_meta,
+                });
+                // Off-thread prepass: PagedListing::new walks the
+                // section once (O(n_insns)) plus a section-wide
+                // arrow pass. Both can take 100s of ms on a big
+                // .text; running them on the main thread freezes
+                // the UI. Install the result on completion via
+                // cx.update_entity.
+                let text_for_bg = text.clone();
+                let symbols_for_bg = symbols_arc.clone();
+                let data_for_bg = data_arc.clone();
+                cx.spawn(async move |this, cx| {
+                    let paged = cx
+                        .background_executor()
+                        .spawn(async move {
+                            Arc::new(crate::paged_listing::PagedListing::new(
+                                text_for_bg,
+                                symbols_for_bg,
+                                data_for_bg,
+                                crate::paged_listing::DEFAULT_MAX_PAGES,
+                            ))
+                        })
+                        .await;
+                    let _ = this.update(cx, |shell, cx| {
+                        let Some(idx) = shell.tabs.iter().position(|t| t.id == tab_id)
+                        else {
+                            return;
+                        };
+                        if let Some(tab) = shell.tabs.get_mut(idx) {
+                            tab.scroll = ListState::new(
+                                paged.total_rows() as usize,
+                                ListAlignment::Top,
+                                px(2000.),
+                            );
+                            tab.listing_paged = Some(paged);
+                            tab.listing_build_in_flight = false;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             // SmaliClass: pre-built line cache. If the user has
             // staged a typed edit for this class, re-render from the

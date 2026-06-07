@@ -323,83 +323,93 @@ pub fn render_two_pane(
             }
             Some(TabKind::Listing { artifact, .. }) => {
                 let tab_view = shell.active_tab.and_then(|i| shell.tabs.get(i));
-                let (rows_opt, progress_opt, scroll_opt, h_offset, selected_row) =
+                let (paged_opt, scroll_opt, h_offset, selected_row) =
                     match tab_view {
                         Some(tab) => (
-                            tab.listing_rows.clone(),
-                            tab.listing_progress.clone(),
+                            tab.listing_paged.clone(),
                             Some(tab.scroll.clone()),
                             tab.h_offset,
                             tab.selected_row,
                         ),
-                        None => (None, None, None, px(0.), None),
+                        None => (None, None, px(0.), None),
                     };
-                match (rows_opt, progress_opt) {
-                    (Some(listing_rows), _) => {
-                        let scroll = scroll_opt.unwrap_or_else(|| {
-                            ListState::new(0, ListAlignment::Top, px(2000.))
-                        });
-                        let v_scrollbar = list_scrollbar(&scroll, border, dim);
-                        let h_scrollbar = horizontal_scrollbar_offset(
-                            h_offset,
-                            px(LISTING_ROW_MIN_WIDTH),
-                            border,
-                            dim,
-                        );
-                        let max_h = (px(LISTING_ROW_MIN_WIDTH)).max(px(0.));
+                let Some(paged) = paged_opt else {
+                    // Prepass running on a background thread. The
+                    // first scroll target will be applied on the
+                    // next render frame once `listing_paged` is
+                    // populated.
+                    return div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(dim)
+                        .child("Disassembling…")
+                        .into_any_element();
+                };
+                let scroll = scroll_opt.unwrap_or_else(|| {
+                    ListState::new(0, ListAlignment::Top, px(2000.))
+                });
+                let v_scrollbar = list_scrollbar(&scroll, border, dim);
+                let h_scrollbar = horizontal_scrollbar_offset(
+                    h_offset,
+                    px(LISTING_ROW_MIN_WIDTH),
+                    border,
+                    dim,
+                );
+                let max_h = (px(LISTING_ROW_MIN_WIDTH)).max(px(0.));
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .child(
                         div()
                             .flex_1()
-                            .flex()
-                            .flex_col()
-                            .min_h_0()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .relative()
-                                    .overflow_hidden()
-                                    // Capture horizontal scroll wheel /
-                                    // trackpad gestures and shift the
-                                    // rows by adjusting h_offset.
-                                    .on_scroll_wheel(cx.listener(
-                                        move |this, ev: &gpui::ScrollWheelEvent, _w, cx| {
-                                            let line_h = px(LISTING_ROW_HEIGHT);
-                                            let dx = ev.delta.pixel_delta(line_h).x;
-                                            if dx != px(0.) {
-                                                this.scroll_h_by(-dx, max_h, cx);
-                                            }
-                                        },
-                                    ))
-                                    .child({
-                                        let ctx = RowCtx {
-                                            bundle: bundle.clone(),
-                                            artifact: artifact.clone(),
-                                            shell: cx.entity().downgrade(),
-                                            selected_row,
-                    disasm_edit: shell.disasm_edit.clone(),
-                    hex_edit: shell.hex_edit.clone(),
-                                        };
-                                        list(scroll, move |index, _window, _cx| {
-                                            let Some(row) = listing_rows.get(index)
-                                            else {
-                                                return div().into_any();
-                                            };
-                                            render_listing_row_with(
-                                                row, index, h_offset, Some(&ctx),
-                                            )
-                                                .into_any()
-                                        })
-                                        .size_full()
-                                    })
-                                    .child(v_scrollbar),
-                            )
-                            .child(h_scrollbar)
-                            .into_any_element()
-                    }
-                    (None, Some(progress)) => shell
-                        .render_progress(&progress, panel, border, fg, dim, accent)
-                        .into_any_element(),
-                    (None, None) => div().flex_1().into_any_element(),
-                }
+                            .relative()
+                            .overflow_hidden()
+                            .on_scroll_wheel(cx.listener(
+                                move |this, ev: &gpui::ScrollWheelEvent, _w, cx| {
+                                    let line_h = px(LISTING_ROW_HEIGHT);
+                                    let dx = ev.delta.pixel_delta(line_h).x;
+                                    if dx != px(0.) {
+                                        this.scroll_h_by(-dx, max_h, cx);
+                                    }
+                                },
+                            ))
+                            .child({
+                                let ctx = RowCtx {
+                                    bundle: bundle.clone(),
+                                    artifact: artifact.clone(),
+                                    shell: cx.entity().downgrade(),
+                                    selected_row,
+                                    disasm_edit: shell.disasm_edit.clone(),
+                                    hex_edit: shell.hex_edit.clone(),
+                                };
+                                list(scroll, move |index, _window, _cx| {
+                                    // page_for_row_blocking materialises
+                                    // the containing page if missing.
+                                    // First scroll into a new page blocks
+                                    // briefly while the page builds; step
+                                    // 3 (if it's needed) would swap this
+                                    // for the cached lookup + background
+                                    // build pattern.
+                                    let Some((page, off)) =
+                                        paged.page_for_row_blocking(index as u32)
+                                    else {
+                                        return div().into_any();
+                                    };
+                                    render_listing_row_with(
+                                        &page[off], index, h_offset, Some(&ctx),
+                                    )
+                                    .into_any()
+                                })
+                                .size_full()
+                            })
+                            .child(v_scrollbar),
+                    )
+                    .child(h_scrollbar)
+                    .into_any_element()
             }
             Some(TabKind::ScriptEditor { .. })
             | Some(TabKind::SmaliEditor { .. })
