@@ -51,6 +51,7 @@ mod traces;
 mod traces_dialog;
 mod device_picker;
 mod hex;
+mod paged_hex;
 mod icons;
 mod injection_dialog;
 mod listing_model;
@@ -1205,8 +1206,11 @@ pub(crate) struct Tab {
     /// Hex view: the absolute address of the byte under the user's
     /// cursor, when one is selected.
     pub(crate) selected_byte_addr: Option<u64>,
-    /// Hex view: precomputed rows (lazily built).
-    pub(crate) hex_rows: Option<Arc<Vec<HexRow>>>,
+    /// Hex view: paged row cache. `None` until the tab is first
+    /// activated; once built, the `PagedHex` is held for the
+    /// tab's lifetime but its internal page cache evicts under
+    /// LRU pressure — see `paged_hex` for the policy.
+    pub(crate) hex_paged: Option<Arc<paged_hex::PagedHex>>,
     /// CFG view state. `Some` only for tabs with `TabKind::Cfg`.
     pub(crate) cfg: Option<CfgViewState>,
     /// DEX call-graph view state.
@@ -1462,7 +1466,7 @@ impl Tab {
             h_offset: px(0.),
             selected_row: None,
             selected_byte_addr: None,
-            hex_rows: None,
+            hex_paged: None,
             cfg,
             dex_callgraph,
             code_editor: None,

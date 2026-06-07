@@ -355,6 +355,18 @@ impl SymbolMap {
         self.by_address.is_empty()
     }
 
+    /// Build a `SymbolMap` from an explicit symbol vec — the
+    /// constructor for test fixtures and synthetic maps. Last
+    /// symbol wins on address collision (same semantics as
+    /// `BTreeMap::insert`).
+    pub fn from_symbols(symbols: impl IntoIterator<Item = Symbol>) -> Self {
+        let mut by_address = std::collections::BTreeMap::new();
+        for s in symbols {
+            by_address.insert(s.address, s);
+        }
+        SymbolMap { by_address }
+    }
+
     /// Iterate every symbol, by address.
     pub fn iter(&self) -> impl Iterator<Item = &Symbol> {
         self.by_address.values()

@@ -225,10 +225,10 @@ pub fn render_two_pane(
                 .render_section_map(&bundle, &artifact, panel, border, fg, dim, cx)
                 .into_any_element(),
             Some(TabKind::Hex { artifact, .. }) => {
-                let (rows_opt, scroll_opt, h_offset, selected_row, selected_byte) =
+                let (paged_opt, scroll_opt, h_offset, selected_row, selected_byte) =
                     match shell.active_tab.and_then(|i| shell.tabs.get(i)) {
                         Some(tab) => (
-                            tab.hex_rows.clone(),
+                            tab.hex_paged.clone(),
                             Some(tab.scroll.clone()),
                             tab.h_offset,
                             tab.selected_row,
@@ -247,7 +247,6 @@ pub fn render_two_pane(
                     dim,
                 );
                 let max_h = px(HEX_ROW_MIN_WIDTH);
-                let rows = rows_opt.unwrap_or_else(|| Arc::new(Vec::new()));
                 let ctx = RowCtx {
                     bundle: bundle.clone(),
                     artifact: artifact.clone(),
@@ -256,6 +255,23 @@ pub fn render_two_pane(
                     disasm_edit: shell.disasm_edit.clone(),
                     hex_edit: shell.hex_edit.clone(),
                 };
+                // `paged` is None on the first frame after tab
+                // open (before `ensure_active_tab_lines` runs);
+                // the renderer treats that as an empty list.
+                let paged = paged_opt.unwrap_or_else(|| {
+                    // A short-lived placeholder paged with no
+                    // rows. Cheaper than reshaping the callback
+                    // to take Option.
+                    Arc::new(crate::paged_hex::PagedHex::new(
+                        crate::DataSectionBytes {
+                            base: 0,
+                            bytes: Arc::new(Vec::new()),
+                            kind: crate::NativeSectionKind::Data,
+                        },
+                        Arc::new(glass_arch_arm::SymbolMap::default()),
+                        1,
+                    ))
+                });
                 div()
                     .flex_1()
                     .flex()
@@ -276,11 +292,21 @@ pub fn render_two_pane(
                             ))
                             .child(
                                 list(scroll, move |index, _window, _cx| {
-                                    let Some(row) = rows.get(index) else {
+                                    // page_for_row_blocking materialises
+                                    // the containing page if it isn't
+                                    // cached. Worst case: first scroll
+                                    // into a new page blocks for a few
+                                    // ms while build_hex_rows runs over
+                                    // 16 KB of bytes. Step 3 will move
+                                    // this to a non-blocking lookup +
+                                    // background build.
+                                    let Some((page, off)) =
+                                        paged.page_for_row_blocking(index as u32)
+                                    else {
                                         return div().into_any();
                                     };
                                     render_hex_row(
-                                        row,
+                                        &page[off],
                                         index,
                                         h_offset,
                                         Some(&ctx),

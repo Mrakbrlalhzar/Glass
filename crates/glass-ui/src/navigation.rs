@@ -41,68 +41,46 @@ impl Shell {
         if !matches!(tab.kind, crate::TabKind::Hex { .. }) {
             return;
         }
-        let Some(rows) = tab.hex_rows.as_ref() else { return };
+        let Some(paged) = tab.hex_paged.as_ref().cloned() else { return };
         // Find the (row_index, byte_addr) of the currently
         // selected byte. If there's no selection, start at
         // the first byte of the first Bytes row.
         let (mut row_idx, mut addr) = match tab.selected_byte_addr {
-            Some(a) => {
-                let row = rows.iter().position(|r| {
-                    matches!(
-                        r,
-                        crate::HexRow::Bytes { address, .. }
-                            if a >= *address && a < *address + 16
-                    )
-                });
-                match row {
-                    Some(i) => (i, a),
-                    None => return,
-                }
-            }
+            Some(a) => match paged.row_for_addr(a) {
+                Some(i) => (i, a),
+                None => return,
+            },
             None => {
-                let row = rows.iter().enumerate().find_map(|(i, r)| {
-                    matches!(r, crate::HexRow::Bytes { .. }).then_some(i)
-                });
-                let Some(i) = row else { return };
-                let crate::HexRow::Bytes { address, .. } = &rows[i] else {
-                    return;
-                };
-                (i, *address)
+                let Some(i) = paged.next_byte_row_at_or_after(0) else { return };
+                let Some(a) = paged.addr_at(i) else { return };
+                (i, a)
             }
         };
         let step: i64 = delta.signum() as i64;
         let new_addr = (addr as i64 + step) as u64;
-        // Stay inside the current row if we can.
-        if let crate::HexRow::Bytes { address, .. } = &rows[row_idx] {
-            if new_addr >= *address && new_addr < *address + 16 {
-                addr = new_addr;
+        let cur_row_addr = match paged.addr_at(row_idx) {
+            Some(a) => a,
+            None => return,
+        };
+        if new_addr >= cur_row_addr && new_addr < cur_row_addr + 16 {
+            addr = new_addr;
+        } else {
+            // Cross to the prev/next Bytes row.
+            let next_row_idx = if step > 0 {
+                paged.next_byte_row_at_or_after(row_idx + 1)
+            } else if row_idx == 0 {
+                None
             } else {
-                // Cross to the prev/next Bytes row.
-                let next_row_idx = if step > 0 {
-                    rows.iter()
-                        .enumerate()
-                        .skip(row_idx + 1)
-                        .find_map(|(i, r)| matches!(r, crate::HexRow::Bytes { .. }).then_some(i))
-                } else if row_idx == 0 {
-                    None
-                } else {
-                    rows.iter()
-                        .enumerate()
-                        .take(row_idx)
-                        .rev()
-                        .find_map(|(i, r)| matches!(r, crate::HexRow::Bytes { .. }).then_some(i))
-                };
-                let Some(ni) = next_row_idx else { return };
-                let crate::HexRow::Bytes { address, .. } = &rows[ni] else {
-                    return;
-                };
-                row_idx = ni;
-                addr = if step > 0 { *address } else { *address + 15 };
-            }
+                paged.prev_byte_row_at_or_before(row_idx - 1)
+            };
+            let Some(ni) = next_row_idx else { return };
+            let Some(ni_addr) = paged.addr_at(ni) else { return };
+            row_idx = ni;
+            addr = if step > 0 { ni_addr } else { ni_addr + 15 };
         }
-        tab.selected_row = Some(row_idx);
+        tab.selected_row = Some(row_idx as usize);
         tab.selected_byte_addr = Some(addr);
-        tab.scroll.scroll_to_reveal_item(row_idx);
+        tab.scroll.scroll_to_reveal_item(row_idx as usize);
         cx.notify();
     }
 
@@ -190,8 +168,8 @@ impl Shell {
                 Some(rows) => (rows.len(), true),
                 None => return,
             },
-            crate::TabKind::Hex { .. } => match tab.hex_rows.as_ref() {
-                Some(rows) => (rows.len(), false),
+            crate::TabKind::Hex { .. } => match tab.hex_paged.as_ref() {
+                Some(p) => (p.total_rows() as usize, false),
                 None => return,
             },
             crate::TabKind::SmaliEditor { .. } => match tab.lines.as_ref() {
@@ -231,25 +209,18 @@ impl Shell {
             // Hex tabs also drive `selected_byte_addr` so the
             // byte cursor moves with the row.
             if matches!(tab.kind, crate::TabKind::Hex { .. }) {
-                if let Some(rows) = tab.hex_rows.as_ref() {
-                    if let Some(crate::HexRow::Bytes { address, .. }) = rows.get(next) {
+                if let Some(paged) = tab.hex_paged.as_ref().cloned() {
+                    // The destination row may be a symbol header
+                    // (no address) — skip the cursor update then.
+                    if let Some(new_addr) = paged.addr_at(next as u32) {
                         // Preserve the column offset within the
                         // row so vertical movement keeps the
                         // byte cursor under the same column.
                         let column = tab
                             .selected_byte_addr
-                            .and_then(|a| {
-                                rows.iter().find_map(|r| match r {
-                                    crate::HexRow::Bytes { address, .. }
-                                        if a >= *address && a < *address + 16 =>
-                                    {
-                                        Some(a - *address)
-                                    }
-                                    _ => None,
-                                })
-                            })
+                            .and_then(|a| paged.row_for_addr(a).and_then(|i| paged.addr_at(i).map(|base| a - base)))
                             .unwrap_or(0);
-                        tab.selected_byte_addr = Some(*address + column);
+                        tab.selected_byte_addr = Some(new_addr + column);
                     }
                 }
             }

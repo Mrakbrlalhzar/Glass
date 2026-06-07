@@ -13,7 +13,6 @@ use gpui::{
     px, Bounds, Context, ListAlignment, ListOffset, ListState, Pixels, SharedString, Window,
 };
 
-use crate::hex::{build_hex_rows, hex_row_for_addr};
 use crate::listing_model::{build_listing_rows, listing_row_for_addr, DataPeek, ListingRow};
 use crate::search::SearchJump;
 use crate::SearchEntry;
@@ -433,17 +432,17 @@ impl Shell {
                             });
                         }
                         TabKind::Hex { artifact, section } => {
+                            // Persist the byte-address of the top
+                            // visible row so reopening lands at the
+                            // same place. Snapshot is best-effort:
+                            // if the row's page isn't cached we'll
+                            // record 0 rather than block here.
+                            // Reopen-time restore lives in
+                            // `pending_scroll_addr`.
                             let scroll_top = t
-                                .hex_rows
+                                .hex_paged
                                 .as_ref()
-                                .and_then(|rows| {
-                                    rows.get(top_row).and_then(|r| match r {
-                                        crate::hex::HexRow::Bytes { address, .. } => {
-                                            Some(*address)
-                                        }
-                                        _ => None,
-                                    })
-                                })
+                                .and_then(|p| p.addr_at_if_cached(top_row as u32))
                                 .unwrap_or(0);
                             return Some(glass_db::TabState::Hex {
                                 artifact: artifact.clone(),
@@ -1044,12 +1043,22 @@ impl Shell {
                 let Some(data) = bundle.hex_view_section(artifact, section) else {
                     return;
                 };
-                if tab.hex_rows.is_none() {
+                if tab.hex_paged.is_none() {
                     let empty = glass_arch_arm::SymbolMap::default();
-                    let symbols = bundle.symbol_maps.get(artifact).unwrap_or(&empty);
-                    let rows = build_hex_rows(&data, symbols);
-                    tab.scroll = ListState::new(rows.len(), ListAlignment::Top, px(2000.));
-                    tab.hex_rows = Some(Arc::new(rows));
+                    let symbols: Arc<glass_arch_arm::SymbolMap> = Arc::new(
+                        bundle.symbol_maps.get(artifact).cloned().unwrap_or(empty),
+                    );
+                    let paged = Arc::new(crate::paged_hex::PagedHex::new(
+                        data,
+                        symbols,
+                        crate::paged_hex::DEFAULT_MAX_PAGES,
+                    ));
+                    tab.scroll = ListState::new(
+                        paged.total_rows() as usize,
+                        ListAlignment::Top,
+                        px(2000.),
+                    );
+                    tab.hex_paged = Some(paged);
                 }
                 // Pending scroll-to address — typically from a palette
                 // search hit ("string" in rodata, etc.) or a follow
@@ -1063,8 +1072,9 @@ impl Shell {
                 // context above the target. Peeking + retrying on the
                 // next paint, then taking, fixes both.
                 if let Some(addr) = tab.pending_scroll_addr {
-                    if let Some(rows) = tab.hex_rows.as_ref() {
-                        if let Some(idx) = hex_row_for_addr(rows.as_ref(), addr) {
+                    if let Some(paged) = tab.hex_paged.as_ref() {
+                        if let Some(idx) = paged.row_for_addr(addr) {
+                            let idx = idx as usize;
                             let viewport_ready =
                                 tab.scroll.viewport_bounds().size.height > px(0.);
                             scroll_into_view_with_context(&tab.scroll, idx);

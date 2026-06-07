@@ -168,12 +168,15 @@ fn format_bytes_for_copy(bytes: &[u8; 4], len: u8) -> String {
 }
 
 fn copy_hex(tab: &crate::Tab) -> Option<String> {
-    let rows = tab.hex_rows.as_ref()?;
+    let paged = tab.hex_paged.as_ref()?;
     // Prefer single-byte selection when set; fall back to the full
-    // row at `selected_row`.
+    // row at `selected_row`. Both paths materialise the containing
+    // page synchronously — copy is a user-initiated, infrequent
+    // operation so a single page-build (a few ms) is acceptable.
     if let Some(byte_addr) = tab.selected_byte_addr {
-        let row_idx = crate::hex::hex_row_for_addr(rows, byte_addr)?;
-        if let HexRow::Bytes { address, bytes } = rows.get(row_idx)? {
+        let row_idx = paged.row_for_addr(byte_addr)?;
+        let (page, off) = paged.page_for_row_blocking(row_idx)?;
+        if let HexRow::Bytes { address, bytes } = page.get(off)? {
             let offset = byte_addr.checked_sub(*address)? as usize;
             let byte = *bytes.get(offset)?;
             return Some(format!("0x{byte_addr:08x}: {byte:02x}"));
@@ -181,7 +184,8 @@ fn copy_hex(tab: &crate::Tab) -> Option<String> {
         return None;
     }
     let row_idx = tab.selected_row?;
-    match rows.get(row_idx)? {
+    let (page, off) = paged.page_for_row_blocking(row_idx as u32)?;
+    match page.get(off)? {
         HexRow::Bytes { address, bytes } => {
             let mut s = format!("0x{address:08x}:");
             for b in bytes {
