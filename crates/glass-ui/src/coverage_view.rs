@@ -214,6 +214,9 @@ struct ScreenTile {
 pub struct MosaicLayout {
     /// Function tiles for native islands. DEX islands don't
     /// appear here — their content lives in `dex_content`.
+    /// Ordered by island (parallel to `native_tile_ranges`) so
+    /// the renderer can fetch one island's tiles by slice
+    /// without scanning.
     pub tiles: Vec<WorldTile>,
     pub islands: Vec<Island>,
     /// Per-island DEX content. Parallel to `islands` — index N
@@ -221,6 +224,14 @@ pub struct MosaicLayout {
     /// islands. Defaults populated for all entries so callers
     /// can index without checking length.
     pub dex_content: Vec<Option<DexContent>>,
+    /// Per-island slice of `tiles` for native islands. Index N
+    /// here matches island N: `Some((start, end))` for native
+    /// islands, `None` for DEX. The renderer iterates this per-
+    /// island so it can apply a level-of-detail cull *before*
+    /// emitting any per-tile `div`. Without it, large libraries
+    /// emit 100k+ quads per frame just to render symbols that
+    /// project to sub-pixel size.
+    pub native_tile_ranges: Vec<Option<(u32, u32)>>,
     pub world_w: f32,
     pub world_h: f32,
     /// The ABI we chose to render for the native islands.
@@ -367,6 +378,7 @@ impl MosaicLayout {
             tiles: Vec::new(),
             islands: Vec::new(),
             dex_content: Vec::new(),
+            native_tile_ranges: Vec::new(),
             world_w: 0.,
             world_h: 0.,
             chosen_abi: None,
@@ -685,6 +697,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
     let mut all_tiles: Vec<WorldTile> = Vec::new();
     let mut islands: Vec<Island> = Vec::new();
     let mut dex_content: Vec<Option<DexContent>> = Vec::new();
+    let mut native_tile_ranges: Vec<Option<(u32, u32)>> = Vec::new();
     for (i, (orig_idx, _area)) in outer_inputs.iter().enumerate() {
         let r_raw = &outer_rects[i];
         // Inset the island's bounding rect for the gutter.
@@ -707,11 +720,13 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
             OuterCandidate::Native(aid, label, kind) => {
                 let inner_tiles =
                     build_artifact_tiles(bundle, aid, inner_w, inner_h);
+                let start = all_tiles.len() as u32;
                 for mut t in inner_tiles {
                     t.wx += inner_x as f32;
                     t.wy += inner_y as f32;
                     all_tiles.push(t);
                 }
+                let end = all_tiles.len() as u32;
                 islands.push(Island {
                     artifact: aid.clone(),
                     label: label.clone(),
@@ -723,6 +738,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     header_h: header_h_world as f32,
                 });
                 dex_content.push(None);
+                native_tile_ranges.push(Some((start, end)));
             }
             OuterCandidate::Dex(aid, label) => {
                 let classes =
@@ -745,6 +761,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
                     header_h: header_h_world as f32,
                 });
                 dex_content.push(Some(DexContent { packages }));
+                native_tile_ranges.push(None);
             }
         }
     }
@@ -753,6 +770,7 @@ pub fn build_mosaic_global(bundle: &LoadedBundle) -> MosaicLayout {
         tiles: all_tiles,
         islands,
         dex_content,
+        native_tile_ranges,
         world_w: outer_world_w as f32,
         world_h: outer_world_h as f32,
         chosen_abi,
@@ -1684,89 +1702,123 @@ fn render_canvas(
         }
     }
 
-    // Tile layer.
+    // Tile layer. Iterate islands (not the flat tile vec) so we
+    // can apply a per-island level-of-detail cull before
+    // emitting any per-tile div. Two thresholds:
+    //
+    //   * `ISLAND_TILE_LOD_PX`: the island's smaller projected
+    //     dimension. Below this the island's individual symbols
+    //     would average <4px on screen — well below readable —
+    //     so we skip the tile loop entirely. The island bg
+    //     already drawn in `island_layer` conveys "code lives
+    //     here" without 5000 per-symbol quads. This is the
+    //     headline LoD win: a single artifact with 50k symbols
+    //     drops from 50k quads to 0 in this mode.
+    //   * `TILE_CHROME_MIN_PX`: per-tile threshold below which
+    //     we drop the border + click handler. Border is a
+    //     separate quad in gpui and click handlers each carry a
+    //     closure; both are wasted detail when a tile is too
+    //     small to read or accurately click. Secondary win.
+    const ISLAND_TILE_LOD_PX: f32 = 80.0;
+    const TILE_CHROME_MIN_PX: f32 = 6.0;
     let mut tile_layer = div().absolute().top_0().left_0().size_full();
-    let mut visible = 0usize;
-    for world in &layout.tiles {
-        let Some(s) = project_tile(world, &camera) else {
+    for (idx, range_opt) in layout.native_tile_ranges.iter().enumerate() {
+        let Some(&(start, end)) = range_opt.as_ref() else { continue };
+        let Some(isl) = layout.islands.get(idx) else { continue };
+        let Some(isl_screen) =
+            project_rect(isl.wx, isl.wy, isl.ww, isl.wh, &camera)
+        else {
             continue;
         };
-        visible += 1;
-        // Skip sub-pixel tiles entirely — they'd render as
-        // invisible smudges and burn the layout cost.
-        if s.w < 0.5 || s.h < 0.5 {
+        if isl_screen.w < ISLAND_TILE_LOD_PX
+            || isl_screen.h < ISLAND_TILE_LOD_PX
+        {
+            // Island too small to show per-symbol detail — the
+            // island background + header already drawn above is
+            // the LoD-out summary.
             continue;
         }
-        // Tiles carry the island's kind tint normally; when
-        // a recording is loaded, native tiles swap to the
-        // hot/cold ramp keyed by (artifact, addr). DEX tiles
-        // can't be coloured this way (Stalker doesn't see
-        // DEX) and keep their tint regardless.
-        let bg = match &recording {
-            Some(r) => {
-                let hits = r
-                    .fn_hits
-                    .get(&(s.artifact.clone(), s.symbol_addr))
-                    .copied();
-                tile_colour(hits, r.max_hits)
+        for world in &layout.tiles[start as usize..end as usize] {
+            let Some(s) = project_tile(world, &camera) else {
+                continue;
+            };
+            if s.w < 0.5 || s.h < 0.5 {
+                continue;
             }
-            None => ISLAND_BG_NATIVE,
-        };
-        let label = if s.w >= 60. && s.h >= 14. {
-            Some(s.display_name.clone())
-        } else {
-            None
-        };
-        let artifact_click = s.artifact.clone();
-        let section_click = s.section.clone();
-        let addr_click = s.symbol_addr;
-        let mut t = div()
-            .absolute()
-            .left(px(s.x))
-            .top(px(s.y))
-            .w(px(s.w.max(1.0)))
-            .h(px(s.h.max(1.0)))
-            .bg(rgb(bg))
-            .border_1()
-            .border_color(border)
-            .cursor_pointer()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
-                    let new_tab = ev.modifiers.shift;
-                    if new_tab {
-                        this.open_listing_force_new_tab(
-                            artifact_click.clone(),
-                            section_click.clone(),
-                            addr_click,
-                            cx,
-                        );
-                    } else {
-                        this.open_listing_at(
-                            artifact_click.clone(),
-                            section_click.clone(),
-                            addr_click,
-                            cx,
-                        );
-                    }
-                    // Don't bubble to the background drag handler.
-                    cx.stop_propagation();
-                }),
-            );
-        if let Some(text) = label {
-            t = t.child(
-                div()
-                    .px_1()
-                    .text_xs()
-                    .text_color(rgb(0xffffff))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(text),
-            );
+            let bg = match &recording {
+                Some(r) => {
+                    let hits = r
+                        .fn_hits
+                        .get(&(s.artifact.clone(), s.symbol_addr))
+                        .copied();
+                    tile_colour(hits, r.max_hits)
+                }
+                None => ISLAND_BG_NATIVE,
+            };
+            let want_chrome =
+                s.w >= TILE_CHROME_MIN_PX && s.h >= TILE_CHROME_MIN_PX;
+            let label = if s.w >= 60. && s.h >= 14. {
+                Some(s.display_name.clone())
+            } else {
+                None
+            };
+            let mut t = div()
+                .absolute()
+                .left(px(s.x))
+                .top(px(s.y))
+                .w(px(s.w.max(1.0)))
+                .h(px(s.h.max(1.0)))
+                .bg(rgb(bg));
+            if want_chrome {
+                let artifact_click = s.artifact.clone();
+                let section_click = s.section.clone();
+                let addr_click = s.symbol_addr;
+                t = t
+                    .border_1()
+                    .border_color(border)
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(
+                            move |this,
+                                  ev: &gpui::MouseDownEvent,
+                                  _w,
+                                  cx| {
+                                let new_tab = ev.modifiers.shift;
+                                if new_tab {
+                                    this.open_listing_force_new_tab(
+                                        artifact_click.clone(),
+                                        section_click.clone(),
+                                        addr_click,
+                                        cx,
+                                    );
+                                } else {
+                                    this.open_listing_at(
+                                        artifact_click.clone(),
+                                        section_click.clone(),
+                                        addr_click,
+                                        cx,
+                                    );
+                                }
+                                cx.stop_propagation();
+                            },
+                        ),
+                    );
+            }
+            if let Some(text) = label {
+                t = t.child(
+                    div()
+                        .px_1()
+                        .text_xs()
+                        .text_color(rgb(0xffffff))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(text),
+                );
+            }
+            tile_layer = tile_layer.child(t);
         }
-        tile_layer = tile_layer.child(t);
     }
-    let _ = visible;
 
     // DEX content layer. For each DEX island, render its
     // packages — and within each package, either the
