@@ -1,4 +1,4 @@
-name: Build Glass for Android ARMv7 (cross)
+name: Build Glass for Android with trash patch
 
 on:
   workflow_dispatch:
@@ -9,6 +9,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Patch Cargo.toml - use trash 3.x instead of git
+        run: |
+          # حذف خطوط مربوط به trash git و جایگزینی با نسخه crates.io
+          sed -i '/trash = { git = /d' Cargo.toml
+          # اضافه کردن وابستگی جدید به trash = "3"
+          echo "trash = \"3\"" >> Cargo.toml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-linux-androideabi
+
       - name: Install cross
         run: cargo install cross
 
@@ -18,5 +30,5 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: glass-armv7
+          name: glass-armv7-patched
           path: target/armv7-linux-androideabi/release/glass
