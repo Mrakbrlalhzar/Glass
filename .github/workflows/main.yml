@@ -1,4 +1,4 @@
-name: Build Glass for Android (fixed trash)
+name: Build Glass for Android ARMv7 (force trash 3)
 
 on:
   workflow_dispatch:
@@ -9,13 +9,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Remove git trash and add versioned trash
+      - name: Fix Cargo.toml and remove git trash
         run: |
-          # حذف هر خطی که شامل 'trash' و 'git' است
+          # حذف Cargo.lock برای جلوگیری از لاک شدن وابستگی
+          rm -f Cargo.lock
+          
+          # حذف کامل هر خطی که trash با git دارد (حتی اگر چند خط باشد)
           sed -i '/trash.*git/d' Cargo.toml
-          # اضافه کردن وابستگی نسخه‌دار در انتهای فایل
-          echo -e "\ntrash = \"3\"" >> Cargo.toml
-          # نمایش فایل برای اطمینان
+          
+          # حذف هر خطی که trash = { git = ... } باشد
+          sed -i '/trash = { git/d' Cargo.toml
+          
+          # اضافه کردن نسخه crates.io (نسخه 3.5.0 که پایدار است)
+          if ! grep -q "^trash =" Cargo.toml; then
+            echo 'trash = "3.5.0"' >> Cargo.toml
+          fi
+          
+          # نمایش فایل برای اشکال‌زدایی
           cat Cargo.toml
 
       - name: Setup Rust
@@ -23,8 +33,13 @@ jobs:
         with:
           targets: armv7-linux-androideabi
 
-      - name: Install cross
-        run: cargo install cross
+      - name: Install cross and cargo-edit (optional)
+        run: |
+          cargo install cross
+          cargo install cargo-edit
+
+      - name: Update dependencies
+        run: cargo update
 
       - name: Build with cross
         run: cross build --target armv7-linux-androideabi --release
