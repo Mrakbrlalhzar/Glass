@@ -1,4 +1,4 @@
-name: Build Glass for Android (ARMv7)
+name: Build Glass for Android ARMv7 (cross)
 
 on:
   workflow_dispatch:
@@ -9,22 +9,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: armv7-linux-androideabi
+      - name: Install cross
+        run: cargo install cross
 
-      - name: Install NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26d
-          add-to-path: true
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
-
-      - name: Build for armv7
-        run: cargo ndk --target armv7-linux-androideabi --platform 21 build --release
+      - name: Build with cross
+        run: cross build --target armv7-linux-androideabi --release
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
