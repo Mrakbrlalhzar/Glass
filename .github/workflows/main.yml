@@ -11,22 +11,27 @@ jobs:
 
       - name: Fix Cargo.toml and remove git trash
         run: |
-          # حذف Cargo.lock برای جلوگیری از لاک شدن وابستگی
+          # Remove Cargo.lock to prevent dependency locking
           rm -f Cargo.lock
           
-          # حذف کامل هر خطی که trash با git دارد (حتی اگر چند خط باشد)
+          # Remove all trash git dependencies from workspace root
           sed -i '/trash.*git/d' Cargo.toml
-          
-          # حذف هر خطی که trash = { git = ... } باشد
           sed -i '/trash = { git/d' Cargo.toml
           
-          # اضافه کردن نسخه crates.io (نسخه 3.5.0 که پایدار است)
+          # Add stable trash version if not present
           if ! grep -q "^trash =" Cargo.toml; then
             echo 'trash = "3.5.0"' >> Cargo.toml
           fi
           
-          # نمایش فایل برای اشکال‌زدایی
+          # Also fix any crate-level Cargo.toml files that may have trash dependencies
+          find crates -name "Cargo.toml" -exec sed -i '/trash.*git/d' {} \;
+          find crates -name "Cargo.toml" -exec sed -i '/trash = { git/d' {} \;
+          
+          # Display for debugging
+          echo "=== Root Cargo.toml ===" 
           cat Cargo.toml
+          echo "=== Crate dependencies ===" 
+          find crates -name "Cargo.toml" -exec echo "File: {}" \; -exec grep -A2 "trash" {} \;
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
